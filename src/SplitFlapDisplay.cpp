@@ -160,45 +160,172 @@ void SplitFlapDisplay::writeChar(char inputChar, float speed) {
     moveTo(targetPositions, speed);
 }
 
-void SplitFlapDisplay::writeString(String inputString, float speed, bool centering) {
-    String displayString = inputString.substring(0, numModules);
+void SplitFlapDisplay::writeString(
+    String inputString, float speed, bool centering, unsigned long scrollDelayMs
+) {
+    // Short path: fits in one frame — behave exactly as before.
+    if (inputString.length() <= numModules) {
+        displayChunk(inputString, speed, centering);
+        if (mqtt && mqtt->isConnected()) {
+            mqtt->publishState(inputString);
+        }
+        return;
+    }
+
+    // Long path: split into word-respecting chunks and display sequentially.
+    String chunks[MAX_MODULES * 4]; // generous upper bound for very long input
+    int chunkCount = 0;
+    splitIntoChunks(inputString, chunks, MAX_MODULES * 4, chunkCount);
+
+    Serial.printf(
+        "[scroll] input=%d chars, numModules=%d, chunks=%d\n",
+        inputString.length(), numModules, chunkCount
+    );
+
+    for (int i = 0; i < chunkCount; i++) {
+        displayChunk(chunks[i], speed, centering);
+        if (i < chunkCount - 1) {
+            delay(scrollDelayMs);
+        }
+    }
+
+    if (mqtt && mqtt->isConnected()) {
+        // Publish the original input so consumers see the full message, not
+        // just the final chunk on the display.
+        mqtt->publishState(inputString);
+    }
+}
+
+void SplitFlapDisplay::displayChunk(const String &chunk, float speed, bool centering) {
+    String displayString = chunk; // already <= numModules by construction
 
     if (centering) {
         int totalPadding = numModules - displayString.length();
         int paddingLeft = totalPadding / 2;
         int paddingRight = totalPadding - paddingLeft;
 
-        // Add padding to the left
         String result = "";
         for (int i = 0; i < paddingLeft; i++) {
             result += " ";
         }
-
-        // Add the original string
         result += displayString;
-
-        // Add padding to the right
         for (int i = 0; i < paddingRight; i++) {
             result += " ";
         }
         displayString = result;
     } else {                                          // pad blanks to end, if no centering
         while (displayString.length() < numModules) { // Pad with spaces
-            displayString += " ";                     // Padding with space
+            displayString += " ";
         }
     }
 
     int targetPositions[numModules];
-    // Iterate through the input string and process each character
     for (int i = 0; i < displayString.length(); i++) {
         char currentChar = displayString[i];
-        // Serial.println(currentChar);
         targetPositions[i] = modules[i].getCharPosition(currentChar);
     }
     moveTo(targetPositions, speed);
+}
 
-    if (mqtt && mqtt->isConnected()) {
-        mqtt->publishState(displayString);
+void SplitFlapDisplay::splitIntoChunks(
+    const String &input, String chunks[], int maxChunks, int &outCount
+) {
+    outCount = 0;
+
+    // Normalize: collapse internal whitespace to single spaces and trim ends.
+    // Without this, runs of spaces create invisible word boundaries and we
+    // produce empty-looking chunks.
+    String s = "";
+    bool lastWasSpace = true; // leading whitespace treated like a space
+    for (unsigned int i = 0; i < input.length(); i++) {
+        char c = input[i];
+        bool isSpace = (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+        if (isSpace) {
+            if (! lastWasSpace) {
+                s += ' ';
+                lastWasSpace = true;
+            }
+        } else {
+            s += c;
+            lastWasSpace = false;
+        }
+    }
+    while (s.length() > 0 && s[s.length() - 1] == ' ') {
+        s.remove(s.length() - 1);
+    }
+
+    if (s.length() == 0) {
+        chunks[0] = "";
+        outCount = 1;
+        return;
+    }
+
+    // Greedy word-pack: walk words, append to current chunk while it fits.
+    // Word boundaries only — never split a word that can fit on its own.
+    // Oversized words (longer than numModules) are split mid-word, which is
+    // the only feasible option since they physically can't be displayed whole.
+    // The tail of an oversized split is left in `current` so subsequent
+    // words can pack with it.
+    String current = "";
+    int idx = 0;
+    while (idx < (int) s.length() && outCount < maxChunks) {
+        // Skip leading spaces to find the next word.
+        int wordStart = idx;
+        while (wordStart < (int) s.length() && s[wordStart] == ' ') {
+            wordStart++;
+        }
+        if (wordStart >= (int) s.length()) {
+            break;
+        }
+        int wordEnd = wordStart;
+        while (wordEnd < (int) s.length() && s[wordEnd] != ' ') {
+            wordEnd++;
+        }
+        int wordLen = wordEnd - wordStart;
+
+        int neededSep = (current.length() > 0) ? 1 : 0;
+        int wouldNeed = (int) current.length() + neededSep + wordLen;
+
+        if (wouldNeed <= numModules) {
+            // Word fits (with separator if `current` already has content).
+            if (neededSep) {
+                current += ' ';
+            }
+            current += s.substring(wordStart, wordEnd);
+            idx = wordEnd; // consume the word
+        } else if (current.length() > 0) {
+            // Word doesn't fit alongside what's in `current`. Flush `current`
+            // (right-padded to numModules) and retry this word in a fresh
+            // chunk by rewinding idx back to wordStart.
+            while ((int) current.length() < numModules) {
+                current += ' ';
+            }
+            chunks[outCount++] = current;
+            current = "";
+            idx = wordStart;
+        } else {
+            // `current` is empty and the single word is still too big.
+            // Oversized-word edge case: split mid-word into numModules-sized
+            // pieces. Emit full-size pieces, then leave the remainder as
+            // the start of `current` so following words can pack with it.
+            int remaining = wordLen;
+            int pos = wordStart;
+            while (remaining > numModules && outCount < maxChunks) {
+                chunks[outCount++] = s.substring(pos, pos + numModules);
+                pos += numModules;
+                remaining -= numModules;
+            }
+            current = s.substring(pos, pos + remaining);
+            idx = wordEnd; // past the oversized word
+        }
+    }
+
+    // Flush final chunk.
+    if (current.length() > 0 && outCount < maxChunks) {
+        while ((int) current.length() < numModules) {
+            current += ' ';
+        }
+        chunks[outCount++] = current;
     }
 }
 

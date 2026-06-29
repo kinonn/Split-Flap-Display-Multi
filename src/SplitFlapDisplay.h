@@ -7,6 +7,7 @@
 
 #define MAX_MODULES 8 // for memory allocation, update if more modules
 #define MAX_RPM 15.0f
+#define DEFAULT_SCROLL_DELAY_MS 1500 // pause between chunks when scrolling
 
 class SplitFlapMqtt;
 
@@ -16,9 +17,10 @@ class SplitFlapDisplay {
 
     void init();
     void writeString(
-        String inputString, float speed = MAX_RPM,
-        bool centering = true
-    );                                     // Move all modules at once to show a specific string
+        String inputString, float speed = MAX_RPM, bool centering = true,
+        unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS
+    ); // Move all modules at once to show a specific string. If longer than
+       // numModules, splits on word boundaries and shows chunks sequentially.
     void writeChar(char inputChar,
                    float speed = MAX_RPM); // sets all modules to a single char
     void moveTo(int targetPositions[], float speed = MAX_RPM, bool releaseMotors = true);
@@ -42,6 +44,19 @@ class SplitFlapDisplay {
     bool checkAllFalse(bool array[], int size);
     void stopMotors();
     void startMotors();
+
+    // Split a string into chunks of <= numModules chars, breaking only at word
+    // boundaries. A word longer than numModules is split mid-word (no other
+    // option — it physically can't fit whole).
+    void splitIntoChunks(
+        const String &input, String chunks[], int maxChunks, int &outCount
+    );
+
+    // Display one already-sized chunk using the same center/pad logic as
+    // writeString, but without truncation (chunk is already <= numModules).
+    void displayChunk(
+        const String &chunk, float speed = MAX_RPM, bool centering = true
+    );
 
     int numModules;
     uint8_t moduleAddresses[MAX_MODULES];
