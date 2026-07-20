@@ -106,7 +106,7 @@ document.addEventListener("alpine:init", () => {
 
         get charsetChars() {
             const standard = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-            const extended = standard + "'?:!.-/$@#%";
+            const extended = standard + "':?!.-/$@#%";
             return (this.settings.charset || 48) === 48 ? extended : standard;
         },
 
