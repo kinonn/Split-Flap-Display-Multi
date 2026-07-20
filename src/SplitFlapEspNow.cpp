@@ -83,7 +83,7 @@ bool SplitFlapEspNow::ensureInitialized() {
 
 void SplitFlapEspNow::distributeMessage(
     const String &message, bool centering, unsigned long scrollDelayMs,
-    int scrollRepeatCount
+    int scrollRepeatCount, bool publishState
 ) {
     if (! ensureInitialized()) {
         return;
@@ -92,7 +92,7 @@ void SplitFlapEspNow::distributeMessage(
     int totalModuleCount = getTotalModuleCount();
 
     if (message.length() <= totalModuleCount) {
-        distributeFrame(buildFrame(message, totalModuleCount, centering));
+        distributeFrame(buildFrame(message, totalModuleCount, centering), publishState);
         return;
     }
 
@@ -111,7 +111,7 @@ void SplitFlapEspNow::distributeMessage(
 
     for (int r = 0; r < repeats; r++) {
         for (int i = 0; i < chunkCount; i++) {
-            distributeFrame(chunks[i]);
+            distributeFrame(chunks[i], publishState);
             if (i < chunkCount - 1 || r < repeats - 1) {
                 delay(scrollDelayMs);
             }
@@ -210,7 +210,7 @@ String SplitFlapEspNow::buildFrame(const String &message, int width, bool center
     return frame;
 }
 
-void SplitFlapEspNow::distributeFrame(const String &frame) {
+void SplitFlapEspNow::distributeFrame(const String &frame, bool publishState) {
     int groupCount = getGroupCount();
     int offset = 0;
 
@@ -232,7 +232,7 @@ void SplitFlapEspNow::distributeFrame(const String &frame) {
         localText.c_str(), localModuleCount);
     display.writeString(
         localText, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS,
-        DEFAULT_SCROLL_REPEAT_COUNT, false
+        DEFAULT_SCROLL_REPEAT_COUNT, publishState
     );
 }
 

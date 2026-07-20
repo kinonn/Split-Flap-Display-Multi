@@ -30,8 +30,10 @@ class SplitFlapEspNow {
     void distributeMessage(
         const String &message, bool centering = true,
         unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
-        int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT
+        int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT,
+        bool publishState = true
     );
+    void distributeFrame(const String &frame, bool publishState);
 
   private:
     JsonSettings &settings;
@@ -50,7 +52,6 @@ class SplitFlapEspNow {
     String getCsvToken(const String &csv, int index);
     String sliceMessage(const String &message, int start, int width);
     String buildFrame(const String &message, int width, bool centering);
-    void distributeFrame(const String &frame);
     void splitIntoChunks(
         const String &input, int width, String chunks[], int maxChunks,
         int &outCount
