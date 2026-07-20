@@ -32,10 +32,12 @@ class SplitFlapEspNow {
         unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
         int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT
     );
+    void setMqtt(class SplitFlapMqtt *mqtt);
 
   private:
     JsonSettings &settings;
     SplitFlapDisplay &display;
+    SplitFlapMqtt *mqtt = nullptr;
 
     volatile bool pendingMessage;
     SplitFlapEspNowMessage pendingPacket;

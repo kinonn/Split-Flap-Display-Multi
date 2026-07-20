@@ -81,6 +81,10 @@ bool SplitFlapEspNow::ensureInitialized() {
     return init();
 }
 
+void SplitFlapEspNow::setMqtt(SplitFlapMqtt *m) {
+    mqtt = m;
+}
+
 void SplitFlapEspNow::distributeMessage(
     const String &message, bool centering, unsigned long scrollDelayMs,
     int scrollRepeatCount
@@ -93,29 +97,37 @@ void SplitFlapEspNow::distributeMessage(
 
     if (message.length() <= totalModuleCount) {
         distributeFrame(buildFrame(message, totalModuleCount, centering));
-        return;
-    }
+    } else {
+        int repeats = constrain(
+            scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
+        );
+        const int maxChunks = MAX_DISPLAY_GROUPS * MAX_MODULES * 4;
+        String chunks[maxChunks];
+        int chunkCount = 0;
+        splitIntoChunks(message, totalModuleCount, chunks, maxChunks, chunkCount);
 
-    int repeats = constrain(
-        scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
-    );
-    const int maxChunks = MAX_DISPLAY_GROUPS * MAX_MODULES * 4;
-    String chunks[maxChunks];
-    int chunkCount = 0;
-    splitIntoChunks(message, totalModuleCount, chunks, maxChunks, chunkCount);
+        Serial.printf(
+            "[esp-now scroll] input=%d chars, totalModules=%d, chunks=%d, repeats=%d\n",
+            message.length(), totalModuleCount, chunkCount, repeats
+        );
 
-    Serial.printf(
-        "[esp-now scroll] input=%d chars, totalModules=%d, chunks=%d, repeats=%d\n",
-        message.length(), totalModuleCount, chunkCount, repeats
-    );
-
-    for (int r = 0; r < repeats; r++) {
-        for (int i = 0; i < chunkCount; i++) {
-            distributeFrame(chunks[i]);
-            if (i < chunkCount - 1 || r < repeats - 1) {
-                delay(scrollDelayMs);
+        for (int r = 0; r < repeats; r++) {
+            for (int i = 0; i < chunkCount; i++) {
+                distributeFrame(chunks[i]);
+                if (i < chunkCount - 1 || r < repeats - 1) {
+                    delay(scrollDelayMs);
+                }
             }
         }
+    }
+
+    // Publish the FULL original message to the MQTT state topic so external
+    // consumers see what was actually requested, not just the local group's
+    // slice. Without this, multi-group mode never updates
+    // splitflap/{mdns}/state, breaking capture-before-overwrite patterns
+    // and HA integrations that read display state.
+    if (mqtt && mqtt->isConnected()) {
+        mqtt->publishState(message);
     }
 }
 

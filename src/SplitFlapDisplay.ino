@@ -138,6 +138,7 @@ void setup() {
         splitflapMqtt.setup();
         splitflapMqtt.setDisplay(&display);
         splitflapMqtt.setEspNow(getSplitFlapEspNow());
+        getSplitFlapEspNow()->setMqtt(&splitflapMqtt);
         display.setMqtt(&splitflapMqtt);
         Serial.println("[boot] mqtt setup complete");
         Serial.flush();
