@@ -36,6 +36,13 @@ void SplitFlapMqtt::setup() {
                     settings.getInt("scrollDelayMs"),
                     settings.getInt("scrollRepeatCount")
                 );
+                // Single-group mode publishes the full message via
+                // display->writeString() (publishState defaults to true). In
+                // multi-group mode, writeString is not called, so publish the
+                // state here with the original message (not a per-group slice).
+                if (mqttClient.connected()) {
+                    publishState(message);
+                }
             } else {
                 Serial.println("[MQTT] Displaying message locally on Group 1");
                 display->writeString(message, maxVel, false);
