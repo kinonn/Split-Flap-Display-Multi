@@ -173,6 +173,10 @@
                 class="p-3 mt-4 text-lg font-semibold text-white hover:text-amber-600 text-center block transition-colors"
                 >Settings</a
             >
+            <div class="w-full text-left text-sm text-gray-400 mt-2">
+                <span class="font-semibold">Device MAC:</span>
+                <span x-text="localMac || 'Unavailable'"></span>
+            </div>
         </div>
         <div
             class="fixed top-4 left-1/2 transform -translate-x-1/2 p-4 text-white rounded-md transition duration-300"
