@@ -657,7 +657,10 @@
                                         </button>
                                         <input
                                             type="number"
-                                            class="no-buttons w-12 p-1 text-xs border border-gray-600 rounded text-center bg-neutral-700 text-gray-100"
+                                            class="no-buttons w-12 p-1 text-xs border border-gray-600 rounded text-center"
+                                            :class="getCharOffset(modIdx, charIdx) === 0
+                                                ? 'bg-neutral-900 text-gray-600'
+                                                : 'bg-neutral-700 text-gray-100 border-amber-500'"
                                             :value="getCharOffset(modIdx, charIdx)"
                                             @input="setCharOffset(modIdx, charIdx, $event.target.value)"
                                         />
