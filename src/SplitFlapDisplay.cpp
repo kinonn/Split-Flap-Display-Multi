@@ -4,7 +4,11 @@
 #include "SplitFlapModule.h"
 #include "SplitFlapMqtt.h"
 
-SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings) {}
+SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings) {
+    for (int i = 0; i < MAX_MODULES; i++) {
+        lastDisplayedChar[i] = ' ';
+    }
+}
 
 void SplitFlapDisplay::init() {
     numModules = constrain(settings.getInt("moduleCount"), 1, MAX_MODULES);
@@ -57,8 +61,18 @@ void SplitFlapDisplay::init() {
 }
 
 void SplitFlapDisplay::reloadOffsets() {
+    int oldDisplayOffset = displayOffset;
+    int oldModuleOffsets[MAX_MODULES];
+    int oldCharOffsets[MAX_MODULES][48];
+    for (int i = 0; i < numModules; i++) {
+        oldModuleOffsets[i] = moduleOffsets[i];
+        for (int j = 0; j < 48; j++) {
+            oldCharOffsets[i][j] = charOffsets[i][j];
+        }
+    }
+
     displayOffset = settings.getInt("displayOffset");
-    
+
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
     for (int i = 0; i < numModules; i++) {
         moduleOffsets[i] = settingOffsets[i];
@@ -72,10 +86,63 @@ void SplitFlapDisplay::reloadOffsets() {
         }
     }
 
+    bool affected[MAX_MODULES] = {};
+    bool anyAffected = false;
+
+    if (oldDisplayOffset != displayOffset) {
+        for (int i = 0; i < numModules; i++) {
+            affected[i] = true;
+        }
+        anyAffected = true;
+    } else {
+        for (int i = 0; i < numModules; i++) {
+            bool moduleChanged = (oldModuleOffsets[i] != moduleOffsets[i]);
+            if (! moduleChanged) {
+                for (int j = 0; j < 48; j++) {
+                    if (oldCharOffsets[i][j] != charOffsets[i][j]) {
+                        moduleChanged = true;
+                        break;
+                    }
+                }
+            }
+            affected[i] = moduleChanged;
+            if (moduleChanged) {
+                anyAffected = true;
+            }
+        }
+    }
+
     for (uint8_t i = 0; i < numModules; i++) {
         int newMagnetOffset = magnetPosition + moduleOffsets[i] + displayOffset;
         modules[i].updateOffsets(charOffsets[i], newMagnetOffset);
     }
+
+    if (anyAffected) {
+        homeAffectedModules(affected);
+    }
+}
+
+void SplitFlapDisplay::homeAffectedModules(bool affected[], float speed) {
+    Serial.println("Homing affected modules");
+    int targetPositions[numModules];
+    for (int i = 0; i < numModules; i++) {
+        if (affected[i]) {
+            targetPositions[i] = (modules[i].getPosition() - 1 + stepsPerRot) % stepsPerRot;
+        } else {
+            targetPositions[i] = modules[i].getPosition();
+        }
+    }
+    startMotors();
+    moveTo(targetPositions, speed, false);
+
+    for (int i = 0; i < numModules; i++) {
+        if (affected[i]) {
+            targetPositions[i] = modules[i].getCharPosition(lastDisplayedChar[i]);
+        } else {
+            targetPositions[i] = modules[i].getPosition();
+        }
+    }
+    moveTo(targetPositions, speed);
 }
 
 void SplitFlapDisplay::testAll() {
@@ -151,6 +218,7 @@ void SplitFlapDisplay::home(float speed) {
     int charPosition;
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = modules[i].getCharPosition(homeChar);
+        lastDisplayedChar[i] = homeChar;
     }
     moveTo(targetPositions, speed);
 }
@@ -177,6 +245,7 @@ void SplitFlapDisplay::homeToChar(char homeChar, float speed) {
 
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = modules[i].getCharPosition(homeChar);
+        lastDisplayedChar[i] = homeChar;
     }
     moveTo(targetPositions, true, speed);
 }
@@ -186,6 +255,7 @@ void SplitFlapDisplay::writeChar(char inputChar, float speed) {
     // Iterate through the input string and process each character
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = modules[i].getCharPosition(inputChar);
+        lastDisplayedChar[i] = inputChar;
     }
     moveTo(targetPositions, speed);
 }
@@ -266,6 +336,7 @@ void SplitFlapDisplay::displayChunk(const String &chunk, float speed, bool cente
     for (int i = 0; i < displayString.length(); i++) {
         char currentChar = displayString[i];
         targetPositions[i] = modules[i].getCharPosition(currentChar);
+        lastDisplayedChar[i] = currentChar;
     }
     moveTo(targetPositions, speed);
 }
