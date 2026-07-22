@@ -20,6 +20,7 @@ class SplitFlapDisplay {
 
     void init();
     void reloadOffsets();
+    void homeAffectedModules(bool affected[], float speed = MAX_RPM);
     void writeString(
         String inputString, float speed = MAX_RPM, bool centering = true,
         unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
@@ -71,6 +72,9 @@ class SplitFlapDisplay {
     int moduleOffsets[MAX_MODULES];
     int charOffsets[MAX_MODULES][48];
     int displayOffset;
+    char lastDisplayedChar[MAX_MODULES]; // last char each module was asked to
+                                         // show; used by reloadOffsets to
+                                         // reposition after a home
 
     float maxVel;       // Max Velocity In RPM
     int charSetSize;    // 37 for standard, 48 for extended
