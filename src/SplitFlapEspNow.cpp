@@ -7,7 +7,10 @@
 SplitFlapEspNow *SplitFlapEspNow::instance = nullptr;
 
 SplitFlapEspNow::SplitFlapEspNow(JsonSettings &settings, SplitFlapDisplay &display)
-    : settings(settings), display(display), pendingMessage(false), lastRemoteText(""), initialized(false) {}
+    : settings(settings), display(display), pendingMessage(false), lastRemoteText(""), initialized(false),
+      discoveredCount(0), lastAnnounceMs(0), lastExpiryCheckMs(0) {
+    memset(discoveredPeers, 0, sizeof(discoveredPeers));
+}
 
 bool SplitFlapEspNow::init() {
     if (initialized) {
@@ -21,6 +24,17 @@ bool SplitFlapEspNow::init() {
 
     instance = this;
     esp_now_register_recv_cb(handleReceive);
+
+    uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    if (! esp_now_is_peer_exist(broadcastMac)) {
+        esp_now_peer_info_t broadcastPeer = {};
+        memcpy(broadcastPeer.peer_addr, broadcastMac, 6);
+        broadcastPeer.channel = 0;
+        broadcastPeer.encrypt = false;
+        broadcastPeer.ifidx = (WiFi.getMode() == WIFI_AP) ? WIFI_IF_AP : WIFI_IF_STA;
+        esp_now_add_peer(&broadcastPeer);
+    }
+
     initialized = true;
     Serial.println("[esp-now] initialized on " + WiFi.macAddress());
     return true;
@@ -35,7 +49,35 @@ void SplitFlapEspNow::reinit() {
 }
 
 void SplitFlapEspNow::loop() {
-    if (! initialized || ! pendingMessage) {
+    if (! initialized) {
+        return;
+    }
+
+    if (! isMasterEnabled()) {
+        unsigned long now = millis();
+        if (now - lastAnnounceMs >= 5000) {
+            broadcastAnnouncement();
+            lastAnnounceMs = now;
+        }
+    }
+
+    unsigned long now = millis();
+    if (now - lastExpiryCheckMs >= 10000) {
+        noInterrupts();
+        for (int i = 0; i < discoveredCount; i++) {
+            if (now - discoveredPeers[i].lastSeenMs > 30000) {
+                for (int j = i; j < discoveredCount - 1; j++) {
+                    discoveredPeers[j] = discoveredPeers[j + 1];
+                }
+                discoveredCount--;
+                i--;
+            }
+        }
+        interrupts();
+        lastExpiryCheckMs = now;
+    }
+
+    if (! pendingMessage) {
         return;
     }
 
@@ -67,6 +109,52 @@ void SplitFlapEspNow::loop() {
 
 bool SplitFlapEspNow::isMasterEnabled() {
     return getGroupCount() > 1;
+}
+
+int SplitFlapEspNow::getDiscoveredCount() {
+    return discoveredCount;
+}
+
+bool SplitFlapEspNow::isMacAssigned(const String &mac) {
+    String macs = settings.getString("masterGroupMacs");
+    String normalized = mac;
+    normalized.toUpperCase();
+    int groupCount = getGroupCount();
+    for (int i = 1; i < groupCount; i++) {
+        String groupMac = getCsvToken(macs, i);
+        String normalizedGroup = groupMac;
+        normalizedGroup.toUpperCase();
+        if (normalizedGroup == normalized) {
+            return true;
+        }
+    }
+    return false;
+}
+
+String SplitFlapEspNow::getDiscoveredPeersJson() {
+    DiscoveredPeer copy[MAX_DISPLAY_GROUPS];
+    int count;
+    noInterrupts();
+    count = discoveredCount;
+    memcpy(copy, discoveredPeers, sizeof(copy));
+    interrupts();
+
+    String json = "[";
+    for (int i = 0; i < count; i++) {
+        if (i > 0) json += ",";
+        String macStr = macToString(copy[i].mac);
+        json += "{\"mac\":\"";
+        json += macStr;
+        json += "\",\"moduleCount\":";
+        json += String(copy[i].moduleCount);
+        json += ",\"assigned\":";
+        json += isMacAssigned(macStr) ? "true" : "false";
+        json += ",\"lastSeen\":";
+        json += String(copy[i].lastSeenMs);
+        json += "}";
+    }
+    json += "]";
+    return json;
 }
 
 bool SplitFlapEspNow::ensureInitialized() {
@@ -395,7 +483,12 @@ bool SplitFlapEspNow::sendToPeer(int groupIndex, const String &text, int moduleC
     return true;
 }
 
-void SplitFlapEspNow::queueReceived(const uint8_t *data, int len) {
+void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int len) {
+    if (len == sizeof(SplitFlapAnnounceMessage) && data[0] == ESP_NOW_ANNOUNCE_VERSION) {
+        processAnnouncement(mac, (const SplitFlapAnnounceMessage *) data);
+        return;
+    }
+
     if (len != sizeof(SplitFlapEspNowMessage)) {
         Serial.printf("[esp-now] received invalid len=%d\n", len);
         return;
@@ -409,16 +502,68 @@ void SplitFlapEspNow::queueReceived(const uint8_t *data, int len) {
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void SplitFlapEspNow::handleReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-    (void) info;
-    if (instance) {
-        instance->queueReceived(data, len);
+    if (instance && info) {
+        instance->queueReceived(info->src_addr, data, len);
     }
 }
 #else
 void SplitFlapEspNow::handleReceive(const uint8_t *mac, const uint8_t *data, int len) {
-    (void) mac;
     if (instance) {
-        instance->queueReceived(data, len);
+        instance->queueReceived(mac, data, len);
     }
 }
 #endif
+
+void SplitFlapEspNow::broadcastAnnouncement() {
+    SplitFlapAnnounceMessage pkt = {};
+    pkt.version = ESP_NOW_ANNOUNCE_VERSION;
+    pkt.moduleCount = constrain(display.getNumModules(), 1, MAX_MODULES);
+
+    uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_err_t result = esp_now_send(broadcastMac, (const uint8_t *) &pkt, sizeof(pkt));
+    if (result == ESP_OK) {
+        Serial.printf("[esp-now] broadcast announce modules=%d\n", pkt.moduleCount);
+    } else {
+        Serial.println("[esp-now] broadcast announce failed");
+    }
+}
+
+void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnnounceMessage *pkt) {
+    if (! initialized) return;
+    if (pkt->version != ESP_NOW_ANNOUNCE_VERSION) return;
+    if (pkt->moduleCount < 1 || pkt->moduleCount > MAX_MODULES) return;
+
+    uint8_t ownMac[6];
+    WiFi.macAddress(ownMac);
+    if (memcmp(mac, ownMac, 6) == 0) return;
+
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    for (int i = 0; i < discoveredCount; i++) {
+        if (memcmp(discoveredPeers[i].mac, mac, 6) == 0) {
+            discoveredPeers[i].moduleCount = pkt->moduleCount;
+            discoveredPeers[i].lastSeenMs = millis();
+            Serial.printf("[esp-now] updated discovery %s modules=%d\n",
+                macStr, pkt->moduleCount);
+            return;
+        }
+    }
+
+    if (discoveredCount < MAX_DISPLAY_GROUPS) {
+        memcpy(discoveredPeers[discoveredCount].mac, mac, 6);
+        discoveredPeers[discoveredCount].moduleCount = pkt->moduleCount;
+        discoveredPeers[discoveredCount].lastSeenMs = millis();
+        discoveredCount++;
+        Serial.printf("[esp-now] new discovery %s modules=%d\n",
+            macStr, pkt->moduleCount);
+    }
+}
+
+String SplitFlapEspNow::macToString(const uint8_t mac[6]) {
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+}

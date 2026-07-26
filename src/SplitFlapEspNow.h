@@ -10,6 +10,7 @@
 #define MAX_DISPLAY_GROUPS 6
 #define ESP_NOW_REMOTE_MODE 7
 #define ESP_NOW_TEXT_VERSION 1
+#define ESP_NOW_ANNOUNCE_VERSION 0xFE
 
 struct SplitFlapEspNowMessage
 {
@@ -17,6 +18,19 @@ struct SplitFlapEspNowMessage
     uint8_t groupIndex;
     uint8_t moduleCount;
     char text[9];
+};
+
+struct SplitFlapAnnounceMessage
+{
+    uint8_t version;
+    uint8_t moduleCount;
+};
+
+struct DiscoveredPeer
+{
+    uint8_t mac[6];
+    uint8_t moduleCount;
+    unsigned long lastSeenMs;
 };
 
 class SplitFlapEspNow {
@@ -27,6 +41,9 @@ class SplitFlapEspNow {
     void reinit();
     void loop();
     bool isMasterEnabled();
+    int getDiscoveredCount();
+    String getDiscoveredPeersJson();
+    bool isMacAssigned(const String &mac);
     void distributeMessage(
         const String &message, bool centering = true,
         unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
@@ -41,6 +58,11 @@ class SplitFlapEspNow {
     SplitFlapEspNowMessage pendingPacket;
     String lastRemoteText;
     bool initialized;
+
+    DiscoveredPeer discoveredPeers[MAX_DISPLAY_GROUPS];
+    int discoveredCount;
+    unsigned long lastAnnounceMs;
+    unsigned long lastExpiryCheckMs;
 
     bool ensureInitialized();
     int getGroupCount();
@@ -57,7 +79,10 @@ class SplitFlapEspNow {
     );
     bool parseMacAddress(const String &macString, uint8_t mac[6]);
     bool sendToPeer(int groupIndex, const String &text, int moduleCount);
-    void queueReceived(const uint8_t *data, int len);
+    void queueReceived(const uint8_t *mac, const uint8_t *data, int len);
+    void broadcastAnnouncement();
+    void processAnnouncement(const uint8_t *mac, const SplitFlapAnnounceMessage *pkt);
+    String macToString(const uint8_t mac[6]);
 
     static SplitFlapEspNow *instance;
 

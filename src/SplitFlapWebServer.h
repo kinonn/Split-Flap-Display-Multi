@@ -12,6 +12,8 @@
 #include <WiFi.h>
 #include <time.h>
 
+class SplitFlapEspNow;
+
 class SplitFlapWebServer {
   public:
     SplitFlapWebServer(JsonSettings &settings, SplitFlapDisplay &display);
@@ -65,9 +67,12 @@ class SplitFlapWebServer {
 
     int getCentering() { return centering; }
 
+    void setEspNow(SplitFlapEspNow *espNow) { this->espNow = espNow; }
+
   private:
     JsonSettings &settings;
     SplitFlapDisplay &display;
+    SplitFlapEspNow *espNow = nullptr;
 
     String decodeURIComponent(String encodedString);
     bool validateMasterSettings(JsonVariant &json, JsonDocument &response);

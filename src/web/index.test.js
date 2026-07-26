@@ -25,6 +25,7 @@ const createPageData = (type = "Settings") => {
             masterGroupMacs: ",,,,,",
         },
         localMac: "",
+        discoveredPeers: [],
         errors: {},
         timezones: {},
 
@@ -159,6 +160,59 @@ const createPageData = (type = "Settings") => {
             this.settings.masterGroupMacs = macs.join(",");
         },
 
+        isPeerAssigned(mac) {
+            const normalized = (mac || "").toUpperCase();
+            for (let i = 1; i < this.settings.masterGroupCount; i++) {
+                const groupMac = (this.groupMacArray[i] || "").toUpperCase();
+                if (groupMac && groupMac === normalized) return true;
+            }
+            return false;
+        },
+
+        assignedGroupLabel(mac) {
+            const normalized = (mac || "").toUpperCase();
+            for (let i = 1; i < this.settings.masterGroupCount; i++) {
+                const groupMac = (this.groupMacArray[i] || "").toUpperCase();
+                if (groupMac === normalized) return `Assigned to Group ${i + 1}`;
+            }
+            return "";
+        },
+
+        assignPeer(groupIndex, mac) {
+            this.setGroupMac(groupIndex, mac);
+            const peer = this.discoveredPeers.find((p) => p.mac === mac);
+            if (peer) {
+                this.setGroupModuleCount(groupIndex, peer.moduleCount);
+            }
+            this.showDialog(`Assigned to Group ${groupIndex + 1}. Click Save to persist.`, "success");
+        },
+
+        removePeer(groupIndex) {
+            this.setGroupMac(groupIndex, "");
+            this.setGroupModuleCount(groupIndex, "8");
+            this.showDialog(`Removed Group ${groupIndex + 1} device. Click Save to persist.`, "success");
+        },
+
+        moveGroupUp(index) {
+            if (index <= 1) return;
+            const macs = this.groupMacArray;
+            const counts = this.groupModuleArray;
+            [macs[index - 1], macs[index]] = [macs[index], macs[index - 1]];
+            [counts[index - 1], counts[index]] = [counts[index], counts[index - 1]];
+            this.settings.masterGroupMacs = macs.join(",");
+            this.settings.masterGroupModuleCounts = counts.join(",");
+        },
+
+        moveGroupDown(index) {
+            if (index >= this.settings.masterGroupCount - 1) return;
+            const macs = this.groupMacArray;
+            const counts = this.groupModuleArray;
+            [macs[index + 1], macs[index]] = [macs[index], macs[index + 1]];
+            [counts[index + 1], counts[index]] = [counts[index], counts[index + 1]];
+            this.settings.masterGroupMacs = macs.join(",");
+            this.settings.masterGroupModuleCounts = counts.join(",");
+        },
+
         init() {
             this.loadSettings();
             if (type === "Settings") {
@@ -173,6 +227,7 @@ const createPageData = (type = "Settings") => {
                     const settingsData = data.settings || {};
                     Object.assign(this.settings, settingsData);
                     this.localMac = data.localMac || "";
+                    this.discoveredPeers = data.discoveredPeers || [];
                     this.normalizeMasterGroups();
                 })
                 .catch(() =>
@@ -843,5 +898,148 @@ describe("Page Component - Header", () => {
     it("should return default 'Split Flap' when name is undefined", () => {
         delete page.settings.name;
         expect(page.header).toBe("Split Flap");
+    });
+});
+
+describe("Page Component - Group Reordering", () => {
+    let page;
+
+    beforeEach(() => {
+        page = createPageData();
+        page.settings.masterGroupCount = 3;
+        page.settings.masterGroupMacs = ",AA:BB:CC:DD:EE:01,AA:BB:CC:DD:EE:02";
+        page.settings.masterGroupModuleCounts = "8,6,4";
+    });
+
+    it("should not move group up if at position 1", () => {
+        page.moveGroupUp(1);
+        expect(page.groupMacArray[1]).toBe("AA:BB:CC:DD:EE:01");
+    });
+
+    it("should swap groups when moving up", () => {
+        page.moveGroupUp(2);
+        expect(page.groupMacArray[1]).toBe("AA:BB:CC:DD:EE:02");
+        expect(page.groupMacArray[2]).toBe("AA:BB:CC:DD:EE:01");
+        expect(page.groupModuleArray[1]).toBe("4");
+        expect(page.groupModuleArray[2]).toBe("6");
+    });
+
+    it("should not move group down if at last position", () => {
+        page.moveGroupDown(2);
+        expect(page.groupMacArray[2]).toBe("AA:BB:CC:DD:EE:02");
+    });
+
+    it("should swap groups when moving down", () => {
+        page.moveGroupDown(1);
+        expect(page.groupMacArray[1]).toBe("AA:BB:CC:DD:EE:02");
+        expect(page.groupMacArray[2]).toBe("AA:BB:CC:DD:EE:01");
+        expect(page.groupModuleArray[1]).toBe("4");
+        expect(page.groupModuleArray[2]).toBe("6");
+    });
+});
+
+describe("Page Component - Discovery", () => {
+    let page;
+
+    beforeEach(() => {
+        page = createPageData();
+    });
+
+    it("should load discovered peers from settings", async () => {
+        global.fetch = vi.fn();
+        const mockSettings = {
+            settings: {
+                name: "Test Display",
+                masterGroupCount: 2,
+            },
+            localMac: "AA:BB:CC:DD:EE:FF",
+            discoveredPeers: [
+                { mac: "11:22:33:44:55:66", moduleCount: 6, assigned: false },
+            ],
+        };
+
+        global.fetch.mockResolvedValueOnce({
+            json: () => Promise.resolve(mockSettings),
+        });
+
+        page.loadSettings();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(page.discoveredPeers).toHaveLength(1);
+        expect(page.discoveredPeers[0].mac).toBe("11:22:33:44:55:66");
+        expect(page.discoveredPeers[0].moduleCount).toBe(6);
+    });
+
+    it("should stage assignment locally without server call", () => {
+        page.discoveredPeers = [
+            { mac: "11:22:33:44:55:66", moduleCount: 6 },
+        ];
+        page.settings.masterGroupCount = 3;
+
+        page.assignPeer(1, "11:22:33:44:55:66");
+
+        expect(page.groupMacArray[1]).toBe("11:22:33:44:55:66");
+        expect(page.groupModuleArray[1]).toBe("6");
+    });
+
+    it("should stage removal locally without server call", () => {
+        page.settings.masterGroupCount = 3;
+        page.setGroupMac(1, "11:22:33:44:55:66");
+        page.setGroupModuleCount(1, 6);
+
+        page.removePeer(1);
+
+        expect(page.groupMacArray[1]).toBe("");
+        expect(page.groupModuleArray[1]).toBe("8");
+    });
+
+    it("should detect assigned peers in real-time", () => {
+        page.settings.masterGroupCount = 3;
+        page.setGroupMac(1, "11:22:33:44:55:66");
+
+        expect(page.isPeerAssigned("11:22:33:44:55:66")).toBe(true);
+        expect(page.isPeerAssigned("AA:BB:CC:DD:EE:FF")).toBe(false);
+    });
+
+    it("should detect assigned peers case-insensitively", () => {
+        page.settings.masterGroupCount = 3;
+        page.setGroupMac(1, "aa:bb:cc:dd:ee:ff");
+
+        expect(page.isPeerAssigned("AA:BB:CC:DD:EE:FF")).toBe(true);
+    });
+
+    it("should return group label for assigned peer", () => {
+        page.settings.masterGroupCount = 3;
+        page.setGroupMac(2, "11:22:33:44:55:66");
+
+        expect(page.assignedGroupLabel("11:22:33:44:55:66")).toBe(
+            "Assigned to Group 3",
+        );
+    });
+
+    it("should return empty label for unassigned peer", () => {
+        page.settings.masterGroupCount = 3;
+
+        expect(page.assignedGroupLabel("11:22:33:44:55:66")).toBe("");
+    });
+
+    it("should not call fetch when assigning peer", () => {
+        global.fetch = vi.fn();
+        page.discoveredPeers = [{ mac: "11:22:33:44:55:66", moduleCount: 6 }];
+        page.settings.masterGroupCount = 3;
+
+        page.assignPeer(1, "11:22:33:44:55:66");
+
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("should not call fetch when removing peer", () => {
+        global.fetch = vi.fn();
+        page.settings.masterGroupCount = 3;
+        page.setGroupMac(1, "11:22:33:44:55:66");
+
+        page.removePeer(1);
+
+        expect(global.fetch).not.toHaveBeenCalled();
     });
 });
