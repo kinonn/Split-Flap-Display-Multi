@@ -692,6 +692,37 @@
                 Multi-Display Master
             </h2>
 
+            <div class="w-full mt-4 mb-6 p-4 bg-neutral-700 rounded-md">
+                <h3 class="text-lg font-semibold mb-3 text-left">Discovered Devices</h3>
+                <div x-show="discoveredPeers.length === 0" class="text-gray-400 text-sm">
+                    No devices discovered. Waiting for remote controllers to announce themselves...
+                </div>
+                <div x-show="discoveredPeers.length > 0" class="space-y-2">
+                    <template x-for="peer in discoveredPeers" :key="peer.mac">
+                        <div class="flex items-center justify-between p-3 bg-neutral-800 rounded">
+                            <div class="flex-1">
+                                <div class="font-mono text-sm" x-text="peer.mac"></div>
+                                <div class="text-xs text-gray-400">
+                                    <span x-text="peer.moduleCount"></span> modules
+                                    <span x-show="isPeerAssigned(peer.mac)" class="ml-2 text-amber-500" x-text="assignedGroupLabel(peer.mac)"></span>
+                                </div>
+                            </div>
+                            <div class="flex gap-2">
+                                <template x-for="groupIdx in Array.from({ length: settings.masterGroupCount - 1 }, (_, i) => i + 1)" :key="groupIdx">
+                                    <button
+                                        x-show="!isPeerAssigned(peer.mac) && !groupMacArray[groupIdx]"
+                                        type="button"
+                                        class="px-3 py-1 text-sm bg-green-600 hover:bg-green-500 rounded transition-colors"
+                                        @click="assignPeer(groupIdx, peer.mac)"
+                                        x-text="`Assign to Group ${groupIdx + 1}`"
+                                    ></button>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
             <label for="masterGroupCount" class="block text-left text-lg mt-4">
                 Number of Groups
             </label>
@@ -718,38 +749,84 @@
                     :key="`group-${i}`"
                 >
                     <div
-                        class="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full"
+                        class="w-full p-4 bg-neutral-700 rounded-md"
                         x-show="i < settings.masterGroupCount"
                         x-cloak
                     >
-                        <div>
-                            <label
-                                class="block text-left text-sm text-gray-300 mb-1"
-                                x-text="`Group ${i + 1}${i === 0 ? ' (local)' : ''}`"
-                            ></label>
-                            <input
-                                type="number"
-                                min="1"
-                                max="8"
-                                class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
-                                :value="groupModuleArray[i]"
-                                @input="setGroupModuleCount(i, $event.target.value)"
-                                placeholder="Modules"
-                            />
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-2">
+                                <span class="text-lg font-semibold" x-text="`Group ${i + 1}`"></span>
+                                <span x-show="i === 0" class="text-xs bg-blue-600 px-2 py-1 rounded">Local</span>
+                                <span x-show="i > 0" class="text-xs bg-purple-600 px-2 py-1 rounded">Remote</span>
+                            </div>
+                            <div x-show="i > 0" class="flex gap-1">
+                                <button
+                                    type="button"
+                                    class="p-2 bg-neutral-600 hover:bg-neutral-500 rounded transition-colors disabled:opacity-30"
+                                    :disabled="i === 1"
+                                    @click="moveGroupUp(i)"
+                                    title="Move up"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+                                    </svg>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="p-2 bg-neutral-600 hover:bg-neutral-500 rounded transition-colors disabled:opacity-30"
+                                    :disabled="i === settings.masterGroupCount - 1"
+                                    @click="moveGroupDown(i)"
+                                    title="Move down"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                </button>
+                            </div>
                         </div>
-                        <div class="sm:col-span-2">
-                            <label
-                                class="block text-left text-sm text-gray-300 mb-1"
-                                x-text="i === 0 ? 'MAC Address' : 'Peer MAC Address'"
-                            ></label>
-                            <input
-                                type="text"
-                                class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100 disabled:opacity-60"
-                                :value="i === 0 ? 'local display' : groupMacArray[i]"
-                                @input="setGroupMac(i, $event.target.value)"
-                                :disabled="i === 0"
-                                placeholder="AA:BB:CC:DD:EE:FF"
-                            />
+
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <div class="sm:col-span-2">
+                                <label class="block text-left text-sm text-gray-300 mb-1">
+                                    <span x-text="i === 0 ? 'MAC Address' : 'Peer MAC Address'"></span>
+                                </label>
+                                <div class="flex gap-2">
+                                    <input
+                                        type="text"
+                                        class="flex-1 p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100 disabled:opacity-60"
+                                        :value="i === 0 ? 'local display' : groupMacArray[i]"
+                                        @input="setGroupMac(i, $event.target.value)"
+                                        :disabled="i === 0"
+                                        placeholder="AA:BB:CC:DD:EE:FF"
+                                    />
+                                    <button
+                                        x-show="i > 0 && groupMacArray[i]"
+                                        type="button"
+                                        class="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-md transition-colors"
+                                        @click="removePeer(i)"
+                                        title="Remove device"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-left text-sm text-gray-300 mb-1">
+                                    Modules
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="8"
+                                    class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100"
+                                    :value="groupModuleArray[i]"
+                                    @input="setGroupModuleCount(i, $event.target.value)"
+                                    :disabled="i > 0 && groupMacArray[i]"
+                                    placeholder="Modules"
+                                />
+                            </div>
                         </div>
                     </div>
                 </template>

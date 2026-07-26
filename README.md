@@ -21,6 +21,9 @@ Firmware for the modular Split Flap Display created by [Morgan Manly](https://gi
     - Configure WiFi, Timezone, and hardware settings
 - MQTT Support
 - Multi-display master mode using ESP-NOW to coordinate up to 6 display groups, with up to 8 modules per group
+    - Automatic device discovery — remote controllers announce themselves and the master detects them without manual MAC entry
+    - Module count auto-population from discovered devices
+    - Group reordering with up/down controls (Group 1 always pinned as local)
 - Per-module and per-character offset tuning for precise flap alignment
 - Scrolling text for messages longer than the display width, with configurable delay between chunks and configurable repeat count
 
@@ -108,23 +111,31 @@ Group 1 displays its segment locally on the master controller. The master sends 
 
 1. Flash the firmware and filesystem to every group controller.
 1. Configure Wi-Fi on every controller. Using the same Wi-Fi network is recommended so the controllers share a radio channel and each web page remains reachable.
-1. Open the serial monitor for each remote controller and note the MAC address printed at startup (also shown on the Settings page):
-
-    - `[esp-now] initialized on AA:BB:CC:DD:EE:FF`
-
+1. Power on all remote controllers. Each remote controller periodically broadcasts an ESP-NOW announcement containing its MAC address and module count.
 1. On the master controller, open `Settings`.
 1. In `Hardware Settings`, set `Number of Modules` to the number of modules physically connected to the master group.
 1. In `Multi-Display Master`, set `Number of Groups`.
-1. For each group:
+1. Wait a few seconds for the `Discovered Devices` section to populate with remote controllers that have announced themselves. Each discovered device shows its MAC address and module count.
+1. For each remote group slot:
 
-    - Set the module count for that group.
-    - Leave Group 1 as the local display.
-    - Enter the ESP-NOW MAC address for each remote group.
+    - Click `Assign to Group N` on a discovered device to auto-fill its MAC address and module count.
+    - Alternatively, enter the MAC address manually if a device is not discovered (e.g. it is on a different Wi-Fi channel or not yet powered on).
+    - Module count is auto-populated from the announcement but can be overridden before saving.
 
-1. Save settings.
-1. Return to the main page, select `Custom Text`, enter the full message, and click `Update Display`.
+1. Reorder groups using the up/down arrow buttons if needed. Group 1 (Local) is always pinned at the top and cannot be moved.
+1. Click `Save Settings` to persist all changes.
+
+Changes are staged in the UI and only saved when you click `Save Settings`. The discovered devices list updates in real-time to show which devices are already assigned.
 
 Remote groups automatically switch into ESP-NOW remote display mode when they receive a message from the master. They do not need their own text entry once registered with the master.
+
+### Discovery Details
+
+- Remote controllers broadcast announcements every 5 seconds via ESP-NOW to the broadcast address (`ff:ff:ff:ff:ff:ff`).
+- The master maintains a discovery table of up to 6 peers, expiring entries that have not been seen for 30 seconds.
+- The master filters out its own MAC address to avoid self-discovery.
+- Discovery works over ESP-NOW regardless of Wi-Fi connectivity — it only requires that controllers share the same radio channel.
+- If a remote controller is not discovered (e.g. different Wi-Fi channel), its MAC address can still be entered manually. The module count must then be set manually as well.
 
 ## Tuning
 

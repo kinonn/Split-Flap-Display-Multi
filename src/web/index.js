@@ -26,6 +26,7 @@ document.addEventListener("alpine:init", () => {
             masterGroupMacs: ",,,,,",
         },
         localMac: "",
+        discoveredPeers: [],
         errors: {},
         timezones: {},
 
@@ -161,6 +162,59 @@ document.addEventListener("alpine:init", () => {
             this.settings.masterGroupMacs = macs.join(",");
         },
 
+        isPeerAssigned(mac) {
+            const normalized = (mac || "").toUpperCase();
+            for (let i = 1; i < this.settings.masterGroupCount; i++) {
+                const groupMac = (this.groupMacArray[i] || "").toUpperCase();
+                if (groupMac && groupMac === normalized) return true;
+            }
+            return false;
+        },
+
+        assignedGroupLabel(mac) {
+            const normalized = (mac || "").toUpperCase();
+            for (let i = 1; i < this.settings.masterGroupCount; i++) {
+                const groupMac = (this.groupMacArray[i] || "").toUpperCase();
+                if (groupMac === normalized) return `Assigned to Group ${i + 1}`;
+            }
+            return "";
+        },
+
+        assignPeer(groupIndex, mac) {
+            this.setGroupMac(groupIndex, mac);
+            const peer = this.discoveredPeers.find((p) => p.mac === mac);
+            if (peer) {
+                this.setGroupModuleCount(groupIndex, peer.moduleCount);
+            }
+            this.showDialog(`Assigned to Group ${groupIndex + 1}. Click Save to persist.`, "success");
+        },
+
+        removePeer(groupIndex) {
+            this.setGroupMac(groupIndex, "");
+            this.setGroupModuleCount(groupIndex, "8");
+            this.showDialog(`Removed Group ${groupIndex + 1} device. Click Save to persist.`, "success");
+        },
+
+        moveGroupUp(index) {
+            if (index <= 1) return;
+            const macs = this.groupMacArray;
+            const counts = this.groupModuleArray;
+            [macs[index - 1], macs[index]] = [macs[index], macs[index - 1]];
+            [counts[index - 1], counts[index]] = [counts[index], counts[index - 1]];
+            this.settings.masterGroupMacs = macs.join(",");
+            this.settings.masterGroupModuleCounts = counts.join(",");
+        },
+
+        moveGroupDown(index) {
+            if (index >= this.settings.masterGroupCount - 1) return;
+            const macs = this.groupMacArray;
+            const counts = this.groupModuleArray;
+            [macs[index + 1], macs[index]] = [macs[index], macs[index + 1]];
+            [counts[index + 1], counts[index]] = [counts[index], counts[index + 1]];
+            this.settings.masterGroupMacs = macs.join(",");
+            this.settings.masterGroupModuleCounts = counts.join(",");
+        },
+
         init() {
             this.loadSettings();
             if (type === "Settings") {
@@ -175,6 +229,7 @@ document.addEventListener("alpine:init", () => {
                     const settingsData = data.settings || {};
                     Object.assign(this.settings, settingsData);
                     this.localMac = data.localMac || "";
+                    this.discoveredPeers = data.discoveredPeers || [];
                     this.normalizeMasterGroups();
                 })
                 .catch(() =>

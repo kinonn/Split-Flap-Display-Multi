@@ -1,4 +1,5 @@
 #include "SplitFlapWebServer.h"
+#include "SplitFlapEspNow.h"
 
 #include <ArduinoJson.h>
 #include <AsyncJson.h>
@@ -334,6 +335,14 @@ void SplitFlapWebServer::startWebServer() {
         JsonDocument response;
         response["settings"] = currentSettings.as<JsonObject>();
         response["localMac"] = WiFi.macAddress();
+        if (espNow) {
+            JsonArray peers = response["discoveredPeers"].to<JsonArray>();
+            JsonDocument peersDoc;
+            deserializeJson(peersDoc, espNow->getDiscoveredPeersJson());
+            for (JsonObject peer : peersDoc.as<JsonArray>()) {
+                peers.add(peer);
+            }
+        }
         request->send(200, "application/json", response.as<String>());
     });
 

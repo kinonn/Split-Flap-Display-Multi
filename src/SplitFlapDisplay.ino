@@ -84,6 +84,7 @@ void setup() {
     Serial.println("Init Web Server");
     Serial.flush();
     webServer.init();
+    webServer.setEspNow(getSplitFlapEspNow());
     Serial.println("[boot] web server init complete");
     Serial.flush();
 
