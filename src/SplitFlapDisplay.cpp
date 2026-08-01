@@ -3,8 +3,9 @@
 #include "JsonSettings.h"
 #include "SplitFlapModule.h"
 #include "SplitFlapMqtt.h"
+#include "SplitFlapMotorScheduler.h"
 
-SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings) {
+SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings), maxConcurrentMotors(-1) {
     for (int i = 0; i < MAX_MODULES; i++) {
         lastDisplayedChar[i] = ' ';
     }
@@ -124,6 +125,7 @@ void SplitFlapDisplay::reloadOffsets() {
 
 void SplitFlapDisplay::homeAffectedModules(bool affected[], float speed) {
     Serial.println("Homing affected modules");
+    maxConcurrentMotors = constrain(settings.getInt("maxConcurrentMotors"), 1, MAX_MODULES);
     int targetPositions[numModules];
     for (int i = 0; i < numModules; i++) {
         if (affected[i]) {
@@ -132,7 +134,6 @@ void SplitFlapDisplay::homeAffectedModules(bool affected[], float speed) {
             targetPositions[i] = modules[i].getPosition();
         }
     }
-    startMotors();
     moveTo(targetPositions, speed, false);
 
     for (int i = 0; i < numModules; i++) {
@@ -146,6 +147,7 @@ void SplitFlapDisplay::homeAffectedModules(bool affected[], float speed) {
 }
 
 void SplitFlapDisplay::testAll() {
+    maxConcurrentMotors = -1; // unlimited — test/display moves are short
     char testChars[37] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
                           'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
     int numChars = sizeof(testChars) / sizeof(testChars[0]);
@@ -169,6 +171,7 @@ void SplitFlapDisplay::testAll() {
 }
 
 void SplitFlapDisplay::testRandom(float speed) {
+    maxConcurrentMotors = -1; // unlimited — test/display moves are short
     char testChars[37] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
                           'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
 
@@ -186,6 +189,7 @@ void SplitFlapDisplay::testRandom(float speed) {
 }
 
 void SplitFlapDisplay::testCount() {
+    maxConcurrentMotors = -1; // unlimited — test/display moves are short
     int count = 0;
     int maxCount = pow(10, numModules);
     char targetChar;
@@ -208,11 +212,11 @@ void SplitFlapDisplay::testCount() {
 
 void SplitFlapDisplay::home(float speed) {
     Serial.println("Homing");
+    maxConcurrentMotors = constrain(settings.getInt("maxConcurrentMotors"), 1, MAX_MODULES);
     int targetPositions[numModules];
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = (modules[i].getPosition() - 1 + stepsPerRot) % stepsPerRot;
     }
-    startMotors();
     moveTo(targetPositions, speed, false);
     char homeChar = ' ';
     int charPosition;
@@ -225,32 +229,36 @@ void SplitFlapDisplay::home(float speed) {
 
 void SplitFlapDisplay::homeToString(String homeString, float speed, bool centering) {
     Serial.println("Homing");
+    maxConcurrentMotors = constrain(settings.getInt("maxConcurrentMotors"), 1, MAX_MODULES);
     int targetPositions[numModules];
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = (modules[i].getPosition() - 1 + stepsPerRot) % stepsPerRot;
     }
-    startMotors();
     moveTo(targetPositions, speed, false);
-    writeString(homeString, speed, centering);
+    // Reposition straight to the target string instead of going through
+    // writeString(): writeString resets maxConcurrentMotors to unlimited,
+    // which would defeat the homing concurrency cap on the reposition move.
+    displayChunk(homeString, speed, centering);
 }
 
 void SplitFlapDisplay::homeToChar(char homeChar, float speed) {
     Serial.println("Homing");
+    maxConcurrentMotors = constrain(settings.getInt("maxConcurrentMotors"), 1, MAX_MODULES);
     int targetPositions[numModules];
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = (modules[i].getPosition() - 1 + stepsPerRot) % stepsPerRot;
     }
-    startMotors();
     moveTo(targetPositions, speed, false);
 
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = modules[i].getCharPosition(homeChar);
         lastDisplayedChar[i] = homeChar;
     }
-    moveTo(targetPositions, true, speed);
+    moveTo(targetPositions, speed, true);
 }
 
 void SplitFlapDisplay::writeChar(char inputChar, float speed) {
+    maxConcurrentMotors = -1; // unlimited — normal display writes stay fast
     int targetPositions[numModules];
     // Iterate through the input string and process each character
     for (int i = 0; i < numModules; i++) {
@@ -264,6 +272,8 @@ void SplitFlapDisplay::writeString(
     String inputString, float speed, bool centering, unsigned long scrollDelayMs,
     int scrollRepeatCount, bool publishState
 ) {
+    // Normal display writes are not concurrency-capped (homing is).
+    maxConcurrentMotors = -1;
     // Short path: fits in one frame — behave exactly as before.
     if (inputString.length() <= numModules) {
         displayChunk(inputString, speed, centering);
@@ -457,11 +467,17 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
     int startStopDelay = 200; // time to wait to let motor realign itself to
     // magnetic field on stop and start
 
-    bool resetLatches[numModules] = {}; // Initialize to false //start with latch on to prevent case where the
+    bool resetLatches[numModules] = {};          // start with latch on to prevent case where the
     // motion starts with the magnet over the sensor
-    bool needsStepping[numModules] = {};             // Initialize to false; //modules that still require moving
-    unsigned long lastStepTimes[numModules] = {};    // Initialize to false; //track when each module was last stepped
+    bool needsStepping[numModules] = {};         // modules that still require moving
+    bool motorsOn[numModules] = {};              // modules whose coils are currently energized
+    unsigned long lastStepTimes[numModules] = {}; // track when each module was last stepped
     unsigned long lastSensorCheckTime = currentTime; // track when we last read all the hall effect sensors
+
+    // Concurrency cap: limits how many motors are energized at once. Homing
+    // paths set this from the "maxConcurrentMotors" setting (>= 1); normal
+    // message writes set it to -1 (unlimited, all motors start immediately).
+    SplitFlapMotorScheduler scheduler(numModules, maxConcurrentMotors);
 
     for (int i = 0; i < numModules; i++) {
         targetPositions[i] = constrain(
@@ -471,27 +487,58 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
         ); // Constrain to avoid errors with incorrect inputs
         resetLatches[i] = true;
         lastStepTimes[i] = currentTime;
-        if (modules[i].getPosition() != targetPositions[i]) {
-            needsStepping[i] = true;
-        } else {
-            needsStepping[i] = false;
-        }
+        needsStepping[i] = (modules[i].getPosition() != targetPositions[i]);
     }
 
-    startMotors(); // not sure if this helps or not, likely that it does not based
-    // on testing
-    delay(startStopDelay); // give the motor time to align to magnetic field
+    // Previously this energized EVERY module (even ones that don't need to
+    // move) and left them all on until the end of the move. Now each motor
+    // is energized only when it has a scheduling slot, and released the
+    // instant it reaches its target, so the instantaneous coil current is
+    // bounded by the cap instead of the full module count.
+    if (maxConcurrentMotors < 0) {
+        startMotors();
+        delay(startStopDelay); // give the motor time to align to magnetic field
+    }
 
     bool isFinished = checkAllFalse(needsStepping, numModules);
     while (! isFinished) {
         currentTime = micros();
         for (int i = 0; i < numModules; i++) {
-            if (((currentTime - lastStepTimes[i]) > timePerStep) && needsStepping[i]) {
+            if (! needsStepping[i]) {
+                continue;
+            }
+
+            // Grant a slot to motors that haven't started yet, subject to
+            // the concurrency cap. Motors that can't get a slot simply wait
+            // for the next loop iteration (a slot frees when another motor
+            // reaches its target).
+            if (! motorsOn[i]) {
+                if (! scheduler.start(i)) {
+                    continue; // cap reached — try again next tick
+                }
+                motorsOn[i] = true;
+                if (maxConcurrentMotors >= 0) {
+                    // Capped (homing): this motor got its slot mid-loop, so
+                    // give it the same coil-align settle time the uncapped
+                    // path's global delay above provides before its first
+                    // step. The uncapped path leaves lastStepTimes at its
+                    // initial value — motors already settled during the
+                    // global delay, preserving the original step timing.
+                    lastStepTimes[i] = currentTime + startStopDelay * 1000;
+                }
+            }
+
+            if ((currentTime - lastStepTimes[i]) > timePerStep) {
                 modules[i].step();
                 lastStepTimes[i] = micros();
                 if (modules[i].getPosition() == targetPositions[i]) { // this module is not in the correct position,
                     // requires stepping
                     needsStepping[i] = false;
+                    // Release this motor's coils immediately instead of
+                    // holding it until the slowest module finishes.
+                    modules[i].stop();
+                    motorsOn[i] = false;
+                    scheduler.finish(i);
                 }
             }
         }
@@ -499,7 +546,7 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
         if ((currentTime - lastSensorCheckTime) > checkIntervalUs) { // check hall effect sensor every checkIntervalMs
             // check every modules sensor
             for (int i = 0; i < numModules; i++) {
-                if (needsStepping[i] &&
+                if (needsStepping[i] && motorsOn[i] &&
                     (modules[i].readHallEffectSensor() == true
                     )) { // only check sensors where the module is still moving
                     if (! resetLatches[i]) {

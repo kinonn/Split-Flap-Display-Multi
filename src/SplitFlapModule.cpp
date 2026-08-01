@@ -70,19 +70,11 @@ void SplitFlapModule::init() {
 
     stop();                                  // Write all motor coil inputs LOW
 
-    int initDelay = 100;
-
-    delay(initDelay);
-    step();
-    delay(initDelay);
-    step();
-    delay(initDelay);
-    step();
-    delay(initDelay);
-    step();
-    delay(initDelay);
-
-    stop();
+    // NOTE: this used to "prime" the motor with 4 steps (4x100ms delays).
+    // It serves no functional purpose — homing finds the magnet via the
+    // hall-effect sensor — and it drew coil current for up to 400ms per
+    // module at power-on, when the rail is at its weakest. Removed so the
+    // coils are powered down as early as possible after boot.
 }
 
 void SplitFlapModule::updateOffsets(const int newCharOffsets[], int newMagnetOffset) {

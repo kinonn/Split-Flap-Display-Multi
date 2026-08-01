@@ -949,6 +949,60 @@
                     </div>
                 </div>
 
+            <h2
+                class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2"
+            >
+                Power / Startup
+            </h2>
+
+            <div class="grid grid-cols-2 gap-2 w-full">
+                <div>
+                    <label
+                        for="bootDelayMs"
+                        class="block text-left text-lg mt-4"
+                    >
+                        Boot Delay (ms)
+                    </label>
+                    <input
+                        class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                        type="number"
+                        id="bootDelayMs"
+                        min="0"
+                        x-model.number="settings.bootDelayMs"
+                        placeholder="2000"
+                    />
+                    <div
+                        class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                        x-cloak
+                        x-show="errors.key === 'bootDelayMs'"
+                        x-text="errors.message"
+                    ></div>
+                </div>
+                <div>
+                    <label
+                        for="maxConcurrentMotors"
+                        class="block text-left text-lg mt-4"
+                    >
+                        Max Motors At Once (homing)
+                    </label>
+                    <input
+                        class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                        type="number"
+                        id="maxConcurrentMotors"
+                        min="1"
+                        max="8"
+                        x-model.number="settings.maxConcurrentMotors"
+                        placeholder="2"
+                    />
+                    <div
+                        class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                        x-cloak
+                        x-show="errors.key === 'maxConcurrentMotors'"
+                        x-text="errors.message"
+                    ></div>
+                </div>
+            </div>
+
                 <button
                     class="w-full p-3 mt-4 text-lg font-semibold text-white bg-red-600 rounded-md hover:bg-red-500 transition-colors"
                     x-on:click.prevent="reset()"

@@ -145,6 +145,23 @@ Each character on each module can be individually tuned. This is useful when spe
 
 Changes take effect immediately after saving settings—no reboot required. Offsets are stored per-module and persist across reboots.
 
+### Power / Startup Settings
+
+Larger displays (many modules on one 5V rail) can trip their power supply
+at boot when every motor coil is energized at once. Two settings help:
+
+- **Boot Delay (ms)** — extra settle time after power-on before the
+  network bring-up starts. Motor coils are powered down immediately at
+  boot (before this delay), so the delay costs almost no current. In
+  multi-display setups, set the slave's `bootDelayMs` a few seconds
+  higher than the master's so the two boards never home at the same time.
+- **Max Motors At Once (homing)** — caps how many motors are energized
+  simultaneously during the boot homing sweep (and offset-reload homing).
+  Lower = gentler on the supply, slower homing. Default 2. Normal message
+  writes are unaffected (motors only draw current while actually moving).
+
+Requires a reboot after changing either setting.
+
 ## Contributing
 
 ### Setup
