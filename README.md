@@ -155,7 +155,7 @@ at boot when every motor coil is energized at once. Two settings help:
   boot (before this delay), so the delay costs almost no current. In
   multi-display setups, set the slave's `bootDelayMs` a few seconds
   higher than the master's so the two boards never home at the same time.
-- **Max Motors At Once (homing)** — caps how many motors are energized
+- **Max Concurrent Motors** — caps how many motors are energized
   simultaneously during the boot homing sweep (and offset-reload homing).
   Lower = gentler on the supply, slower homing. Default 2. Normal message
   writes are unaffected (motors only draw current while actually moving).
