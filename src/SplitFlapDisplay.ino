@@ -52,6 +52,13 @@ JsonSettings settings = JsonSettings("config", {
     {"masterGroupCount", JsonSetting(1)},
     {"masterGroupModuleCounts", JsonSetting({8, 8, 8, 8, 8, 8})},
     {"masterGroupMacs", JsonSetting(",,,,,")},
+    {"rModOffs", JsonSetting(std::vector<std::vector<int>>(5, std::vector<int>(8, 0)))},
+    {"rChrOff0", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
+    {"rChrOff1", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
+    {"rChrOff2", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
+    {"rChrOff3", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
+    {"rChrOff4", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
+    {"rDispOffs", JsonSetting({0, 0, 0, 0, 0})},
     // Operational States
     {"mode", JsonSetting(0)}
 });

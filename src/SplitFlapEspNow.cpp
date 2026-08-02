@@ -8,8 +8,10 @@ SplitFlapEspNow *SplitFlapEspNow::instance = nullptr;
 
 SplitFlapEspNow::SplitFlapEspNow(JsonSettings &settings, SplitFlapDisplay &display)
     : settings(settings), display(display), pendingMessage(false), lastRemoteText(""), initialized(false),
-      discoveredCount(0), lastAnnounceMs(0), lastExpiryCheckMs(0) {
+      discoveredCount(0), lastAnnounceMs(0), lastExpiryCheckMs(0), masterMacKnown(false),
+      pendingOffsetsPush(false), pendingCharOffsetsMask(0), offsetDataDirty(false), lastOffsetRxMs(0) {
     memset(discoveredPeers, 0, sizeof(discoveredPeers));
+    memset(masterMac, 0, sizeof(masterMac));
 }
 
 bool SplitFlapEspNow::init() {
@@ -76,6 +78,8 @@ void SplitFlapEspNow::loop() {
         interrupts();
         lastExpiryCheckMs = now;
     }
+
+    processPendingOffsetPackets();
 
     if (! pendingMessage) {
         return;
@@ -489,9 +493,39 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         return;
     }
 
+    if (len == sizeof(SplitFlapOffsetsPushMessage) && data[0] == ESP_NOW_OFFSETS_PUSH) {
+        learnMasterMac(mac);
+        memcpy(&pendingOffsetsPushPkt, data, sizeof(pendingOffsetsPushPkt));
+        pendingOffsetsPush = true;
+        return;
+    }
+
+    if (len == sizeof(SplitFlapCharOffsetsPushMessage) && data[0] == ESP_NOW_OFFSETS_PUSH) {
+        learnMasterMac(mac);
+        const SplitFlapCharOffsetsPushMessage *cpkt = (const SplitFlapCharOffsetsPushMessage *) data;
+        int modIdx = constrain((int) cpkt->moduleIndex, 0, MAX_MODULES - 1);
+        memcpy(&pendingCharOffsetsPkts[modIdx], data, sizeof(pendingCharOffsetsPkts[modIdx]));
+        pendingCharOffsetsMask |= (1 << modIdx);
+        return;
+    }
+
+    if (len == sizeof(SplitFlapOffsetsReportMessage) && data[0] == ESP_NOW_OFFSETS_REPORT) {
+        processOffsetsReport(mac, (const SplitFlapOffsetsReportMessage *) data);
+        return;
+    }
+
+    if (len == sizeof(SplitFlapCharOffsetsReportMessage) && data[0] == ESP_NOW_OFFSETS_REPORT) {
+        processCharOffsetsReport(mac, (const SplitFlapCharOffsetsReportMessage *) data);
+        return;
+    }
+
     if (len != sizeof(SplitFlapEspNowMessage)) {
         Serial.printf("[esp-now] received invalid len=%d\n", len);
         return;
+    }
+
+    if (!masterMacKnown) {
+        learnMasterMac(mac);
     }
 
     memcpy(&pendingPacket, data, sizeof(pendingPacket));
@@ -566,4 +600,253 @@ String SplitFlapEspNow::macToString(const uint8_t mac[6]) {
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(buf);
+}
+
+void SplitFlapEspNow::pushOffsetsToGroup(int groupIndex) {
+    if (!ensureInitialized()) return;
+    if (groupIndex < 1 || groupIndex >= getGroupCount()) return;
+
+    String macString = getGroupMac(groupIndex);
+    uint8_t mac[6];
+    if (!parseMacAddress(macString, mac)) return;
+
+    ensurePeer(mac);
+
+    int moduleCount = getGroupModuleCount(groupIndex);
+    int row = groupIndex - 1;
+
+    auto modOffs = settings.getIntMatrix("rModOffs");
+    int dispOff = 0;
+    auto dispOffs = settings.getIntVector("rDispOffs");
+    if (row < (int)dispOffs.size()) dispOff = dispOffs[row];
+
+    SplitFlapOffsetsPushMessage pkt = {};
+    pkt.version = ESP_NOW_OFFSETS_PUSH;
+    pkt.groupIndex = groupIndex;
+    pkt.moduleCount = moduleCount;
+    pkt.displayOffset = (int16_t)constrain(dispOff, -32768, 32767);
+    for (int i = 0; i < 8; i++) {
+        int val = (row < (int)modOffs.size() && i < (int)modOffs[row].size())
+            ? modOffs[row][i] : 0;
+        pkt.moduleOffsets[i] = (int16_t)constrain(val, -32768, 32767);
+    }
+    if (esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
+        Serial.printf("[esp-now] push offsets send failed for group %d\n", groupIndex + 1);
+    }
+    delay(OFFSET_PACKET_SPACING_MS);
+
+    String key = "rChrOff" + String(row);
+    auto chrOffs = settings.getIntMatrix(key.c_str());
+    for (int m = 0; m < moduleCount; m++) {
+        SplitFlapCharOffsetsPushMessage cpkt = {};
+        cpkt.version = ESP_NOW_OFFSETS_PUSH;
+        cpkt.groupIndex = groupIndex;
+        cpkt.moduleIndex = m;
+        for (int c = 0; c < 48; c++) {
+            int val = (m < (int)chrOffs.size() && c < (int)chrOffs[m].size()) ? chrOffs[m][c] : 0;
+            cpkt.charOffsets[c] = constrain(val, -32, 32);
+        }
+        if (esp_now_send(mac, (const uint8_t *)&cpkt, sizeof(cpkt)) != ESP_OK) {
+            Serial.printf("[esp-now] push char offsets send failed for group %d module %d\n", groupIndex + 1, m);
+        }
+        if (m < moduleCount - 1) delay(OFFSET_PACKET_SPACING_MS);
+    }
+
+    Serial.printf("[esp-now] pushed offsets to group %d\n", groupIndex + 1);
+}
+
+void SplitFlapEspNow::reportOffsetsToMaster() {
+    if (!initialized || !masterMacKnown) return;
+
+    ensurePeer(masterMac);
+
+    int moduleCount = display.getNumModules();
+    int dispOff = settings.getInt("displayOffset");
+    auto modOffs = settings.getIntVector("moduleOffsets");
+
+    SplitFlapOffsetsReportMessage pkt = {};
+    pkt.version = ESP_NOW_OFFSETS_REPORT;
+    pkt.moduleCount = moduleCount;
+    pkt.displayOffset = (int16_t)constrain(dispOff, -32768, 32767);
+    for (int i = 0; i < 8; i++) {
+        int val = (i < (int)modOffs.size()) ? modOffs[i] : 0;
+        pkt.moduleOffsets[i] = (int16_t)constrain(val, -32768, 32767);
+    }
+    if (esp_now_send(masterMac, (const uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
+        Serial.println("[esp-now] report offsets send failed");
+    }
+    delay(OFFSET_PACKET_SPACING_MS);
+
+    auto chrOffs = settings.getIntMatrix("charOffsets");
+    for (int m = 0; m < moduleCount; m++) {
+        SplitFlapCharOffsetsReportMessage cpkt = {};
+        cpkt.version = ESP_NOW_OFFSETS_REPORT;
+        cpkt.moduleIndex = m;
+        for (int c = 0; c < 48; c++) {
+            int val = (m < (int)chrOffs.size() && c < (int)chrOffs[m].size()) ? chrOffs[m][c] : 0;
+            cpkt.charOffsets[c] = constrain(val, -32, 32);
+        }
+        if (esp_now_send(masterMac, (const uint8_t *)&cpkt, sizeof(cpkt)) != ESP_OK) {
+            Serial.printf("[esp-now] report char offsets send failed for module %d\n", m);
+        }
+        if (m < moduleCount - 1) delay(OFFSET_PACKET_SPACING_MS);
+    }
+
+    Serial.println("[esp-now] reported offsets to master");
+}
+
+void SplitFlapEspNow::applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt) {
+    int moduleCount = constrain((int) pkt->moduleCount, 1, MAX_MODULES);
+
+    std::vector<int> modOffs;
+    for (int i = 0; i < 8; i++) modOffs.push_back(pkt->moduleOffsets[i]);
+    settings.putIntVector("moduleOffsets", modOffs);
+    settings.putInt("displayOffset", pkt->displayOffset);
+
+    Serial.printf("[esp-now] applying pushed offsets: dispOff=%d modules=%d\n", pkt->displayOffset, moduleCount);
+}
+
+void SplitFlapEspNow::applyCharOffsetsPush(const SplitFlapCharOffsetsPushMessage *pkt) {
+    auto matrix = settings.getIntMatrix("charOffsets");
+    int modIdx = constrain((int) pkt->moduleIndex, 0, MAX_MODULES - 1);
+
+    while ((int) matrix.size() <= modIdx) matrix.push_back(std::vector<int>(48, 0));
+    if ((int) matrix[modIdx].size() < 48) matrix[modIdx].resize(48, 0);
+    for (int c = 0; c < 48; c++) {
+        matrix[modIdx][c] = pkt->charOffsets[c];
+    }
+    settings.putIntMatrix("charOffsets", matrix);
+
+    Serial.printf("[esp-now] applying pushed char offsets for module %d\n", modIdx);
+}
+
+void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOffsetsReportMessage *pkt) {
+    if (!initialized || !isMasterEnabled()) return;
+
+    int groupIdx = groupIndexForMac(mac);
+    if (groupIdx < 1) return;
+    int row = groupIdx - 1;
+
+    int moduleCount = constrain((int)pkt->moduleCount, 1, MAX_MODULES);
+
+    auto modOffs = settings.getIntMatrix("rModOffs");
+    while ((int)modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
+    for (int i = 0; i < 8; i++) {
+        modOffs[row][i] = (i < moduleCount) ? pkt->moduleOffsets[i] : 0;
+    }
+    settings.putIntMatrix("rModOffs", modOffs);
+
+    auto dispOffs = settings.getIntVector("rDispOffs");
+    while ((int)dispOffs.size() <= row) dispOffs.push_back(0);
+    dispOffs[row] = pkt->displayOffset;
+    settings.putIntVector("rDispOffs", dispOffs);
+
+    Serial.printf("[esp-now] received offset report from group %d\n", groupIdx + 1);
+}
+
+void SplitFlapEspNow::processCharOffsetsReport(const uint8_t *mac, const SplitFlapCharOffsetsReportMessage *pkt) {
+    if (!initialized || !isMasterEnabled()) return;
+
+    int groupIdx = groupIndexForMac(mac);
+    if (groupIdx < 1) return;
+    int row = groupIdx - 1;
+
+    String key = "rChrOff" + String(row);
+    auto matrix = settings.getIntMatrix(key.c_str());
+    int modIdx = constrain((int)pkt->moduleIndex, 0, MAX_MODULES - 1);
+
+    while ((int)matrix.size() <= modIdx) matrix.push_back(std::vector<int>(48, 0));
+    if ((int)matrix[modIdx].size() < 48) matrix[modIdx].resize(48, 0);
+    for (int c = 0; c < 48; c++) {
+        matrix[modIdx][c] = pkt->charOffsets[c];
+    }
+    settings.putIntMatrix(key.c_str(), matrix);
+
+    Serial.printf("[esp-now] received char offset report from group %d module %d\n", groupIdx + 1, modIdx);
+}
+
+int SplitFlapEspNow::groupIndexForMac(const uint8_t mac[6]) {
+    String macs = settings.getString("masterGroupMacs");
+    int groupCount = getGroupCount();
+    for (int i = 1; i < groupCount; i++) {
+        String groupMacStr = getCsvToken(macs, i);
+        uint8_t groupMac[6];
+        if (parseMacAddress(groupMacStr, groupMac) && memcmp(mac, groupMac, 6) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void SplitFlapEspNow::ensurePeer(const uint8_t mac[6]) {
+    if (!esp_now_is_peer_exist(mac)) {
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, mac, 6);
+        peer.channel = 0;
+        peer.encrypt = false;
+        peer.ifidx = (WiFi.getMode() == WIFI_AP) ? WIFI_IF_AP : WIFI_IF_STA;
+        esp_err_t result = esp_now_add_peer(&peer);
+        if (result != ESP_OK) {
+            Serial.printf("[esp-now] failed to add peer %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
+    }
+}
+
+void SplitFlapEspNow::learnMasterMac(const uint8_t mac[6]) {
+    if (!masterMacKnown) {
+        memcpy(masterMac, mac, 6);
+        masterMacKnown = true;
+        Serial.printf("[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+}
+
+void SplitFlapEspNow::processPendingOffsetPackets() {
+    bool gotOffsetsPush = false;
+    SplitFlapOffsetsPushMessage offsetsPkt = {};
+    uint8_t charMask = 0;
+    SplitFlapCharOffsetsPushMessage charPkts[MAX_MODULES];
+
+    noInterrupts();
+    gotOffsetsPush = pendingOffsetsPush;
+    if (gotOffsetsPush) {
+        memcpy(&offsetsPkt, &pendingOffsetsPushPkt, sizeof(offsetsPkt));
+        pendingOffsetsPush = false;
+    }
+    charMask = pendingCharOffsetsMask;
+    if (charMask) {
+        for (int m = 0; m < MAX_MODULES; m++) {
+            if (charMask & (1 << m)) {
+                memcpy(&charPkts[m], &pendingCharOffsetsPkts[m], sizeof(charPkts[m]));
+            }
+        }
+        pendingCharOffsetsMask = 0;
+    }
+    interrupts();
+
+    bool processedAny = false;
+
+    if (gotOffsetsPush) {
+        applyOffsetsPush(&offsetsPkt);
+        processedAny = true;
+    }
+
+    for (int m = 0; m < MAX_MODULES; m++) {
+        if (charMask & (1 << m)) {
+            applyCharOffsetsPush(&charPkts[m]);
+            processedAny = true;
+        }
+    }
+
+    if (processedAny) {
+        offsetDataDirty = true;
+        lastOffsetRxMs = millis();
+    }
+
+    if (offsetDataDirty && millis() - lastOffsetRxMs >= OFFSET_RELOAD_SETTLE_MS) {
+        offsetDataDirty = false;
+        Serial.println("[esp-now] applying pushed offsets to display");
+        display.reloadOffsets();
+    }
 }

@@ -11,6 +11,10 @@
 #define ESP_NOW_REMOTE_MODE 7
 #define ESP_NOW_TEXT_VERSION 1
 #define ESP_NOW_ANNOUNCE_VERSION 0xFE
+#define ESP_NOW_OFFSETS_PUSH   0xFC
+#define ESP_NOW_OFFSETS_REPORT 0xFB
+#define OFFSET_RELOAD_SETTLE_MS 250
+#define OFFSET_PACKET_SPACING_MS 10
 
 struct SplitFlapEspNowMessage
 {
@@ -24,6 +28,38 @@ struct SplitFlapAnnounceMessage
 {
     uint8_t version;
     uint8_t moduleCount;
+};
+
+struct SplitFlapOffsetsPushMessage
+{
+    uint8_t version;
+    uint8_t groupIndex;
+    uint8_t moduleCount;
+    int16_t displayOffset;
+    int16_t moduleOffsets[8];
+};
+
+struct SplitFlapCharOffsetsPushMessage
+{
+    uint8_t version;
+    uint8_t groupIndex;
+    uint8_t moduleIndex;
+    int8_t charOffsets[48];
+};
+
+struct SplitFlapOffsetsReportMessage
+{
+    uint8_t version;
+    uint8_t moduleCount;
+    int16_t displayOffset;
+    int16_t moduleOffsets[8];
+};
+
+struct SplitFlapCharOffsetsReportMessage
+{
+    uint8_t version;
+    uint8_t moduleIndex;
+    int8_t charOffsets[48];
 };
 
 struct DiscoveredPeer
@@ -44,6 +80,9 @@ class SplitFlapEspNow {
     int getDiscoveredCount();
     String getDiscoveredPeersJson();
     bool isMacAssigned(const String &mac);
+    void pushOffsetsToGroup(int groupIndex);
+    void reportOffsetsToMaster();
+    void processPendingOffsetPackets();
     void distributeMessage(
         const String &message, bool centering = true,
         unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
@@ -63,6 +102,15 @@ class SplitFlapEspNow {
     int discoveredCount;
     unsigned long lastAnnounceMs;
     unsigned long lastExpiryCheckMs;
+    uint8_t masterMac[6];
+    bool masterMacKnown;
+
+    volatile bool pendingOffsetsPush;
+    SplitFlapOffsetsPushMessage pendingOffsetsPushPkt;
+    volatile uint8_t pendingCharOffsetsMask;
+    SplitFlapCharOffsetsPushMessage pendingCharOffsetsPkts[MAX_MODULES];
+    bool offsetDataDirty;
+    unsigned long lastOffsetRxMs;
 
     bool ensureInitialized();
     int getGroupCount();
@@ -82,6 +130,13 @@ class SplitFlapEspNow {
     void queueReceived(const uint8_t *mac, const uint8_t *data, int len);
     void broadcastAnnouncement();
     void processAnnouncement(const uint8_t *mac, const SplitFlapAnnounceMessage *pkt);
+    void applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt);
+    void applyCharOffsetsPush(const SplitFlapCharOffsetsPushMessage *pkt);
+    void processOffsetsReport(const uint8_t *mac, const SplitFlapOffsetsReportMessage *pkt);
+    void processCharOffsetsReport(const uint8_t *mac, const SplitFlapCharOffsetsReportMessage *pkt);
+    int groupIndexForMac(const uint8_t mac[6]);
+    void ensurePeer(const uint8_t mac[6]);
+    void learnMasterMac(const uint8_t mac[6]);
     String macToString(const uint8_t mac[6]);
 
     static SplitFlapEspNow *instance;

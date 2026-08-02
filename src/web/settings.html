@@ -14,7 +14,7 @@
         <script defer src="index.js" type="module"></script>
     </head>
     <body
-        x-data="Object.assign(page('Settings'),  { showAdvanced: false }, {
+        x-data="Object.assign(page('Settings'),  { showAdvanced: false, selectedOffsetGroup: 0 }, {
     showHelp: false,
     helpTitle: '',
     helpContent: '',
@@ -522,169 +522,256 @@
                 x-text="errors.message"
             ></div>
 
-            <label class="block text-left text-lg mt-4"> Module Offsets </label>
-            <div class="grid grid-cols-4 md:grid-cols-8 gap-2 mt-2 w-full">
-                <template
-                    x-for="(val, i) in Array.from({ length: settings.moduleCount })"
-                    :key="`off-${i}`"
-                >
-                    <input
-                        type="number"
-                        class="no-buttons w-full p-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
-                        :value="offsetArray[i]"
-                        @input="setOffset(i, $event.target.value)"
-                        placeholder="e.g. 0"
-                    />
-                </template>
-            </div>
-            <div
-                class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
-                x-cloak
-                x-show="errors.key === 'moduleOffsets'"
-                x-text="errors.message"
-            ></div>
-
             <h2
-                class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2"
+                class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2 flex justify-between"
             >
-                Character Offsets
+                Offset Calibration
+
+                <button
+                    type="button"
+                    class="ml-1 text-sm text-gray-400 hover:text-white cursor-pointer transition-colors"
+                    @click="$dispatch('open-help', {
+        title: 'Offset Calibration Help',
+        content: `
+            <ul class='list-disc list-inside pl-2'>
+                <li><strong>Display Offset:</strong> A global offset applied to all modules in the selected group.</li>
+                <li><strong>Module Offsets:</strong> Fine-tune each module's zero position if flaps are misaligned.</li>
+                <li><strong>Character Offsets:</strong> Fine-tune each character position per module. Range: -32 to 32 steps.</li>
+            </ul>
+            <p class='mt-2'>In multi-group mode, use the group selector to configure offsets for each remote group.</p>
+        `
+    })"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke-width="1.5"
+                        stroke="currentColor"
+                        class="size-6"
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z"
+                        />
+                    </svg>
+                </button>
             </h2>
+
             <p class="text-sm text-gray-400 text-left w-full mb-4">
-                Fine-tune each character position per module. Use ▲/▼ to adjust
-                by 1 step.
+                Fine-tune each module's position. Select a group to configure
+                its offsets.
             </p>
 
-            <div class="w-full space-y-2">
+            <div
+                class="flex gap-1 flex-wrap"
+                x-show="settings.masterGroupCount > 1"
+                x-cloak
+            >
                 <template
-                    x-for="(val, modIdx) in Array.from({ length: settings.moduleCount })"
-                    :key="`charoff-hdr-${modIdx}`"
+                    x-for="i in Array.from({ length: settings.masterGroupCount }, (_, idx) => idx + 1)"
+                    :key="`gs-${i}`"
                 >
-                    <div
-                        class="border border-gray-600 rounded-md overflow-hidden"
+                    <button
+                        type="button"
+                        class="px-4 py-2 rounded-t-md text-sm font-medium transition-colors"
+                        :class="selectedOffsetGroup === (i-1)
+                            ? 'bg-neutral-600 text-white'
+                            : 'bg-neutral-700 text-gray-400 hover:bg-neutral-600'"
+                        @click="selectedOffsetGroup = i - 1"
                     >
-                        <button
-                            type="button"
-                            class="w-full flex items-center justify-between p-3 bg-neutral-700 hover:bg-neutral-600 transition-colors text-left"
-                            @click="toggleCharOffsetPanel(modIdx)"
+                        <span x-text="`Group ${i}`"></span>
+                        <span x-show="i === 1" class="ml-1 text-xs opacity-70"
+                            >(Local)</span
                         >
-                            <span class="flex items-center gap-2">
-                                <svg
-                                    class="w-4 h-4 transition-transform"
-                                    :class="{ 'rotate-90': openCharPanel === modIdx }"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                >
-                                    <path
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                        d="M9 5l7 7-7 7"
-                                    />
-                                </svg>
-                                <span
-                                    class="font-medium"
-                                    x-text="`Module ${modIdx + 1}`"
-                                ></span>
-                            </span>
-                            <span
-                                class="text-xs text-gray-400"
-                                x-show="!allZeroCharOffsets(modIdx)"
-                            >
-                                modified
-                            </span>
-                        </button>
-
-                        <div
-                            x-cloak
-                            x-show="openCharPanel === modIdx"
-                            class="p-3 bg-neutral-800"
+                        <span x-show="i > 1" class="ml-1 text-xs opacity-70"
+                            >(Remote)</span
                         >
-                            <div class="flex flex-wrap items-center gap-2 mb-3">
-                                <button
-                                    type="button"
-                                    class="px-3 py-1 text-sm bg-neutral-600 hover:bg-neutral-500 rounded transition-colors"
-                                    @click="resetCharOffsets(modIdx)"
-                                >
-                                    Reset
-                                </button>
-                                <span class="text-sm text-gray-400"
-                                    >Copy from:</span
-                                >
-                                <select
-                                    class="p-1 text-sm border border-gray-600 rounded bg-neutral-700 text-gray-100"
-                                    x-model.number="copyFromModule"
-                                >
-                                    <template
-                                        x-for="(v, ci) in Array.from({ length: settings.moduleCount })"
-                                        :key="`copyopt-${modIdx}-${ci}`"
-                                    >
-                                        <option
-                                            :value="ci"
-                                            :disabled="ci === modIdx"
-                                            x-text="`Module ${ci + 1}`"
-                                        ></option>
-                                    </template>
-                                </select>
-                                <button
-                                    type="button"
-                                    class="px-3 py-1 text-sm bg-neutral-600 hover:bg-neutral-500 rounded transition-colors"
-                                    @click="copyCharOffsets(copyFromModule, modIdx)"
-                                    :disabled="copyFromModule === modIdx"
-                                >
-                                    Copy
-                                </button>
-                            </div>
-
-                            <div
-                                class="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 gap-1"
-                            >
-                                <template
-                                    x-for="(ch, charIdx) in charsetChars"
-                                    :key="`co-${modIdx}-${charIdx}`"
-                                >
-                                    <div class="flex flex-col items-center">
-                                        <span
-                                            class="text-xs font-mono text-gray-400 mb-0.5"
-                                            x-text="ch === ' ' ? '⎵' : ch"
-                                        ></span>
-                                        <button
-                                            type="button"
-                                            class="w-full text-xs leading-none text-gray-400 hover:text-amber-500 py-0.5"
-                                            @click="setCharOffset(modIdx, charIdx, getCharOffset(modIdx, charIdx) + 1)"
-                                        >
-                                            ▲
-                                        </button>
-                                        <input
-                                            type="number"
-                                            class="no-buttons w-12 p-1 text-xs border border-gray-600 rounded text-center"
-                                            :class="getCharOffset(modIdx, charIdx) === 0
-                                                ? 'bg-neutral-900 text-gray-600'
-                                                : 'bg-neutral-700 text-gray-100 border-amber-500'"
-                                            :value="getCharOffset(modIdx, charIdx)"
-                                            @input="setCharOffset(modIdx, charIdx, $event.target.value)"
-                                        />
-                                        <button
-                                            type="button"
-                                            class="w-full text-xs leading-none text-gray-400 hover:text-amber-500 py-0.5"
-                                            @click="setCharOffset(modIdx, charIdx, getCharOffset(modIdx, charIdx) - 1)"
-                                        >
-                                            ▼
-                                        </button>
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </div>
+                    </button>
                 </template>
             </div>
 
-            <div
-                class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
-                x-cloak
-                x-show="errors.key === 'charOffsets'"
-                x-text="errors.message"
-            ></div>
+            <div class="border border-gray-600 rounded-md p-4 bg-neutral-800">
+                <label class="block text-left text-lg mt-2"
+                    >Display Offset</label
+                >
+                <input
+                    type="number"
+                    class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-left bg-neutral-700 text-gray-100 max-w-xs"
+                    :value="currentDisplayOffset"
+                    @change="setCurrentDisplayOffset($event.target.value)"
+                    placeholder="0"
+                />
+
+                <label class="block text-left text-lg mt-4"
+                    >Module Offsets</label
+                >
+                <div class="grid grid-cols-4 md:grid-cols-8 gap-2 mt-2 w-full">
+                    <template
+                        x-for="(val, i) in Array.from({ length: offsetModuleCount })"
+                        :key="`off-${selectedOffsetGroup}-${i}`"
+                    >
+                        <input
+                            type="number"
+                            class="no-buttons w-full p-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                            :value="currentOffsetArray[i] || 0"
+                            @change="setCurrentOffset(i, $event.target.value)"
+                            placeholder="0"
+                        />
+                    </template>
+                </div>
+                <div
+                    class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                    x-cloak
+                    x-show="errors.key === 'moduleOffsets'"
+                    x-text="errors.message"
+                ></div>
+
+                <h3 class="text-lg font-semibold text-left w-full mt-6 mb-2">
+                    Character Offsets
+                </h3>
+                <p class="text-sm text-gray-400 text-left w-full mb-4">
+                    Fine-tune each character position per module. Use ▲/▼ to
+                    adjust by 1 step. Range: -32 to 32.
+                </p>
+
+                <div class="w-full space-y-2">
+                    <template
+                        x-for="(val, modIdx) in Array.from({ length: offsetModuleCount })"
+                        :key="`charoff-hdr-${selectedOffsetGroup}-${modIdx}`"
+                    >
+                        <div
+                            class="border border-gray-600 rounded-md overflow-hidden"
+                        >
+                            <button
+                                type="button"
+                                class="w-full flex items-center justify-between p-3 bg-neutral-700 hover:bg-neutral-600 transition-colors text-left"
+                                @click="toggleCharOffsetPanel(modIdx)"
+                            >
+                                <span class="flex items-center gap-2">
+                                    <svg
+                                        class="w-4 h-4 transition-transform"
+                                        :class="{ 'rotate-90': openCharPanel === modIdx }"
+                                        fill="none"
+                                        viewBox="0 0 24 24"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                    >
+                                        <path
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                            d="M9 5l7 7-7 7"
+                                        />
+                                    </svg>
+                                    <span
+                                        class="font-medium"
+                                        x-text="`Module ${modIdx + 1}`"
+                                    ></span>
+                                </span>
+                                <span
+                                    class="text-xs text-gray-400"
+                                    x-show="!allZeroCurrentCharOffsets(modIdx)"
+                                >
+                                    modified
+                                </span>
+                            </button>
+
+                            <div
+                                x-cloak
+                                x-show="openCharPanel === modIdx"
+                                class="p-3 bg-neutral-800"
+                            >
+                                <div
+                                    class="flex flex-wrap items-center gap-2 mb-3"
+                                >
+                                    <button
+                                        type="button"
+                                        class="px-3 py-1 text-sm bg-neutral-600 hover:bg-neutral-500 rounded transition-colors"
+                                        @click="resetCurrentCharOffsets(modIdx)"
+                                    >
+                                        Reset
+                                    </button>
+                                    <span class="text-sm text-gray-400"
+                                        >Copy from:</span
+                                    >
+                                    <select
+                                        class="p-1 text-sm border border-gray-600 rounded bg-neutral-700 text-gray-100"
+                                        x-model.number="copyFromModule"
+                                    >
+                                        <template
+                                            x-for="(v, ci) in Array.from({ length: offsetModuleCount })"
+                                            :key="`copyopt-${selectedOffsetGroup}-${modIdx}-${ci}`"
+                                        >
+                                            <option
+                                                :value="ci"
+                                                :disabled="ci === modIdx"
+                                                x-text="`Module ${ci + 1}`"
+                                            ></option>
+                                        </template>
+                                    </select>
+                                    <button
+                                        type="button"
+                                        class="px-3 py-1 text-sm bg-neutral-600 hover:bg-neutral-500 rounded transition-colors"
+                                        @click="copyCurrentCharOffsets(copyFromModule, modIdx)"
+                                        :disabled="copyFromModule === modIdx"
+                                    >
+                                        Copy
+                                    </button>
+                                </div>
+
+                                <div
+                                    class="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 gap-1"
+                                >
+                                    <template
+                                        x-for="(ch, charIdx) in charsetChars"
+                                        :key="`co-${selectedOffsetGroup}-${modIdx}-${charIdx}`"
+                                    >
+                                        <div class="flex flex-col items-center">
+                                            <span
+                                                class="text-xs font-mono text-gray-400 mb-0.5"
+                                                x-text="ch === ' ' ? '⎵' : ch"
+                                            ></span>
+                                            <button
+                                                type="button"
+                                                class="w-full text-xs leading-none text-gray-400 hover:text-amber-500 py-0.5"
+                                                @click="setCurrentCharOffset(modIdx, charIdx, Math.min(32, getCurrentCharOffset(modIdx, charIdx) + 1))"
+                                            >
+                                                ▲
+                                            </button>
+                                            <input
+                                                type="number"
+                                                min="-32"
+                                                max="32"
+                                                class="no-buttons w-12 p-1 text-xs border border-gray-600 rounded text-center"
+                                                :class="getCurrentCharOffset(modIdx, charIdx) === 0
+                                                    ? 'bg-neutral-900 text-gray-600'
+                                                    : 'bg-neutral-700 text-gray-100 border-amber-500'"
+                                                :value="getCurrentCharOffset(modIdx, charIdx)"
+                                                @change="setCurrentCharOffset(modIdx, charIdx, Math.max(-32, Math.min(32, $event.target.value)))"
+                                            />
+                                            <button
+                                                type="button"
+                                                class="w-full text-xs leading-none text-gray-400 hover:text-amber-500 py-0.5"
+                                                @click="setCurrentCharOffset(modIdx, charIdx, Math.max(-32, getCurrentCharOffset(modIdx, charIdx) - 1))"
+                                            >
+                                                ▼
+                                            </button>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+
+                <div
+                    class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                    x-cloak
+                    x-show="errors.key === 'charOffsets'"
+                    x-text="errors.message"
+                ></div>
+            </div>
 
             <h2
                 class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2"
@@ -693,22 +780,41 @@
             </h2>
 
             <div class="w-full mt-4 mb-6 p-4 bg-neutral-700 rounded-md">
-                <h3 class="text-lg font-semibold mb-3 text-left">Discovered Devices</h3>
-                <div x-show="discoveredPeers.length === 0" class="text-gray-400 text-sm">
-                    No devices discovered. Waiting for remote controllers to announce themselves...
+                <h3 class="text-lg font-semibold mb-3 text-left">
+                    Discovered Devices
+                </h3>
+                <div
+                    x-show="discoveredPeers.length === 0"
+                    class="text-gray-400 text-sm"
+                >
+                    No devices discovered. Waiting for remote controllers to
+                    announce themselves...
                 </div>
                 <div x-show="discoveredPeers.length > 0" class="space-y-2">
                     <template x-for="peer in discoveredPeers" :key="peer.mac">
-                        <div class="flex items-center justify-between p-3 bg-neutral-800 rounded">
+                        <div
+                            class="flex items-center justify-between p-3 bg-neutral-800 rounded"
+                        >
                             <div class="flex-1">
-                                <div class="font-mono text-sm" x-text="peer.mac"></div>
+                                <div
+                                    class="font-mono text-sm"
+                                    x-text="peer.mac"
+                                ></div>
                                 <div class="text-xs text-gray-400">
-                                    <span x-text="peer.moduleCount"></span> modules
-                                    <span x-show="isPeerAssigned(peer.mac)" class="ml-2 text-amber-500" x-text="assignedGroupLabel(peer.mac)"></span>
+                                    <span x-text="peer.moduleCount"></span>
+                                    modules
+                                    <span
+                                        x-show="isPeerAssigned(peer.mac)"
+                                        class="ml-2 text-amber-500"
+                                        x-text="assignedGroupLabel(peer.mac)"
+                                    ></span>
                                 </div>
                             </div>
                             <div class="flex gap-2">
-                                <template x-for="groupIdx in Array.from({ length: settings.masterGroupCount - 1 }, (_, i) => i + 1)" :key="groupIdx">
+                                <template
+                                    x-for="groupIdx in Array.from({ length: settings.masterGroupCount - 1 }, (_, i) => i + 1)"
+                                    :key="groupIdx"
+                                >
                                     <button
                                         x-show="!isPeerAssigned(peer.mac) && !groupMacArray[groupIdx]"
                                         type="button"
@@ -755,9 +861,20 @@
                     >
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex items-center gap-2">
-                                <span class="text-lg font-semibold" x-text="`Group ${i + 1}`"></span>
-                                <span x-show="i === 0" class="text-xs bg-blue-600 px-2 py-1 rounded">Local</span>
-                                <span x-show="i > 0" class="text-xs bg-purple-600 px-2 py-1 rounded">Remote</span>
+                                <span
+                                    class="text-lg font-semibold"
+                                    x-text="`Group ${i + 1}`"
+                                ></span>
+                                <span
+                                    x-show="i === 0"
+                                    class="text-xs bg-blue-600 px-2 py-1 rounded"
+                                    >Local</span
+                                >
+                                <span
+                                    x-show="i > 0"
+                                    class="text-xs bg-purple-600 px-2 py-1 rounded"
+                                    >Remote</span
+                                >
                             </div>
                             <div x-show="i > 0" class="flex gap-1">
                                 <button
@@ -767,8 +884,19 @@
                                     @click="moveGroupUp(i)"
                                     title="Move up"
                                 >
-                                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        class="w-4 h-4"
+                                        fill="none"
+                                        viewBox="0 0 24 24"
+                                        stroke="currentColor"
+                                    >
+                                        <path
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                            stroke-width="2"
+                                            d="M5 15l7-7 7 7"
+                                        />
                                     </svg>
                                 </button>
                                 <button
@@ -778,8 +906,19 @@
                                     @click="moveGroupDown(i)"
                                     title="Move down"
                                 >
-                                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        class="w-4 h-4"
+                                        fill="none"
+                                        viewBox="0 0 24 24"
+                                        stroke="currentColor"
+                                    >
+                                        <path
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                            stroke-width="2"
+                                            d="M19 9l-7 7-7-7"
+                                        />
                                     </svg>
                                 </button>
                             </div>
@@ -787,8 +926,12 @@
 
                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                             <div class="sm:col-span-2">
-                                <label class="block text-left text-sm text-gray-300 mb-1">
-                                    <span x-text="i === 0 ? 'MAC Address' : 'Peer MAC Address'"></span>
+                                <label
+                                    class="block text-left text-sm text-gray-300 mb-1"
+                                >
+                                    <span
+                                        x-text="i === 0 ? 'MAC Address' : 'Peer MAC Address'"
+                                    ></span>
                                 </label>
                                 <div class="flex gap-2">
                                     <input
@@ -806,14 +949,27 @@
                                         @click="removePeer(i)"
                                         title="Remove device"
                                     >
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                        <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            class="w-5 h-5"
+                                            fill="none"
+                                            viewBox="0 0 24 24"
+                                            stroke="currentColor"
+                                        >
+                                            <path
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                                stroke-width="2"
+                                                d="M6 18L18 6M6 6l12 12"
+                                            />
                                         </svg>
                                     </button>
                                 </div>
                             </div>
                             <div>
-                                <label class="block text-left text-sm text-gray-300 mb-1">
+                                <label
+                                    class="block text-left text-sm text-gray-300 mb-1"
+                                >
                                     Modules
                                 </label>
                                 <input
@@ -908,27 +1064,6 @@
                             class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
                             x-cloak
                             x-show="errors.key === 'sclPin'"
-                            x-text="errors.message"
-                        ></div>
-                    </div>
-
-                    <div>
-                        <label
-                            for="displayOffset"
-                            class="block text-left text-lg mt-4"
-                            >Display Offset</label
-                        >
-                        <input
-                            class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
-                            type="number"
-                            id="displayOffset"
-                            x-model="settings.displayOffset"
-                            placeholder="Enter display offset"
-                        />
-                        <div
-                            class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
-                            x-cloak
-                            x-show="errors.key === 'displayOffset'"
                             x-text="errors.message"
                         ></div>
                     </div>

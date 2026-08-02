@@ -5,6 +5,8 @@
 #include <AsyncJson.h>
 #include <ctype.h>
 
+bool isMultiDisplayMasterEnabled();
+
 #define AP_SSID "Split Flap Display"
 
 #ifndef WIFI_SSID
@@ -417,6 +419,15 @@ void SplitFlapWebServer::startWebServer() {
             offsetsChanged = true;
         }
 
+        bool remoteOffsetsChanged = false;
+        const char *remoteOffsetKeys[] = {"rModOffs", "rChrOff0", "rChrOff1", "rChrOff2", "rChrOff3", "rChrOff4", "rDispOffs"};
+        for (const char *k : remoteOffsetKeys) {
+            if (json[k].is<String>() && json[k].as<String>() != settings.getString(k)) {
+                remoteOffsetsChanged = true;
+                break;
+            }
+        }
+
         if (! settings.fromJson(json)) {
             response["message"] = "Failed to save settings";
             response["type"] = "error";
@@ -426,8 +437,30 @@ void SplitFlapWebServer::startWebServer() {
         }
 
         if (offsetsChanged) {
+            auto chrOffs = settings.getIntMatrix("charOffsets");
+            for (auto &row : chrOffs) for (auto &v : row) v = constrain(v, -32, 32);
+            settings.putIntMatrix("charOffsets", chrOffs);
+
             display.reloadOffsets();
             response["message"] = "Settings saved and offsets applied!";
+
+            if (!isMultiDisplayMasterEnabled() && espNow) {
+                espNow->reportOffsetsToMaster();
+            }
+        }
+
+        if (remoteOffsetsChanged && isMultiDisplayMasterEnabled()) {
+            for (int r = 0; r < 5; r++) {
+                String key = "rChrOff" + String(r);
+                auto rChrOffs = settings.getIntMatrix(key.c_str());
+                for (auto &row : rChrOffs) for (auto &v : row) v = constrain(v, -32, 32);
+                settings.putIntMatrix(key.c_str(), rChrOffs);
+            }
+
+            int groupCount = settings.getInt("masterGroupCount");
+            for (int i = 1; i < groupCount; i++) {
+                espNow->pushOffsetsToGroup(i);
+            }
         }
 
         response["type"] = "success";
