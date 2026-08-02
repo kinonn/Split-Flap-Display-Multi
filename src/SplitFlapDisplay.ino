@@ -45,6 +45,9 @@ JsonSettings settings = JsonSettings("config", {
     // Scroll Settings (only applies to messages longer than numModules)
     {"scrollDelayMs", JsonSetting(1500)},
     {"scrollRepeatCount", JsonSetting(2)},
+    // Boot / Power Settings
+    {"bootDelayMs", JsonSetting(2000)},          // power-on settle delay; set the slave higher than the master in multi-display setups
+    {"maxConcurrentMotors", JsonSetting(2)},    // cap on simultaneously energized motors during boot homing (1-8)
     // Multi-display master settings
     {"masterGroupCount", JsonSetting(1)},
     {"masterGroupModuleCounts", JsonSetting({8, 8, 8, 8, 8, 8})},
@@ -77,9 +80,26 @@ void setup() {
     Serial.println("[boot] serial ready");
     Serial.flush();
 
-#ifdef STARTUP_DELAY
-    delay(STARTUP_DELAY);
-#endif
+    // Power down all motor coils BEFORE anything else (web server, WiFi,
+    // boot delay). The PCF8575 I/O expanders power up with all outputs
+    // HIGH and the ULN2003 driver boards invert that signal, so at
+    // power-on EVERY coil of EVERY module is energized until the firmware
+    // writes the outputs low. With 11 modules that is several amps on the
+    // shared 5V rail — enough to collapse it below the ESP32's brownout
+    // threshold before the display ever gets to move (observed: 10 modules
+    // survive at ~3.2V, the 11th tips it under 3V and nothing moves).
+    // display.init() writes the init state + stop() to each module, so the
+    // coils are off within milliseconds of setup() starting. The network
+    // bring-up below then runs with the motors unpowered.
+    display.init();
+    Serial.println("[boot] display init complete (motor coils powered down)");
+    Serial.flush();
+
+    // Per-device boot delay: lets the rail settle after power-on (coils
+    // are already off, so this draws almost nothing). In multi-display
+    // setups set the slave's bootDelayMs higher than the master's so the
+    // two boards never energize motors (or transmit WiFi) at the same time.
+    delay(settings.getInt("bootDelayMs"));
 
     Serial.println("Init Web Server");
     Serial.flush();
@@ -98,9 +118,6 @@ void setup() {
         Serial.println("[boot] services started in access point mode");
         Serial.flush();
 
-        display.init();
-        Serial.println("[boot] display init complete");
-        Serial.flush();
         if (getSplitFlapEspNow()->init()) {
             Serial.println("[boot] esp-now initialized successfully");
         } else {
@@ -127,9 +144,6 @@ void setup() {
         Serial.println("[boot] network services started");
         Serial.flush();
 
-        display.init();
-        Serial.println("[boot] display init complete");
-        Serial.flush();
         if (getSplitFlapEspNow()->init()) {
             Serial.println("[boot] esp-now initialized successfully");
         } else {

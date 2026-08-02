@@ -76,6 +76,12 @@ class SplitFlapDisplay {
                                          // show; used by reloadOffsets to
                                          // reposition after a home
 
+    // Concurrency cap for moveTo(): number of motors allowed to be
+    // energized at the same time. < 0 = unlimited (normal message writes).
+    // Homing paths set this from the "maxConcurrentMotors" setting so the
+    // boot homing peak stays bounded on large displays.
+    int maxConcurrentMotors;
+
     float maxVel;       // Max Velocity In RPM
     int charSetSize;    // 37 for standard, 48 for extended
     int stepsPerRot;    // number of motor steps per full rotation of character
