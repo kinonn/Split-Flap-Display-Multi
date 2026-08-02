@@ -29,6 +29,7 @@ document.addEventListener("alpine:init", () => {
         discoveredPeers: [],
         errors: {},
         timezones: {},
+        selectedOffsetGroup: 0,
 
         // Control page specific
         singleMode: true,
@@ -73,8 +74,7 @@ document.addEventListener("alpine:init", () => {
             if (!this.settings.charOffsets) return [];
             return this.settings.charOffsets
                 .split(";")
-                .filter((r) => r.length > 0)
-                .map((r) => r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
         },
         setCharOffset(modIndex, charIndex, value) {
             const matrix = this.charOffsetMatrix;
@@ -103,6 +103,169 @@ document.addEventListener("alpine:init", () => {
             this.settings.charOffsets = matrix
                 .map((r) => r.join(","))
                 .join(";");
+        },
+
+        get remoteOffsetMatrix() {
+            if (!this.settings.rModOffs) return [];
+            return this.settings.rModOffs
+                .split(";")
+                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+        },
+        setRemoteOffset(groupRow, modIndex, value) {
+            const matrix = this.remoteOffsetMatrix;
+            while (matrix.length <= groupRow) matrix.push(Array(8).fill(0));
+            while (matrix[groupRow].length <= modIndex)
+                matrix[groupRow].push(0);
+            matrix[groupRow][modIndex] = parseInt(value) || 0;
+            this.settings.rModOffs = matrix.map((r) => r.join(",")).join(";");
+        },
+
+        get remoteDisplayOffsetArray() {
+            return (
+                this.settings.rDispOffs
+                    ?.split(",")
+                    .map((s) => parseInt(s.trim()) || 0) || []
+            );
+        },
+        setRemoteDisplayOffset(groupRow, value) {
+            const arr = this.remoteDisplayOffsetArray;
+            while (arr.length <= groupRow) arr.push(0);
+            arr[groupRow] = parseInt(value) || 0;
+            this.settings.rDispOffs = arr.join(",");
+        },
+
+        getRemoteCharOffsetMatrix(groupRow) {
+            const key = "rChrOff" + groupRow;
+            if (!this.settings[key]) return [];
+            return this.settings[key]
+                .split(";")
+                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+        },
+        setRemoteCharOffset(groupRow, modIndex, charIndex, value) {
+            const key = "rChrOff" + groupRow;
+            const matrix = this.getRemoteCharOffsetMatrix(groupRow);
+            while (matrix.length <= modIndex) matrix.push([]);
+            while (matrix[modIndex].length <= charIndex)
+                matrix[modIndex].push(0);
+            matrix[modIndex][charIndex] = Math.max(
+                -32,
+                Math.min(32, parseInt(value) || 0),
+            );
+            this.settings[key] = matrix.map((r) => r.join(",")).join(";");
+        },
+        resetRemoteCharOffsets(groupRow, modIndex) {
+            const key = "rChrOff" + groupRow;
+            const matrix = this.getRemoteCharOffsetMatrix(groupRow);
+            const numChars = this.settings.charset || 48;
+            while (matrix.length <= modIndex) matrix.push([]);
+            matrix[modIndex] = Array(numChars).fill(0);
+            this.settings[key] = matrix.map((r) => r.join(",")).join(";");
+        },
+        copyRemoteCharOffsets(groupRow, fromIndex, toIndex) {
+            const key = "rChrOff" + groupRow;
+            const matrix = this.getRemoteCharOffsetMatrix(groupRow);
+            if (fromIndex >= matrix.length) return;
+            while (matrix.length <= toIndex) matrix.push([]);
+            matrix[toIndex] = [...matrix[fromIndex]];
+            this.settings[key] = matrix.map((r) => r.join(",")).join(";");
+        },
+
+        get offsetModuleCount() {
+            if (this.selectedOffsetGroup === 0)
+                return this.settings.moduleCount;
+            return (
+                parseInt(this.groupModuleArray[this.selectedOffsetGroup]) || 8
+            );
+        },
+
+        get currentOffsetArray() {
+            if (this.selectedOffsetGroup === 0) return this.offsetArray;
+            const matrix = this.remoteOffsetMatrix;
+            return matrix[this.selectedOffsetGroup - 1] || [];
+        },
+        setCurrentOffset(index, value) {
+            if (this.selectedOffsetGroup === 0) {
+                this.setOffset(index, value);
+            } else {
+                this.setRemoteOffset(
+                    this.selectedOffsetGroup - 1,
+                    index,
+                    value,
+                );
+            }
+        },
+
+        get currentDisplayOffset() {
+            if (this.selectedOffsetGroup === 0)
+                return this.settings.displayOffset;
+            const arr = this.remoteDisplayOffsetArray;
+            return arr[this.selectedOffsetGroup - 1] || 0;
+        },
+        setCurrentDisplayOffset(value) {
+            if (this.selectedOffsetGroup === 0) {
+                this.settings.displayOffset = parseInt(value) || 0;
+            } else {
+                this.setRemoteDisplayOffset(
+                    this.selectedOffsetGroup - 1,
+                    value,
+                );
+            }
+        },
+
+        getCurrentCharOffset(modIdx, charIdx) {
+            if (this.selectedOffsetGroup === 0)
+                return this.getCharOffset(modIdx, charIdx);
+            const matrix = this.getRemoteCharOffsetMatrix(
+                this.selectedOffsetGroup - 1,
+            );
+            if (
+                modIdx >= matrix.length ||
+                charIdx >= (matrix[modIdx]?.length || 0)
+            )
+                return 0;
+            return matrix[modIdx][charIdx];
+        },
+        setCurrentCharOffset(modIdx, charIdx, value) {
+            if (this.selectedOffsetGroup === 0) {
+                this.setCharOffset(modIdx, charIdx, value);
+            } else {
+                this.setRemoteCharOffset(
+                    this.selectedOffsetGroup - 1,
+                    modIdx,
+                    charIdx,
+                    value,
+                );
+            }
+        },
+        resetCurrentCharOffsets(modIdx) {
+            if (this.selectedOffsetGroup === 0) {
+                this.resetCharOffsets(modIdx);
+            } else {
+                this.resetRemoteCharOffsets(
+                    this.selectedOffsetGroup - 1,
+                    modIdx,
+                );
+            }
+        },
+        copyCurrentCharOffsets(fromIndex, toIndex) {
+            if (this.selectedOffsetGroup === 0) {
+                this.copyCharOffsets(fromIndex, toIndex);
+            } else {
+                this.copyRemoteCharOffsets(
+                    this.selectedOffsetGroup - 1,
+                    fromIndex,
+                    toIndex,
+                );
+            }
+        },
+        allZeroCurrentCharOffsets(modIdx) {
+            if (this.selectedOffsetGroup === 0)
+                return this.allZeroCharOffsets(modIdx);
+            const matrix = this.getRemoteCharOffsetMatrix(
+                this.selectedOffsetGroup - 1,
+            );
+            if (modIdx >= matrix.length) return true;
+            return matrix[modIdx].every((v) => v === 0);
         },
 
         get charsetChars() {
@@ -175,7 +338,8 @@ document.addEventListener("alpine:init", () => {
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
                 const groupMac = (this.groupMacArray[i] || "").toUpperCase();
-                if (groupMac === normalized) return `Assigned to Group ${i + 1}`;
+                if (groupMac === normalized)
+                    return `Assigned to Group ${i + 1}`;
             }
             return "";
         },
@@ -186,13 +350,19 @@ document.addEventListener("alpine:init", () => {
             if (peer) {
                 this.setGroupModuleCount(groupIndex, peer.moduleCount);
             }
-            this.showDialog(`Assigned to Group ${groupIndex + 1}. Click Save to persist.`, "success");
+            this.showDialog(
+                `Assigned to Group ${groupIndex + 1}. Click Save to persist.`,
+                "success",
+            );
         },
 
         removePeer(groupIndex) {
             this.setGroupMac(groupIndex, "");
             this.setGroupModuleCount(groupIndex, "8");
-            this.showDialog(`Removed Group ${groupIndex + 1} device. Click Save to persist.`, "success");
+            this.showDialog(
+                `Removed Group ${groupIndex + 1} device. Click Save to persist.`,
+                "success",
+            );
         },
 
         moveGroupUp(index) {
@@ -200,7 +370,10 @@ document.addEventListener("alpine:init", () => {
             const macs = this.groupMacArray;
             const counts = this.groupModuleArray;
             [macs[index - 1], macs[index]] = [macs[index], macs[index - 1]];
-            [counts[index - 1], counts[index]] = [counts[index], counts[index - 1]];
+            [counts[index - 1], counts[index]] = [
+                counts[index],
+                counts[index - 1],
+            ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
         },
@@ -210,7 +383,10 @@ document.addEventListener("alpine:init", () => {
             const macs = this.groupMacArray;
             const counts = this.groupModuleArray;
             [macs[index + 1], macs[index]] = [macs[index], macs[index + 1]];
-            [counts[index + 1], counts[index]] = [counts[index], counts[index + 1]];
+            [counts[index + 1], counts[index]] = [
+                counts[index],
+                counts[index + 1],
+            ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
         },

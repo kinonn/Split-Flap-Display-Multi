@@ -71,8 +71,7 @@ const createPageData = (type = "Settings") => {
             if (!this.settings.charOffsets) return [];
             return this.settings.charOffsets
                 .split(";")
-                .filter((r) => r.length > 0)
-                .map((r) => r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
         },
         setCharOffset(modIndex, charIndex, value) {
             const matrix = this.charOffsetMatrix;
@@ -103,9 +102,184 @@ const createPageData = (type = "Settings") => {
                 .join(";");
         },
 
+        selectedOffsetGroup: 0,
+
+        get remoteOffsetMatrix() {
+            if (!this.settings.rModOffs) return [];
+            return this.settings.rModOffs
+                .split(";")
+                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+        },
+        setRemoteOffset(groupRow, modIndex, value) {
+            const matrix = this.remoteOffsetMatrix;
+            while (matrix.length <= groupRow) matrix.push(Array(8).fill(0));
+            while (matrix[groupRow].length <= modIndex)
+                matrix[groupRow].push(0);
+            matrix[groupRow][modIndex] = parseInt(value) || 0;
+            this.settings.rModOffs = matrix.map((r) => r.join(",")).join(";");
+        },
+
+        get remoteDisplayOffsetArray() {
+            return (
+                this.settings.rDispOffs
+                    ?.split(",")
+                    .map((s) => parseInt(s.trim()) || 0) || []
+            );
+        },
+        setRemoteDisplayOffset(groupRow, value) {
+            const arr = this.remoteDisplayOffsetArray;
+            while (arr.length <= groupRow) arr.push(0);
+            arr[groupRow] = parseInt(value) || 0;
+            this.settings.rDispOffs = arr.join(",");
+        },
+
+        getRemoteCharOffsetMatrix(groupRow) {
+            const key = "rChrOff" + groupRow;
+            if (!this.settings[key]) return [];
+            return this.settings[key]
+                .split(";")
+                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+        },
+        setRemoteCharOffset(groupRow, modIndex, charIndex, value) {
+            const key = "rChrOff" + groupRow;
+            const matrix = this.getRemoteCharOffsetMatrix(groupRow);
+            while (matrix.length <= modIndex) matrix.push([]);
+            while (matrix[modIndex].length <= charIndex)
+                matrix[modIndex].push(0);
+            matrix[modIndex][charIndex] = Math.max(
+                -32,
+                Math.min(32, parseInt(value) || 0),
+            );
+            this.settings[key] = matrix.map((r) => r.join(",")).join(";");
+        },
+        resetRemoteCharOffsets(groupRow, modIndex) {
+            const key = "rChrOff" + groupRow;
+            const matrix = this.getRemoteCharOffsetMatrix(groupRow);
+            const numChars = this.settings.charset || 48;
+            while (matrix.length <= modIndex) matrix.push([]);
+            matrix[modIndex] = Array(numChars).fill(0);
+            this.settings[key] = matrix.map((r) => r.join(",")).join(";");
+        },
+        copyRemoteCharOffsets(groupRow, fromIndex, toIndex) {
+            const key = "rChrOff" + groupRow;
+            const matrix = this.getRemoteCharOffsetMatrix(groupRow);
+            if (fromIndex >= matrix.length) return;
+            while (matrix.length <= toIndex) matrix.push([]);
+            matrix[toIndex] = [...matrix[fromIndex]];
+            this.settings[key] = matrix.map((r) => r.join(",")).join(";");
+        },
+
+        get offsetModuleCount() {
+            if (this.selectedOffsetGroup === 0)
+                return this.settings.moduleCount;
+            return (
+                parseInt(this.groupModuleArray[this.selectedOffsetGroup]) || 8
+            );
+        },
+
+        get currentOffsetArray() {
+            if (this.selectedOffsetGroup === 0) return this.offsetArray;
+            const matrix = this.remoteOffsetMatrix;
+            return matrix[this.selectedOffsetGroup - 1] || [];
+        },
+        setCurrentOffset(index, value) {
+            if (this.selectedOffsetGroup === 0) {
+                this.setOffset(index, value);
+            } else {
+                this.setRemoteOffset(
+                    this.selectedOffsetGroup - 1,
+                    index,
+                    value,
+                );
+            }
+        },
+
+        get currentDisplayOffset() {
+            if (this.selectedOffsetGroup === 0)
+                return this.settings.displayOffset;
+            const arr = this.remoteDisplayOffsetArray;
+            return arr[this.selectedOffsetGroup - 1] || 0;
+        },
+        setCurrentDisplayOffset(value) {
+            if (this.selectedOffsetGroup === 0) {
+                this.settings.displayOffset = parseInt(value) || 0;
+            } else {
+                this.setRemoteDisplayOffset(
+                    this.selectedOffsetGroup - 1,
+                    value,
+                );
+            }
+        },
+
+        getCharOffset(modIdx, charIdx) {
+            const matrix = this.charOffsetMatrix;
+            if (modIdx >= matrix.length || charIdx >= (matrix[modIdx]?.length || 0)) return 0;
+            return matrix[modIdx][charIdx];
+        },
+        getCurrentCharOffset(modIdx, charIdx) {
+            if (this.selectedOffsetGroup === 0)
+                return this.getCharOffset(modIdx, charIdx);
+            const matrix = this.getRemoteCharOffsetMatrix(
+                this.selectedOffsetGroup - 1,
+            );
+            if (
+                modIdx >= matrix.length ||
+                charIdx >= (matrix[modIdx]?.length || 0)
+            )
+                return 0;
+            return matrix[modIdx][charIdx];
+        },
+        setCurrentCharOffset(modIdx, charIdx, value) {
+            if (this.selectedOffsetGroup === 0) {
+                this.setCharOffset(modIdx, charIdx, value);
+            } else {
+                this.setRemoteCharOffset(
+                    this.selectedOffsetGroup - 1,
+                    modIdx,
+                    charIdx,
+                    value,
+                );
+            }
+        },
+        resetCurrentCharOffsets(modIdx) {
+            if (this.selectedOffsetGroup === 0) {
+                this.resetCharOffsets(modIdx);
+            } else {
+                this.resetRemoteCharOffsets(
+                    this.selectedOffsetGroup - 1,
+                    modIdx,
+                );
+            }
+        },
+        copyCurrentCharOffsets(fromIndex, toIndex) {
+            if (this.selectedOffsetGroup === 0) {
+                this.copyCharOffsets(fromIndex, toIndex);
+            } else {
+                this.copyRemoteCharOffsets(
+                    this.selectedOffsetGroup - 1,
+                    fromIndex,
+                    toIndex,
+                );
+            }
+        },
+        allZeroCharOffsets(modIdx) {
+            const matrix = this.charOffsetMatrix;
+            if (modIdx >= matrix.length) return true;
+            return matrix[modIdx].every(v => v === 0);
+        },
+        allZeroCurrentCharOffsets(modIdx) {
+            if (this.selectedOffsetGroup === 0)
+                return this.allZeroCharOffsets(modIdx);
+            const matrix = this.getRemoteCharOffsetMatrix(
+                this.selectedOffsetGroup - 1,
+            );
+            if (modIdx >= matrix.length) return true;
+            return matrix[modIdx].every((v) => v === 0);
+        },
+
         get charsetChars() {
             const standard = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-            const extended = standard + "'?:!.-/$@#%";
+            const extended = standard + "':?!.-/$@#%";
             return (this.settings.charset || 48) === 48 ? extended : standard;
         },
 
@@ -173,7 +347,8 @@ const createPageData = (type = "Settings") => {
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
                 const groupMac = (this.groupMacArray[i] || "").toUpperCase();
-                if (groupMac === normalized) return `Assigned to Group ${i + 1}`;
+                if (groupMac === normalized)
+                    return `Assigned to Group ${i + 1}`;
             }
             return "";
         },
@@ -184,13 +359,19 @@ const createPageData = (type = "Settings") => {
             if (peer) {
                 this.setGroupModuleCount(groupIndex, peer.moduleCount);
             }
-            this.showDialog(`Assigned to Group ${groupIndex + 1}. Click Save to persist.`, "success");
+            this.showDialog(
+                `Assigned to Group ${groupIndex + 1}. Click Save to persist.`,
+                "success",
+            );
         },
 
         removePeer(groupIndex) {
             this.setGroupMac(groupIndex, "");
             this.setGroupModuleCount(groupIndex, "8");
-            this.showDialog(`Removed Group ${groupIndex + 1} device. Click Save to persist.`, "success");
+            this.showDialog(
+                `Removed Group ${groupIndex + 1} device. Click Save to persist.`,
+                "success",
+            );
         },
 
         moveGroupUp(index) {
@@ -198,7 +379,10 @@ const createPageData = (type = "Settings") => {
             const macs = this.groupMacArray;
             const counts = this.groupModuleArray;
             [macs[index - 1], macs[index]] = [macs[index], macs[index - 1]];
-            [counts[index - 1], counts[index]] = [counts[index], counts[index - 1]];
+            [counts[index - 1], counts[index]] = [
+                counts[index],
+                counts[index - 1],
+            ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
         },
@@ -208,7 +392,10 @@ const createPageData = (type = "Settings") => {
             const macs = this.groupMacArray;
             const counts = this.groupModuleArray;
             [macs[index + 1], macs[index]] = [macs[index], macs[index + 1]];
-            [counts[index + 1], counts[index]] = [counts[index], counts[index + 1]];
+            [counts[index + 1], counts[index]] = [
+                counts[index],
+                counts[index + 1],
+            ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
         },
@@ -422,10 +609,11 @@ describe("Page Component - Character Offsets", () => {
         ]);
     });
 
-    it("should handle empty rows", () => {
+    it("should preserve empty rows positionally", () => {
         page.settings.charOffsets = "1,2;;4,5";
         expect(page.charOffsetMatrix).toEqual([
             [1, 2],
+            [],
             [4, 5],
         ]);
     });
@@ -971,9 +1159,7 @@ describe("Page Component - Discovery", () => {
     });
 
     it("should stage assignment locally without server call", () => {
-        page.discoveredPeers = [
-            { mac: "11:22:33:44:55:66", moduleCount: 6 },
-        ];
+        page.discoveredPeers = [{ mac: "11:22:33:44:55:66", moduleCount: 6 }];
         page.settings.masterGroupCount = 3;
 
         page.assignPeer(1, "11:22:33:44:55:66");
@@ -1041,5 +1227,174 @@ describe("Page Component - Discovery", () => {
         page.removePeer(1);
 
         expect(global.fetch).not.toHaveBeenCalled();
+    });
+});
+
+describe("Page Component - Remote Offset Management", () => {
+    let page;
+
+    beforeEach(() => {
+        page = createPageData("Settings");
+        page.settings.masterGroupCount = 2;
+        page.settings.masterGroupModuleCounts = "8,6,8,8,8,8";
+        page.settings.rModOffs = "0,0,0,0,0,0,0,0;0,0,0,0,0,0,0,0";
+        page.settings.rDispOffs = "0,0,0,0,0";
+        page.settings.rChrOff0 = Array(8).fill(Array(48).fill(0).join(",")).join(";");
+    });
+
+    describe("remoteOffsetMatrix", () => {
+        it("should parse remote module offsets matrix", () => {
+            page.settings.rModOffs = "1,2,3;4,5,6";
+            expect(page.remoteOffsetMatrix).toEqual([
+                [1, 2, 3],
+                [4, 5, 6],
+            ]);
+        });
+
+        it("should return empty array when rModOffs is missing", () => {
+            delete page.settings.rModOffs;
+            expect(page.remoteOffsetMatrix).toEqual([]);
+        });
+    });
+
+    describe("setRemoteOffset", () => {
+        it("should set remote module offset at specific group and module", () => {
+            page.setRemoteOffset(0, 2, 10);
+            expect(page.remoteOffsetMatrix[0][2]).toBe(10);
+        });
+
+        it("should expand matrix when setting offset beyond current size", () => {
+            page.settings.rModOffs = "0,0";
+            page.setRemoteOffset(1, 3, 5);
+            const matrix = page.remoteOffsetMatrix;
+            expect(matrix.length).toBe(2);
+            expect(matrix[1][3]).toBe(5);
+        });
+    });
+
+    describe("remoteDisplayOffsetArray", () => {
+        it("should parse remote display offsets", () => {
+            page.settings.rDispOffs = "10,20,30";
+            expect(page.remoteDisplayOffsetArray).toEqual([10, 20, 30]);
+        });
+
+        it("should return empty array when rDispOffs is missing", () => {
+            delete page.settings.rDispOffs;
+            expect(page.remoteDisplayOffsetArray).toEqual([]);
+        });
+    });
+
+    describe("setRemoteDisplayOffset", () => {
+        it("should set remote display offset at specific group", () => {
+            page.setRemoteDisplayOffset(1, 15);
+            expect(page.remoteDisplayOffsetArray[1]).toBe(15);
+        });
+
+        it("should expand array when setting offset beyond current size", () => {
+            page.settings.rDispOffs = "0";
+            page.setRemoteDisplayOffset(2, 25);
+            expect(page.remoteDisplayOffsetArray.length).toBe(3);
+            expect(page.remoteDisplayOffsetArray[2]).toBe(25);
+        });
+    });
+
+    describe("getRemoteCharOffsetMatrix", () => {
+        it("should parse remote character offsets for specific group", () => {
+            page.settings.rChrOff0 = "1,2;3,4";
+            expect(page.getRemoteCharOffsetMatrix(0)).toEqual([
+                [1, 2],
+                [3, 4],
+            ]);
+        });
+
+        it("should return empty array when key is missing", () => {
+            expect(page.getRemoteCharOffsetMatrix(1)).toEqual([]);
+        });
+    });
+
+    describe("setRemoteCharOffset", () => {
+        it("should set remote character offset with clamping", () => {
+            page.setRemoteCharOffset(0, 0, 5, 40);
+            expect(page.getRemoteCharOffsetMatrix(0)[0][5]).toBe(32);
+
+            page.setRemoteCharOffset(0, 0, 6, -50);
+            expect(page.getRemoteCharOffsetMatrix(0)[0][6]).toBe(-32);
+        });
+
+        it("should expand matrix when setting offset beyond current size", () => {
+            page.settings.rChrOff0 = "0,0";
+            page.setRemoteCharOffset(0, 2, 10, 5);
+            const matrix = page.getRemoteCharOffsetMatrix(0);
+            expect(matrix.length).toBe(3);
+            expect(matrix[2][10]).toBe(5);
+        });
+    });
+
+    describe("resetRemoteCharOffsets", () => {
+        it("should reset remote character offsets to zeros", () => {
+            page.setRemoteCharOffset(0, 0, 0, 10);
+            page.resetRemoteCharOffsets(0, 0);
+            expect(page.getRemoteCharOffsetMatrix(0)[0]).toEqual(Array(48).fill(0));
+        });
+    });
+
+    describe("copyRemoteCharOffsets", () => {
+        it("should copy remote character offsets from one module to another", () => {
+            page.setRemoteCharOffset(0, 0, 0, 10);
+            page.copyRemoteCharOffsets(0, 0, 1);
+            expect(page.getRemoteCharOffsetMatrix(0)[1][0]).toBe(10);
+        });
+    });
+
+    describe("selectedOffsetGroup dispatch", () => {
+        it("should dispatch to local offsets when selectedOffsetGroup is 0", () => {
+            page.selectedOffsetGroup = 0;
+            page.settings.moduleOffsets = "0,0,0";
+            page.setCurrentOffset(1, 15);
+            expect(page.offsetArray[1]).toBe("15");
+        });
+
+        it("should dispatch to remote offsets when selectedOffsetGroup > 0", () => {
+            page.selectedOffsetGroup = 1;
+            page.setCurrentOffset(2, 20);
+            expect(page.remoteOffsetMatrix[0][2]).toBe(20);
+        });
+
+        it("should dispatch display offset to local when selectedOffsetGroup is 0", () => {
+            page.selectedOffsetGroup = 0;
+            page.setCurrentDisplayOffset(10);
+            expect(page.settings.displayOffset).toBe(10);
+        });
+
+        it("should dispatch display offset to remote when selectedOffsetGroup > 0", () => {
+            page.selectedOffsetGroup = 1;
+            page.setCurrentDisplayOffset(25);
+            expect(page.remoteDisplayOffsetArray[0]).toBe(25);
+        });
+    });
+
+    describe("allZeroCurrentCharOffsets", () => {
+        it("should return true for local all-zero module", () => {
+            page.selectedOffsetGroup = 0;
+            page.settings.charOffsets = "0,0,0;0,0,0";
+            expect(page.allZeroCurrentCharOffsets(0)).toBe(true);
+        });
+
+        it("should return false for local non-zero module", () => {
+            page.selectedOffsetGroup = 0;
+            page.settings.charOffsets = "1,0,0;0,0,0";
+            expect(page.allZeroCurrentCharOffsets(0)).toBe(false);
+        });
+
+        it("should return true for remote all-zero module", () => {
+            page.selectedOffsetGroup = 1;
+            expect(page.allZeroCurrentCharOffsets(0)).toBe(true);
+        });
+
+        it("should return false for remote non-zero module", () => {
+            page.selectedOffsetGroup = 1;
+            page.setRemoteCharOffset(0, 0, 0, 5);
+            expect(page.allZeroCurrentCharOffsets(0)).toBe(false);
+        });
     });
 });
