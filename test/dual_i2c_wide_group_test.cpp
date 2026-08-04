@@ -258,6 +258,90 @@ void testWireBufferFits16() {
     CHECK(!fitsWireBuffer(17, "THIS IS 17 CHARS"), "17 chars cannot be sent (would overflow)");
 }
 
+// ---- Mirrors of the offset push/report split & merge (post-fix) ----
+//
+// Mirrors applyOffsetsPush() (SplitFlapEspNow.cpp ~line 700): the incoming
+// flat vector must be split so modules 0-7 land in moduleOffsets and
+// modules 8-15 land in wire1Offsets, because reloadOffsets() reads them
+// from two separate settings keys on dual-I2C builds.
+
+struct MockSettings {
+    std::vector<int> moduleOffsets;
+    std::vector<int> wire1Offsets;
+
+    void putIntVectorBus1(const std::vector<int> &v) { moduleOffsets = v; }
+    void putIntVectorBus2(const std::vector<int> &v) { wire1Offsets = v; }
+};
+
+static void applyOffsetsPushMirror(MockSettings &s, int moduleCount, const int16_t pktOffsets[16]) {
+    int bus1Count = std::min(moduleCount, 8);
+    std::vector<int> modOffs;
+    for (int i = 0; i < bus1Count; i++) modOffs.push_back(pktOffsets[i]);
+    s.putIntVectorBus1(modOffs);
+    if (moduleCount > 8) {
+        std::vector<int> wire1Offs;
+        for (int i = 8; i < moduleCount; i++) wire1Offs.push_back(pktOffsets[i]);
+        s.putIntVectorBus2(wire1Offs);
+    }
+}
+
+// Mirrors reportOffsetsToMaster() merge: the 16-slot wire packet must be
+// filled from moduleOffsets (bus 1) then wire1Offsets (bus 2), so the
+// master receives every module's offset.
+static void reportOffsetsToMasterMirror(const MockSettings &s, int moduleCount, int16_t pktOffsets[16]) {
+    for (int i = 0; i < moduleCount; i++) {
+        int val = 0;
+        if (i < (int) s.moduleOffsets.size()) {
+            val = s.moduleOffsets[i];
+        } else {
+            int j = i - 8;
+            if (j >= 0 && j < (int) s.wire1Offsets.size()) {
+                val = s.wire1Offsets[j];
+            }
+        }
+        pktOffsets[i] = (int16_t) val;
+    }
+}
+
+void testOffsetsPushSplit() {
+    std::cout << "\n[TEST] applyOffsetsPush splits bus 1 / bus 2 vectors" << std::endl;
+    MockSettings s;
+    int16_t pkt[16];
+    for (int i = 0; i < 16; i++) pkt[i] = (int16_t) (100 + i);
+
+    // 16-module push: 8 go to moduleOffsets, 8 to wire1Offsets.
+    applyOffsetsPushMirror(s, 16, pkt);
+    CHECK(s.moduleOffsets.size() == 8, "bus 1 gets exactly 8 offsets");
+    CHECK(s.wire1Offsets.size() == 8, "bus 2 gets exactly 8 offsets");
+    CHECK(s.moduleOffsets[0] == 100 && s.moduleOffsets[7] == 107, "bus 1 offsets 0-7 preserved");
+    CHECK(s.wire1Offsets[0] == 108 && s.wire1Offsets[7] == 115, "bus 2 offsets 8-15 preserved");
+
+    // 8-module push (single-bus shape): all 8 to moduleOffsets, none to bus 2.
+    MockSettings s2;
+    applyOffsetsPushMirror(s2, 8, pkt);
+    CHECK(s2.moduleOffsets.size() == 8, "single-bus push keeps 8 in bus 1");
+    CHECK(s2.wire1Offsets.size() == 0, "no bus 2 writes for 8-module group");
+}
+
+void testOffsetsReportMerge() {
+    std::cout << "\n[TEST] reportOffsetsToMaster merges both buses into packet" << std::endl;
+    MockSettings s;
+    for (int i = 0; i < 8; i++) s.moduleOffsets.push_back(i);
+    for (int i = 0; i < 8; i++) s.wire1Offsets.push_back(50 + i);
+
+    int16_t pkt[16] = {};
+    reportOffsetsToMasterMirror(s, 16, pkt);
+    CHECK(pkt[0] == 0 && pkt[7] == 7, "packet slots 0-7 come from bus 1");
+    CHECK(pkt[8] == 50 && pkt[15] == 57, "packet slots 8-15 come from bus 2");
+
+    // 8-module board: no bus 2 data, slots beyond stay as written (8 filled).
+    MockSettings s2;
+    for (int i = 0; i < 8; i++) s2.moduleOffsets.push_back(10 + i);
+    int16_t pkt2[16] = {};
+    reportOffsetsToMasterMirror(s2, 8, pkt2);
+    CHECK(pkt2[0] == 10 && pkt2[7] == 17, "8-module report fills 8 slots from bus 1");
+}
+
 int main() {
     std::cout << "=== Dual-I2C 16-module group chunking tests ===" << std::endl;
     testWideGroupDistribution();
@@ -265,6 +349,8 @@ int main() {
     testSingleWordLongerThan16();
     testCenteringAtWidth16();
     testWireBufferFits16();
+    testOffsetsPushSplit();
+    testOffsetsReportMerge();
 
     std::cout << "\n=== Summary ===" << std::endl;
     std::cout << "Passed: " << (testCount - testFailures) << "/" << testCount << std::endl;

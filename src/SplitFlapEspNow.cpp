@@ -192,9 +192,11 @@ void SplitFlapEspNow::distributeMessage(
         scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
     );
     const int maxChunks = MAX_DISPLAY_GROUPS * MAX_MODULES * 4;
-    String chunks[maxChunks];
+    // Heap-allocate: a stack VLA of maxChunks Strings (~16 B each) is ~6 KB
+    // on dual-I2C builds (MAX_MODULES=16) against an 8 KB loop task stack.
+    std::vector<String> chunks(maxChunks);
     int chunkCount = 0;
-    splitIntoChunks(message, totalModuleCount, chunks, maxChunks, chunkCount);
+    splitIntoChunks(message, totalModuleCount, chunks.data(), maxChunks, chunkCount);
 
     Serial.printf(
         "[esp-now scroll] input=%d chars, totalModules=%d, chunks=%d, repeats=%d\n",
@@ -663,13 +665,26 @@ void SplitFlapEspNow::reportOffsetsToMaster() {
     int moduleCount = display.getNumModules();
     int dispOff = settings.getInt("displayOffset");
     auto modOffs = settings.getIntVector("moduleOffsets");
+#ifdef ENABLE_DUAL_I2C
+    auto wire1Offs = settings.getIntVector("wire1Offsets");
+#endif
 
     SplitFlapOffsetsReportMessage pkt = {};
     pkt.version = ESP_NOW_OFFSETS_REPORT;
     pkt.moduleCount = moduleCount;
     pkt.displayOffset = (int16_t)constrain(dispOff, -32768, 32767);
-    for (int i = 0; i < 8; i++) {
-        int val = (i < (int)modOffs.size()) ? modOffs[i] : 0;
+    for (int i = 0; i < moduleCount; i++) {
+        int val = 0;
+        if (i < (int) modOffs.size()) {
+            val = modOffs[i];
+        } else {
+#ifdef ENABLE_DUAL_I2C
+            int j = i - 8;
+            if (j >= 0 && j < (int) wire1Offs.size()) {
+                val = wire1Offs[j];
+            }
+#endif
+        }
         pkt.moduleOffsets[i] = (int16_t)constrain(val, -32768, 32767);
     }
     if (esp_now_send(masterMac, (const uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
@@ -698,9 +713,23 @@ void SplitFlapEspNow::reportOffsetsToMaster() {
 void SplitFlapEspNow::applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt) {
     int moduleCount = constrain((int) pkt->moduleCount, 1, MAX_MODULES);
 
+    // Display splits local offsets: bus 1 (modules 0-7) -> moduleOffsets,
+    // bus 2 (modules 8-15) -> wire1Offsets on dual-I2C builds. Split the
+    // incoming vector the same way so reloadOffsets() picks up all modules.
+    int bus1Count = min(moduleCount, 8);
+
     std::vector<int> modOffs;
-    for (int i = 0; i < moduleCount; i++) modOffs.push_back(pkt->moduleOffsets[i]);
+    for (int i = 0; i < bus1Count; i++) modOffs.push_back(pkt->moduleOffsets[i]);
     settings.putIntVector("moduleOffsets", modOffs);
+
+#ifdef ENABLE_DUAL_I2C
+    if (moduleCount > 8) {
+        std::vector<int> wire1Offs;
+        for (int i = 8; i < moduleCount; i++) wire1Offs.push_back(pkt->moduleOffsets[i]);
+        settings.putIntVector("wire1Offsets", wire1Offs);
+    }
+#endif
+
     settings.putInt("displayOffset", pkt->displayOffset);
 
     Serial.printf("[esp-now] applying pushed offsets: dispOff=%d modules=%d\n", pkt->displayOffset, moduleCount);
@@ -805,7 +834,7 @@ void SplitFlapEspNow::learnMasterMac(const uint8_t mac[6]) {
 void SplitFlapEspNow::processPendingOffsetPackets() {
     bool gotOffsetsPush = false;
     SplitFlapOffsetsPushMessage offsetsPkt = {};
-    uint8_t charMask = 0;
+    uint16_t charMask = 0;
     SplitFlapCharOffsetsPushMessage charPkts[MAX_MODULES];
 
     noInterrupts();

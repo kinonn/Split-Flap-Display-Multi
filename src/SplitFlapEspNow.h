@@ -109,7 +109,7 @@ class SplitFlapEspNow {
 
     volatile bool pendingOffsetsPush;
     SplitFlapOffsetsPushMessage pendingOffsetsPushPkt;
-    volatile uint8_t pendingCharOffsetsMask;
+    volatile uint16_t pendingCharOffsetsMask;
     SplitFlapCharOffsetsPushMessage pendingCharOffsetsPkts[MAX_MODULES];
     bool offsetDataDirty;
     unsigned long lastOffsetRxMs;
