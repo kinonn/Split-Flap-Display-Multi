@@ -760,6 +760,10 @@ void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOf
 
     auto modOffs = settings.getIntMatrix("rModOffs");
     while ((int)modOffs.size() <= row) modOffs.push_back(std::vector<int>(MAX_MODULES, 0));
+    // Rows may be stored 8-wide (single-bus saved data or default 5x8).
+    // A 16-module report writes up to MAX_MODULES entries — resize before
+    // writing to avoid an out-of-bounds vector write.
+    if ((int)modOffs[row].size() < MAX_MODULES) modOffs[row].resize(MAX_MODULES, 0);
     for (int i = 0; i < moduleCount; i++) {
         modOffs[row][i] = pkt->moduleOffsets[i];
     }

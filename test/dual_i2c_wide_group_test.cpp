@@ -178,6 +178,38 @@ static bool fitsWireBuffer(int moduleCount, const std::string &text) {
     return std::strlen(buf) == (size_t) moduleCount && buf[moduleCount] == '\0';
 }
 
+// Mirrors processOffsetsReport() master-side write (SplitFlapEspNow.cpp
+// ~line 752): a remote group's offset report is stored into the rModOffs
+// matrix row. The stored row may be 8-wide (single-bus saved data or the
+// 5x8 default), but a 16-module group reports up to MAX_MODULES entries —
+// the row MUST be widened before writing or the vector write is OOB.
+static void processOffsetsReportMirror(
+    std::vector<std::vector<int>> &modOffs, int row, int moduleCount, const int16_t pktOffsets[16]
+) {
+    while ((int) modOffs.size() <= row) modOffs.push_back(std::vector<int>(16, 0));
+    if ((int) modOffs[row].size() < 16) modOffs[row].resize(16, 0);
+    for (int i = 0; i < moduleCount; i++) {
+        modOffs[row][i] = pktOffsets[i];
+    }
+}
+
+void testOffsetsReportRowResize() {
+    std::cout << "\n[TEST] processOffsetsReport widens 8-wide stored rows (OOB guard)" << std::endl;
+
+    // Stored matrix from single-bus days: 2 groups x 8 modules.
+    std::vector<std::vector<int>> modOffs(2, std::vector<int>(8, 0));
+    int16_t pkt[16];
+    for (int i = 0; i < 16; i++) pkt[i] = (int16_t) (1000 + i);
+
+    // 16-module remote group reports into row 1.
+    processOffsetsReportMirror(modOffs, 1, 16, pkt);
+
+    CHECK(modOffs[1].size() == 16, "row widened to 16 entries");
+    CHECK(modOffs[1][0] == 1000 && modOffs[1][7] == 1007, "first 8 offsets preserved");
+    CHECK(modOffs[1][8] == 1008 && modOffs[1][15] == 1015, "offsets 8-15 written (was OOB before fix)");
+    CHECK(modOffs[0].size() == 8, "untouched row keeps its stored width");
+}
+
 // ---- Tests ----
 
 void testWideGroupDistribution() {
@@ -351,6 +383,7 @@ int main() {
     testWireBufferFits16();
     testOffsetsPushSplit();
     testOffsetsReportMerge();
+    testOffsetsReportRowResize();
 
     std::cout << "\n=== Summary ===" << std::endl;
     std::cout << "Passed: " << (testCount - testFailures) << "/" << testCount << std::endl;

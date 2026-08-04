@@ -339,9 +339,9 @@ void SplitFlapDisplay::writeString(
         scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
     );
 
-    String chunks[MAX_MODULES * 4]; // generous upper bound for very long input
+    std::vector<String> chunks(MAX_MODULES * 4); // generous upper bound for very long input
     int chunkCount = 0;
-    splitIntoChunks(inputString, chunks, MAX_MODULES * 4, chunkCount);
+    splitIntoChunks(inputString, chunks.data(), MAX_MODULES * 4, chunkCount);
 
     Serial.printf(
         "[scroll] input=%d chars, numModules=%d, chunks=%d, repeats=%d\n",
