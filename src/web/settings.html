@@ -466,8 +466,8 @@
                         x-model="settings.moduleCount"
                         @input="setGroupModuleCount(0, settings.moduleCount)"
                         min="1"
-                        max="8"
-                        placeholder="1-8"
+                        :max="settings.wire1Addresses !== undefined ? 16 : 8"
+                        :placeholder="settings.wire1Addresses !== undefined ? '1-16' : '1-8'"
                     />
                     <div
                         class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
@@ -975,7 +975,7 @@
                                 <input
                                     type="number"
                                     min="1"
-                                    max="8"
+                                    :max="settings.wire1Addresses !== undefined ? 16 : 8"
                                     class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100"
                                     :value="groupModuleArray[i]"
                                     @input="setGroupModuleCount(i, $event.target.value)"
@@ -1064,6 +1064,52 @@
                             class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
                             x-cloak
                             x-show="errors.key === 'sclPin'"
+                            x-text="errors.message"
+                        ></div>
+                    </div>
+
+                    <div
+                        class="col-span-2 w-full mt-4 p-4 border border-gray-600 rounded-md bg-neutral-800"
+                        x-show="settings.sda2Pin !== undefined"
+                        x-cloak
+                    >
+                        <h3 class="text-lg font-semibold text-left w-full mb-2">
+                            Bus 2 (Wire1) — modules 8-15
+                        </h3>
+                        <p class="text-sm text-gray-400 text-left w-full mb-3">
+                            Second I2C bus pins. Enabled when Number of Modules
+                            is above 8.
+                        </p>
+                        <div class="grid grid-cols-2 gap-2 w-full">
+                            <div>
+                                <label for="sda2Pin" class="block text-left text-lg mt-2"
+                                    >SDA2 Pin</label
+                                >
+                                <input
+                                    class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                                    type="number"
+                                    id="sda2Pin"
+                                    x-model="settings.sda2Pin"
+                                    placeholder="Enter SDA2 pin"
+                                />
+                            </div>
+                            <div>
+                                <label for="scl2Pin" class="block text-left text-lg mt-2"
+                                    >SCL2 Pin</label
+                                >
+                                <input
+                                    class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                                    type="number"
+                                    id="scl2Pin"
+                                    x-model="settings.scl2Pin"
+                                    placeholder="Enter SCL2 pin"
+                                />
+                            </div>
+                        </div>
+                        <div
+                            class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                            x-cloak
+                            x-show="errors.key === 'sda2Pin' || errors.key === 'scl2Pin'"
                             x-text="errors.message"
                         ></div>
                     </div>
@@ -1202,7 +1248,7 @@
                         type="number"
                         id="maxConcurrentMotors"
                         min="1"
-                        max="8"
+                        :max="settings.wire1Addresses !== undefined ? 16 : 8"
                         x-model.number="settings.maxConcurrentMotors"
                         placeholder="2"
                     />

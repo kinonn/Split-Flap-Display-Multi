@@ -625,7 +625,7 @@ void SplitFlapEspNow::pushOffsetsToGroup(int groupIndex) {
     pkt.groupIndex = groupIndex;
     pkt.moduleCount = moduleCount;
     pkt.displayOffset = (int16_t)constrain(dispOff, -32768, 32767);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < moduleCount; i++) {
         int val = (row < (int)modOffs.size() && i < (int)modOffs[row].size())
             ? modOffs[row][i] : 0;
         pkt.moduleOffsets[i] = (int16_t)constrain(val, -32768, 32767);
@@ -699,7 +699,7 @@ void SplitFlapEspNow::applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt) {
     int moduleCount = constrain((int) pkt->moduleCount, 1, MAX_MODULES);
 
     std::vector<int> modOffs;
-    for (int i = 0; i < 8; i++) modOffs.push_back(pkt->moduleOffsets[i]);
+    for (int i = 0; i < moduleCount; i++) modOffs.push_back(pkt->moduleOffsets[i]);
     settings.putIntVector("moduleOffsets", modOffs);
     settings.putInt("displayOffset", pkt->displayOffset);
 
@@ -730,9 +730,9 @@ void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOf
     int moduleCount = constrain((int)pkt->moduleCount, 1, MAX_MODULES);
 
     auto modOffs = settings.getIntMatrix("rModOffs");
-    while ((int)modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
-    for (int i = 0; i < 8; i++) {
-        modOffs[row][i] = (i < moduleCount) ? pkt->moduleOffsets[i] : 0;
+    while ((int)modOffs.size() <= row) modOffs.push_back(std::vector<int>(MAX_MODULES, 0));
+    for (int i = 0; i < moduleCount; i++) {
+        modOffs[row][i] = pkt->moduleOffsets[i];
     }
     settings.putIntMatrix("rModOffs", modOffs);
 

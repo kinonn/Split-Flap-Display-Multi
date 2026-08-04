@@ -5,7 +5,11 @@
 
 #include <Arduino.h>
 
-#define MAX_MODULES 8 // for memory allocation, update if more modules
+#ifdef ENABLE_DUAL_I2C
+#define MAX_MODULES 16 // memory allocation; 8 per I2C bus (PCF8575 A0-A2)
+#else
+#define MAX_MODULES 8
+#endif
 #define MAX_RPM 15.0f
 #define DEFAULT_SCROLL_DELAY_MS 1500      // pause between chunks when scrolling
 #define DEFAULT_SCROLL_REPEAT_COUNT 2    // how many times a long message is shown end-to-end
@@ -87,8 +91,14 @@ class SplitFlapDisplay {
     int stepsPerRot;    // number of motor steps per full rotation of character
                         // drum
     int magnetPosition; // position of drum wheel when magnet is detected
-    int SDAPin;         // SDA pin
-    int SCLPin;         // SCL pin
+    int SDAPin;         // SDA pin (bus 1)
+    int SCLPin;         // SCL pin (bus 1)
+
+#ifdef ENABLE_DUAL_I2C
+    int wire1Count = 0; // modules on bus 2 (Wire1); 0 when dual I2C disabled
+    int SDA2Pin;        // SDA pin (bus 2)
+    int SCL2Pin;        // SCL pin (bus 2)
+#endif
 
     SplitFlapMqtt *mqtt = nullptr;
 };

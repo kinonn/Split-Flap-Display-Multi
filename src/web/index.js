@@ -45,29 +45,72 @@ document.addEventListener("alpine:init", () => {
             );
         },
 
-        get addressArray() {
+        get bus2AddressArray() {
             return (
-                this.settings.moduleAddresses
+                this.settings.wire1Addresses
                     ?.split(",")
                     .map((s) => s.trim()) || []
             );
         },
+        // Merged view: modules 0-7 from moduleAddresses (Wire),
+        // modules 8-15 from wire1Addresses (Wire1) on dual-I2C builds.
+        get addressArray() {
+            const a = (
+                this.settings.moduleAddresses
+                    ?.split(",")
+                    .map((s) => s.trim()) || []
+            );
+            const b = this.bus2AddressArray;
+            const count = Number(this.settings.moduleCount) || a.length || 8;
+            const merged = [];
+            for (let i = 0; i < count; i++) {
+                merged.push(i < 8 ? (a[i] ?? "") : (b[i - 8] ?? ""));
+            }
+            return merged;
+        },
         setAddress(index, value) {
-            const arr = this.addressArray;
-            arr[index] = value;
-            this.settings.moduleAddresses = arr.join(",");
+            if (index < 8) {
+                const arr = this.addressArray.slice(0, 8);
+                arr[index] = value;
+                this.settings.moduleAddresses = arr.join(",");
+            } else {
+                const arr = this.bus2AddressArray;
+                while (arr.length <= index - 8) arr.push("");
+                arr[index - 8] = value;
+                this.settings.wire1Addresses = arr.join(",");
+            }
         },
 
         get offsetArray() {
-            return (
+            const a = (
                 this.settings.moduleOffsets?.split(",").map((s) => s.trim()) ||
+                []
+            );
+            const b = this.bus2OffsetArray;
+            const count = Number(this.settings.moduleCount) || a.length || 8;
+            const merged = [];
+            for (let i = 0; i < count; i++) {
+                merged.push(i < 8 ? (a[i] ?? "") : (b[i - 8] ?? ""));
+            }
+            return merged;
+        },
+        get bus2OffsetArray() {
+            return (
+                this.settings.wire1Offsets?.split(",").map((s) => s.trim()) ||
                 []
             );
         },
         setOffset(index, value) {
-            const arr = this.offsetArray;
-            arr[index] = value;
-            this.settings.moduleOffsets = arr.join(",");
+            if (index < 8) {
+                const arr = this.offsetArray.slice(0, 8);
+                arr[index] = value;
+                this.settings.moduleOffsets = arr.join(",");
+            } else {
+                const arr = this.bus2OffsetArray;
+                while (arr.length <= index - 8) arr.push("");
+                arr[index - 8] = value;
+                this.settings.wire1Offsets = arr.join(",");
+            }
         },
 
         get charOffsetMatrix() {

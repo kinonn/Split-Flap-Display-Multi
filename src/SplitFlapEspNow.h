@@ -9,7 +9,9 @@
 
 #define MAX_DISPLAY_GROUPS 6
 #define ESP_NOW_REMOTE_MODE 7
-#define ESP_NOW_TEXT_VERSION 1
+// v2: text[17] / moduleOffsets[16] so a group can span 16 modules (dual I2C).
+// All boards in a multi-group setup must run the same version.
+#define ESP_NOW_TEXT_VERSION 2
 #define ESP_NOW_ANNOUNCE_VERSION 0xFE
 #define ESP_NOW_OFFSETS_PUSH   0xFC
 #define ESP_NOW_OFFSETS_REPORT 0xFB
@@ -21,7 +23,7 @@ struct SplitFlapEspNowMessage
     uint8_t version;
     uint8_t groupIndex;
     uint8_t moduleCount;
-    char text[9];
+    char text[17]; // 16 chars + NUL
 };
 
 struct SplitFlapAnnounceMessage
@@ -36,7 +38,7 @@ struct SplitFlapOffsetsPushMessage
     uint8_t groupIndex;
     uint8_t moduleCount;
     int16_t displayOffset;
-    int16_t moduleOffsets[8];
+    int16_t moduleOffsets[16];
 };
 
 struct SplitFlapCharOffsetsPushMessage
@@ -52,7 +54,7 @@ struct SplitFlapOffsetsReportMessage
     uint8_t version;
     uint8_t moduleCount;
     int16_t displayOffset;
-    int16_t moduleOffsets[8];
+    int16_t moduleOffsets[16];
 };
 
 struct SplitFlapCharOffsetsReportMessage

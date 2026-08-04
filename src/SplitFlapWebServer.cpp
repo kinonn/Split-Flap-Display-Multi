@@ -412,6 +412,11 @@ void SplitFlapWebServer::startWebServer() {
         if (json["moduleOffsets"].is<String>() && json["moduleOffsets"].as<String>() != settings.getString("moduleOffsets")) {
             offsetsChanged = true;
         }
+#ifdef ENABLE_DUAL_I2C
+        if (json["wire1Offsets"].is<String>() && json["wire1Offsets"].as<String>() != settings.getString("wire1Offsets")) {
+            offsetsChanged = true;
+        }
+#endif
         if (json["charOffsets"].is<String>() && json["charOffsets"].as<String>() != settings.getString("charOffsets")) {
             offsetsChanged = true;
         }
@@ -592,7 +597,7 @@ String SplitFlapWebServer::decodeURIComponent(String encodedString) {
 
 bool SplitFlapWebServer::validateMasterSettings(JsonVariant &json, JsonDocument &response) {
     const int maxDisplayGroups = 6;
-    const int maxModulesPerGroup = 8;
+    const int maxModulesPerGroup = MAX_MODULES; // 8 single-bus, 16 dual-I2C
 
     int groupCount = settings.getInt("masterGroupCount");
     if (! json["masterGroupCount"].isNull()) {
@@ -638,10 +643,10 @@ bool SplitFlapWebServer::validateMasterSettings(JsonVariant &json, JsonDocument 
 
         int value = token.toInt();
         if (value < 1 || value > maxModulesPerGroup) {
-            response["message"] = "Each group can have 1 to 8 modules";
+            response["message"] = "Each group can have 1 to " + String(maxModulesPerGroup) + " modules";
             response["type"] = "error";
             response["errors"]["key"] = "masterGroupModuleCounts";
-            response["errors"]["message"] = "Hardware limit is 8 modules per group";
+            response["errors"]["message"] = "Hardware limit is " + String(maxModulesPerGroup) + " modules per group";
             return false;
         }
     }

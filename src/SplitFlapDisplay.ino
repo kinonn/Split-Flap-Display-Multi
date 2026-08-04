@@ -38,6 +38,13 @@ JsonSettings settings = JsonSettings("config", {
     {"displayOffset", JsonSetting(0)},
     {"sdaPin", JsonSetting(8)},
     {"sclPin", JsonSetting(9)},
+#ifdef ENABLE_DUAL_I2C
+    // Bus 2 (Wire1) — modules 8..15 in a 16-module group
+    {"wire1Addresses", JsonSetting({0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27})},
+    {"wire1Offsets", JsonSetting({0, 0, 0, 0, 0, 0, 0, 0})},
+    {"sda2Pin", JsonSetting(33)},
+    {"scl2Pin", JsonSetting(32)},
+#endif
     {"stepsPerRot", JsonSetting(2048)},
     {"maxVel", JsonSetting(15.0f)},
     {"charset", JsonSetting(48)},
@@ -47,7 +54,7 @@ JsonSettings settings = JsonSettings("config", {
     {"scrollRepeatCount", JsonSetting(2)},
     // Boot / Power Settings
     {"bootDelayMs", JsonSetting(2000)},          // power-on settle delay; set the slave higher than the master in multi-display setups
-    {"maxConcurrentMotors", JsonSetting(2)},    // cap on simultaneously energized motors during boot homing (1-8)
+    {"maxConcurrentMotors", JsonSetting(2)},    // cap on simultaneously energized motors during boot homing (1-MAX_MODULES)
     // Multi-display master settings
     {"masterGroupCount", JsonSetting(1)},
     {"masterGroupModuleCounts", JsonSetting({8, 8, 8, 8, 8, 8})},
@@ -135,7 +142,7 @@ void setup() {
         Serial.println("[boot] display homed");
         Serial.flush();
 
-        if (display.getNumModules() == 8) {
+        if (display.getNumModules() >= 8) {
             display.writeString("Wifi Err");
         } else {
             display.writeChar('X');

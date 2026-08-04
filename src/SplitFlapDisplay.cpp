@@ -19,14 +19,33 @@ void SplitFlapDisplay::init() {
     maxVel = settings.getFloat("maxVel");
     charSetSize = settings.getInt("charset");
 
-    std::vector<int> settingAddresses = settings.getIntVector("moduleAddresses");
-    for (int i = 0; i < numModules; i++) {
-        moduleAddresses[i] = (uint8_t) settingAddresses[i];
-    }
+    // Modules 0..7 live on bus 1 (moduleAddresses/moduleOffsets, backwards
+    // compatible with existing single-bus configs). On dual-I2C builds,
+    // modules 8..15 live on bus 2 (wire1Addresses/wire1Offsets).
+    int bus1Count = min(numModules, 8);
 
+    std::vector<int> settingAddresses = settings.getIntVector("moduleAddresses");
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
+#ifdef ENABLE_DUAL_I2C
+    std::vector<int> settingWire1Addresses = settings.getIntVector("wire1Addresses");
+    std::vector<int> settingWire1Offsets = settings.getIntVector("wire1Offsets");
+    wire1Count = numModules - bus1Count;
+#endif
+
     for (int i = 0; i < numModules; i++) {
-        moduleOffsets[i] = settingOffsets[i];
+        if (i < bus1Count) {
+            moduleAddresses[i] = (i < (int) settingAddresses.size()) ? (uint8_t) settingAddresses[i] : (uint8_t) (0x20 + i);
+            moduleOffsets[i] = (i < (int) settingOffsets.size()) ? settingOffsets[i] : 0;
+        } else {
+#ifdef ENABLE_DUAL_I2C
+            int j = i - bus1Count;
+            moduleAddresses[i] = (j < (int) settingWire1Addresses.size()) ? (uint8_t) settingWire1Addresses[j] : (uint8_t) (0x20 + j);
+            moduleOffsets[i] = (j < (int) settingWire1Offsets.size()) ? settingWire1Offsets[j] : 0;
+#else
+            moduleAddresses[i] = 0x20 + i; // unreachable: bus1Count == numModules
+            moduleOffsets[i] = 0;
+#endif
+        }
     }
 
     std::vector<std::vector<int>> settingCharOffsets = settings.getIntMatrix("charOffsets");
@@ -45,8 +64,14 @@ void SplitFlapDisplay::init() {
     Serial.println();
 
     for (uint8_t i = 0; i < numModules; i++) {
+        TwoWire *bus = &Wire;
+#ifdef ENABLE_DUAL_I2C
+        if (i >= bus1Count) {
+            bus = &Wire1;
+        }
+#endif
         modules[i] = SplitFlapModule(
-            moduleAddresses[i], stepsPerRot, moduleOffsets[i] + displayOffset, magnetPosition, charSetSize, charOffsets[i]
+            moduleAddresses[i], stepsPerRot, moduleOffsets[i] + displayOffset, magnetPosition, charSetSize, charOffsets[i], bus
         );
     }
 
@@ -55,6 +80,16 @@ void SplitFlapDisplay::init() {
 
     Wire.begin(SDAPin, SCLPin);
     Wire.setClock(400000);
+
+#ifdef ENABLE_DUAL_I2C
+    if (wire1Count > 0) {
+        SDA2Pin = settings.getInt("sda2Pin");
+        SCL2Pin = settings.getInt("scl2Pin");
+        Wire1.begin(SDA2Pin, SCL2Pin);
+        Wire1.setClock(400000);
+        Serial.printf("[i2c] bus 2 (Wire1) enabled: SDA=%d SCL=%d modules=%d\n", SDA2Pin, SCL2Pin, wire1Count);
+    }
+#endif
 
     for (uint8_t i = 0; i < numModules; i++) {
         modules[i].init();
@@ -75,8 +110,21 @@ void SplitFlapDisplay::reloadOffsets() {
     displayOffset = settings.getInt("displayOffset");
 
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
+#ifdef ENABLE_DUAL_I2C
+    std::vector<int> settingWire1Offsets = settings.getIntVector("wire1Offsets");
+#endif
+    int bus1Count = min(numModules, 8);
     for (int i = 0; i < numModules; i++) {
-        moduleOffsets[i] = settingOffsets[i];
+        if (i < bus1Count) {
+            moduleOffsets[i] = (i < (int) settingOffsets.size()) ? settingOffsets[i] : 0;
+        } else {
+#ifdef ENABLE_DUAL_I2C
+            int j = i - bus1Count;
+            moduleOffsets[i] = (j < (int) settingWire1Offsets.size()) ? settingWire1Offsets[j] : 0;
+#else
+            moduleOffsets[i] = 0;
+#endif
+        }
     }
 
     std::vector<std::vector<int>> settingCharOffsets = settings.getIntMatrix("charOffsets");

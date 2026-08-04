@@ -8,7 +8,7 @@ class SplitFlapModule {
     // Constructor declarationS
     SplitFlapModule(); // default constructor required to allocate memory for
     // SplitFlapDisplay class
-    SplitFlapModule(uint8_t I2Caddress, int stepsPerFullRotation, int stepOffset, int magnetPos, int charSetSize, const int charOffsets[] = nullptr);
+    SplitFlapModule(uint8_t I2Caddress, int stepsPerFullRotation, int stepOffset, int magnetPos, int charSetSize, const int charOffsets[] = nullptr, TwoWire *wireBus = &Wire);
 
     void init();
     void updateOffsets(const int newCharOffsets[], int newMagnetOffset);
@@ -32,6 +32,7 @@ class SplitFlapModule {
 
   private:
     uint8_t address;                // i2c address of module
+    TwoWire *wire;                  // i2c bus this module communicates on (Wire or Wire1)
     int position;                   // character drum position
     int stepNumber;                 // current position in the stepping order, to make motor move
     int stepsPerRot;                // number of steps per rotation

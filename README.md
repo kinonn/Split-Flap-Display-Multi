@@ -33,8 +33,24 @@ Firmware for the modular Split Flap Display created by [Morgan Manly](https://gi
 | -------------------- | ------------- | ------------------------------------------------------------------------ |
 | `esp32_c3` (default) | ESP32-C3FN4   | Teyleten Robot ESP32-C3-SuperMini<br>Waveshare ESP32-C3-Zero             |
 | `esp32_s3`           | ESP32-S3FH4R2 | Waveshare ESP32-S3-Zero<sup>\*</sup><br>ESP32-S3 Super Mini<sup>\*</sup> |
+| `esp32_wroom`        | ESP32 (WROOM)| Dual-I2C builds: up to 16 modules per group on two I2C buses             |
 
 <sub>\* Requires manually resetting the board into firmware upload mode by holding BOOT, pressing & releasing RESET, then releasing BOOT prior to upload. After uploading is successful, either press & release RESET or power cycle the board to put it in normal operation mode.</sub>
+
+### Dual-I2C builds (`esp32_wroom`)
+
+Each PCF8575 module has 3 address pins (A0-A2), so a single I2C bus supports at most 8 unique addresses (`0x20`-`0x27`). To drive more than 8 modules from one controller, the `esp32_wroom` environment compiles with `ENABLE_DUAL_I2C`:
+
+- Modules 0-7 live on `Wire` (default SDA=21 / SCL=22).
+- Modules 8-15 live on `Wire1` (default SDA2=33 / SCL2=32, configurable in the web UI).
+- A group may be configured with up to 16 modules (`Number of Modules` in Hardware Settings).
+- Multi-group chunking is width-aware: a 16-module local group still chunks messages left-to-right across the full group width, exactly like an 8-module group.
+
+Notes:
+
+- The ESP32-C3 has a single I2C controller and cannot run dual-bus builds; ESP32-S3 and ESP32-WROOM have two.
+- On ESP32-S3, GPIO 33-37 are input-only — pick output-capable pins for SDA2/SCL2 if you enable dual bus there.
+- When flashing a dual-I2C build to a board that previously ran a single-bus build, erase the board first (see the C3 partition section) so the new settings keys are registered.
 
 ### ESP32-C3 partition layout
 
@@ -85,9 +101,9 @@ The firmware can coordinate multiple split-flap display groups from one master c
 
 Limits:
 
-- Up to 8 modules per group
+- Up to 8 modules per group (up to 16 per group on dual-I2C `esp32_wroom` builds)
 - Up to 6 groups total
-- Up to 48 modules total when all 6 groups have 8 modules
+- Up to 48 modules total when all 6 groups have 8 modules (96 on dual-I2C builds)
 - Group 1 is always the local group connected to the master controller
 - Groups 2-6 are remote groups controlled over ESP-NOW
 
