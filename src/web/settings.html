@@ -1161,59 +1161,59 @@
                     </div>
                 </div>
 
-            <h2
-                class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2"
-            >
-                Power / Startup
-            </h2>
+                <h2
+                    class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2"
+                >
+                    Power / Startup
+                </h2>
 
-            <div class="grid grid-cols-2 gap-2 w-full">
-                <div>
-                    <label
-                        for="bootDelayMs"
-                        class="block text-left text-lg mt-4"
-                    >
-                        Boot Delay (ms)
-                    </label>
-                    <input
-                        class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
-                        type="number"
-                        id="bootDelayMs"
-                        min="0"
-                        x-model.number="settings.bootDelayMs"
-                        placeholder="2000"
-                    />
-                    <div
-                        class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
-                        x-cloak
-                        x-show="errors.key === 'bootDelayMs'"
-                        x-text="errors.message"
-                    ></div>
+                <div class="grid grid-cols-2 gap-2 w-full">
+                    <div>
+                        <label
+                            for="bootDelayMs"
+                            class="block text-left text-lg mt-4"
+                        >
+                            Boot Delay (ms)
+                        </label>
+                        <input
+                            class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                            type="number"
+                            id="bootDelayMs"
+                            min="0"
+                            x-model.number="settings.bootDelayMs"
+                            placeholder="2000"
+                        />
+                        <div
+                            class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                            x-cloak
+                            x-show="errors.key === 'bootDelayMs'"
+                            x-text="errors.message"
+                        ></div>
+                    </div>
+                    <div>
+                        <label
+                            for="maxConcurrentMotors"
+                            class="block text-left text-lg mt-4"
+                        >
+                            Max Concurrent Motors
+                        </label>
+                        <input
+                            class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                            type="number"
+                            id="maxConcurrentMotors"
+                            min="1"
+                            max="8"
+                            x-model.number="settings.maxConcurrentMotors"
+                            placeholder="2"
+                        />
+                        <div
+                            class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
+                            x-cloak
+                            x-show="errors.key === 'maxConcurrentMotors'"
+                            x-text="errors.message"
+                        ></div>
+                    </div>
                 </div>
-                <div>
-                    <label
-                        for="maxConcurrentMotors"
-                        class="block text-left text-lg mt-4"
-                    >
-                        Max Concurrent Motors
-                    </label>
-                    <input
-                        class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
-                        type="number"
-                        id="maxConcurrentMotors"
-                        min="1"
-                        max="8"
-                        x-model.number="settings.maxConcurrentMotors"
-                        placeholder="2"
-                    />
-                    <div
-                        class="w-full p-3 mt-2 text-sm text-white bg-red-700 rounded-md"
-                        x-cloak
-                        x-show="errors.key === 'maxConcurrentMotors'"
-                        x-text="errors.message"
-                    ></div>
-                </div>
-            </div>
 
                 <button
                     class="w-full p-3 mt-4 text-lg font-semibold text-white bg-red-600 rounded-md hover:bg-red-500 transition-colors"
@@ -1245,6 +1245,43 @@
                 </div>
             </div>
 
+            <h2
+                class="text-xl font-semibold text-left w-full border-b border-gray-600 pb-2 mt-10 mb-2"
+            >
+                Configuration Backup
+            </h2>
+            <p class="text-sm text-gray-400 text-left w-full mb-4">
+                Export your settings to a JSON file, or restore them from a
+                previously exported backup.
+            </p>
+            <div class="grid grid-cols-2 gap-2 w-full">
+                <button
+                    type="button"
+                    class="w-full p-3 text-lg font-semibold text-white bg-amber-600 rounded-md hover:bg-amber-500 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    @click="exportSettings()"
+                    :disabled="saving"
+                >
+                    Export Configuration
+                </button>
+                <label
+                    for="importFile"
+                    class="w-full p-3 text-lg font-semibold text-white bg-amber-600 rounded-md hover:bg-amber-500 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    Import Configuration
+                </label>
+            </div>
+            <input
+                type="file"
+                id="importFile"
+                accept=".json,application/json"
+                class="hidden"
+                @change="onImportFileSelected"
+            />
+            <p class="text-xs text-gray-500 text-left w-full mt-2">
+                Backup file contains all settings including Wi-Fi passwords and
+                peer MAC addresses. Store it somewhere safe.
+            </p>
+
             <div class="flex items-center justify-between w-full my-6">
                 <a
                     href="index.html"
@@ -1275,6 +1312,99 @@
             x-text="dialog.message"
             x-cloak
         ></div>
+
+        <!-- Import Review Modal -->
+        <div
+            x-show="showImportModal"
+            x-cloak
+            class="fixed inset-0 z-50 flex items-center justify-center backdrop-blur bg-black/50 shadow-[0_0_30px_10px_#222]"
+        >
+            <div
+                class="bg-neutral-800 text-white rounded-lg shadow-lg p-6 max-w-lg w-full relative max-h-[80vh] overflow-y-auto"
+            >
+                <button
+                    class="absolute top-2 right-2 text-gray-400 hover:text-white"
+                    @click="closeImportModal()"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        class="w-5 h-5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M6 18L18 6M6 6l12 12"
+                        />
+                    </svg>
+                </button>
+
+                <h2 class="text-xl font-bold mb-2">Review Import</h2>
+                <p class="text-sm text-gray-400 mb-4">
+                    The following issues were found in the configuration file.
+                </p>
+
+                <template x-if="importPreview">
+                    <div>
+                        <div
+                            x-show="importPreview.warnings.length === 0"
+                            class="text-sm bg-green-600/20 border border-green-600 rounded-md p-3 mb-3 text-green-200"
+                        >
+                            No issues detected. This configuration looks
+                            compatible with this device.
+                        </div>
+
+                        <template
+                            x-for="(w, i) in importPreview.warnings"
+                            :key="i"
+                        >
+                            <div
+                                class="rounded-md p-3 mb-2 text-sm border"
+                                :class="{
+                                    'bg-red-700/20 border-red-600 text-red-200': w.type === 'error',
+                                    'bg-amber-600/20 border-amber-500 text-amber-200': w.type === 'conflict' || w.type === 'compat',
+                                    'bg-blue-600/20 border-blue-500 text-blue-200': w.type === 'info'
+                                }"
+                            >
+                                <span
+                                    class="font-semibold"
+                                    x-text="w.title + ':'"
+                                ></span>
+                                <span x-text="w.message"></span>
+                            </div>
+                        </template>
+
+                        <div
+                            x-show="hasImportErrors"
+                            class="text-xs text-red-300 mt-2"
+                        >
+                            Fix the invalid values in the file before importing.
+                        </div>
+                    </div>
+                </template>
+
+                <div class="flex gap-2 mt-4">
+                    <button
+                        type="button"
+                        class="flex-1 p-3 font-semibold text-white bg-neutral-600 rounded-md hover:bg-neutral-500 transition-colors"
+                        @click="closeImportModal()"
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        class="flex-1 p-3 font-semibold text-white bg-green-600 rounded-md hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        @click="applyImport()"
+                        :disabled="hasImportErrors"
+                    >
+                        Import Anyway
+                    </button>
+                </div>
+            </div>
+        </div>
 
         <!-- Help Modal -->
         <div

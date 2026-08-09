@@ -1,5 +1,49 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+const SETTINGS_SCHEMA_VERSION = 1;
+const EXPORT_FORMAT = "splitflap-settings";
+
+const SETTINGS_SCHEMA = {
+    name: { type: "string" },
+    mdns: { type: "string" },
+    otaPass: { type: "string" },
+    timezone: { type: "string" },
+    dateFormat: { type: "string" },
+    timeFormat: { type: "string" },
+    ssid: { type: "string" },
+    password: { type: "string" },
+    mqtt_server: { type: "string" },
+    mqtt_port: { type: "int", min: 1, max: 65535 },
+    mqtt_user: { type: "string" },
+    mqtt_pass: { type: "string" },
+    moduleCount: { type: "int", min: 1, max: 8 },
+    moduleAddresses: { type: "vector" },
+    magnetPosition: { type: "int" },
+    moduleOffsets: { type: "vector" },
+    displayOffset: { type: "int" },
+    sdaPin: { type: "int" },
+    sclPin: { type: "int" },
+    stepsPerRot: { type: "int" },
+    maxVel: { type: "float" },
+    charset: { type: "int", enum: [37, 48] },
+    charOffsets: { type: "matrix" },
+    scrollDelayMs: { type: "int", min: 0 },
+    scrollRepeatCount: { type: "int", min: 1, max: 99 },
+    bootDelayMs: { type: "int", min: 0 },
+    maxConcurrentMotors: { type: "int", min: 1, max: 8 },
+    masterGroupCount: { type: "int", min: 1, max: 6 },
+    masterGroupModuleCounts: { type: "vector" },
+    masterGroupMacs: { type: "vector" },
+    rModOffs: { type: "matrix" },
+    rChrOff0: { type: "matrix" },
+    rChrOff1: { type: "matrix" },
+    rChrOff2: { type: "matrix" },
+    rChrOff3: { type: "matrix" },
+    rChrOff4: { type: "matrix" },
+    rDispOffs: { type: "vector" },
+    mode: { type: "int", min: 0, max: 5 },
+};
+
 const createPageData = (type = "Settings") => {
     return {
         get header() {
@@ -36,9 +80,23 @@ const createPageData = (type = "Settings") => {
         delay: 1,
         centerText: false,
 
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+        showImportModal: false,
+        importPreview: null,
+
         get processing() {
             return (
                 this.saving || this.loading.settings || this.loading.timezones
+            );
+        },
+
+        get hasImportErrors() {
+            return (
+                (this.importPreview &&
+                    this.importPreview.warnings.some(
+                        (w) => w.type === "error",
+                    )) ||
+                false
             );
         },
 
@@ -71,7 +129,11 @@ const createPageData = (type = "Settings") => {
             if (!this.settings.charOffsets) return [];
             return this.settings.charOffsets
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setCharOffset(modIndex, charIndex, value) {
             const matrix = this.charOffsetMatrix;
@@ -108,7 +170,11 @@ const createPageData = (type = "Settings") => {
             if (!this.settings.rModOffs) return [];
             return this.settings.rModOffs
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setRemoteOffset(groupRow, modIndex, value) {
             const matrix = this.remoteOffsetMatrix;
@@ -138,7 +204,11 @@ const createPageData = (type = "Settings") => {
             if (!this.settings[key]) return [];
             return this.settings[key]
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setRemoteCharOffset(groupRow, modIndex, charIndex, value) {
             const key = "rChrOff" + groupRow;
@@ -213,7 +283,11 @@ const createPageData = (type = "Settings") => {
 
         getCharOffset(modIdx, charIdx) {
             const matrix = this.charOffsetMatrix;
-            if (modIdx >= matrix.length || charIdx >= (matrix[modIdx]?.length || 0)) return 0;
+            if (
+                modIdx >= matrix.length ||
+                charIdx >= (matrix[modIdx]?.length || 0)
+            )
+                return 0;
             return matrix[modIdx][charIdx];
         },
         getCurrentCharOffset(modIdx, charIdx) {
@@ -265,7 +339,7 @@ const createPageData = (type = "Settings") => {
         allZeroCharOffsets(modIdx) {
             const matrix = this.charOffsetMatrix;
             if (modIdx >= matrix.length) return true;
-            return matrix[modIdx].every(v => v === 0);
+            return matrix[modIdx].every((v) => v === 0);
         },
         allZeroCurrentCharOffsets(modIdx) {
             if (this.selectedOffsetGroup === 0)
@@ -549,6 +623,388 @@ const createPageData = (type = "Settings") => {
             }
         },
 
+        buildExportPayload() {
+            return {
+                format: EXPORT_FORMAT,
+                schemaVersion: SETTINGS_SCHEMA_VERSION,
+                exportedAt: new Date().toISOString(),
+                device: {
+                    name: this.settings.name || "",
+                    mac: this.localMac || "",
+                },
+                settings: { ...this.settings },
+            };
+        },
+
+        downloadJson(filename, obj) {
+            const blob = new Blob([JSON.stringify(obj, null, 2)], {
+                type: "application/json",
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        },
+
+        exportSettings() {
+            const payload = this.buildExportPayload();
+            const filename = `splitflap-settings-${new Date()
+                .toISOString()
+                .slice(0, 10)}.json`;
+            this.downloadJson(filename, payload);
+            this.showDialog("Configuration exported successfully.", "success");
+        },
+
+        onImportFileSelected(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) {
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => {
+                let data;
+                try {
+                    data = JSON.parse(reader.result);
+                } catch (err) {
+                    this.showDialog(
+                        "Invalid configuration file: not valid JSON.",
+                        "error",
+                    );
+                    return;
+                }
+                this.previewImport(data);
+            };
+            reader.onerror = () =>
+                this.showDialog("Could not read the selected file.", "error");
+            reader.readAsText(file);
+            event.target.value = "";
+        },
+
+        previewImport(data) {
+            const analysis = this.analyzeImport(data);
+            if (analysis.fatal) {
+                this.showDialog(analysis.fatal, "error");
+                return;
+            }
+            this.importPreview = analysis;
+            this.showImportModal = true;
+        },
+
+        closeImportModal() {
+            this.showImportModal = false;
+            this.importPreview = null;
+        },
+
+        validateSettingValue(key, value) {
+            const s = SETTINGS_SCHEMA[key];
+            const isNum = typeof value === "number" && isFinite(value);
+            if (s.type === "int" || s.type === "float") {
+                if (!isNum) {
+                    return "expected a number.";
+                }
+                if (s.type === "int" && !Number.isInteger(value)) {
+                    return "expected a whole number.";
+                }
+                if (s.min !== undefined && value < s.min) {
+                    return `must be at least ${s.min}.`;
+                }
+                if (s.max !== undefined && value > s.max) {
+                    return `must be at most ${s.max}.`;
+                }
+                if (s.enum && !s.enum.includes(value)) {
+                    return `must be one of: ${s.enum.join(", ")}.`;
+                }
+            } else if (s.type === "string") {
+                if (typeof value !== "string") {
+                    return "expected text.";
+                }
+            } else if (s.type === "vector" || s.type === "matrix") {
+                if (typeof value !== "string") {
+                    return "expected a comma-separated string.";
+                }
+            }
+            return null;
+        },
+
+        addImportConflicts(imported, warnings) {
+            const moduleCount = Number(imported.moduleCount) || 0;
+            const charset = Number(imported.charset) || 48;
+            const groupCount = Math.min(
+                Math.max(Number(imported.masterGroupCount) || 1, 1),
+                6,
+            );
+
+            const csv = (value, len) => {
+                if (typeof value !== "string") return Array(len).fill("");
+                const arr = value.split(",").map((s) => s.trim());
+                while (arr.length < len) arr.push("");
+                return arr.slice(0, len);
+            };
+
+            const counts = csv(imported.masterGroupModuleCounts, 6);
+            if (
+                moduleCount >= 1 &&
+                counts[0] &&
+                Number(counts[0]) !== moduleCount
+            ) {
+                warnings.push({
+                    type: "conflict",
+                    title: "Module count mismatch",
+                    message: `Group 1 declares ${counts[0]} module(s) but "Number of Modules" is ${moduleCount}. The module count will be used.`,
+                });
+            }
+
+            if (typeof imported.charOffsets === "string") {
+                const firstRow = imported.charOffsets.split(";")[0];
+                if (firstRow) {
+                    const cols = firstRow.split(",").length;
+                    if (cols > 0 && cols !== charset) {
+                        warnings.push({
+                            type: "conflict",
+                            title: "Character offsets size",
+                            message: `Character offsets contain ${cols} characters per module but the character set is ${charset}. Extra entries will be ignored.`,
+                        });
+                    }
+                }
+            }
+
+            for (const key of ["moduleAddresses", "moduleOffsets"]) {
+                if (typeof imported[key] === "string") {
+                    const n = imported[key]
+                        .split(",")
+                        .filter((s) => s.trim() !== "").length;
+                    if (moduleCount > 0 && n > 0 && n < moduleCount) {
+                        const what =
+                            key === "moduleAddresses"
+                                ? "address(es)"
+                                : "offset(s)";
+                        warnings.push({
+                            type: "conflict",
+                            title: "Short module list",
+                            message: `Only ${n} module ${what} are defined but "Number of Modules" is ${moduleCount}.`,
+                        });
+                    }
+                }
+            }
+
+            if (groupCount > 1) {
+                const macs = csv(imported.masterGroupMacs, 6);
+                const seen = new Set();
+                for (let i = 1; i < groupCount; i++) {
+                    const mac = (macs[i] || "").trim().toUpperCase();
+                    if (!mac) {
+                        warnings.push({
+                            type: "conflict",
+                            title: "Missing peer MAC",
+                            message: `Group ${i + 1} is active but has no peer MAC address assigned.`,
+                        });
+                        continue;
+                    }
+                    if (this.localMac && mac === this.localMac.toUpperCase()) {
+                        warnings.push({
+                            type: "conflict",
+                            title: "Self-assigned peer",
+                            message: `Group ${i + 1} is assigned this display's own MAC address.`,
+                        });
+                    }
+                    if (seen.has(mac)) {
+                        warnings.push({
+                            type: "conflict",
+                            title: "Duplicate peer MAC",
+                            message: `Multiple groups use the same peer MAC address ${macs[i]}.`,
+                        });
+                    }
+                    seen.add(mac);
+                }
+            }
+
+            if (
+                typeof imported.ssid === "string" &&
+                imported.ssid !== (this.settings.ssid || "")
+            ) {
+                warnings.push({
+                    type: "conflict",
+                    title: "Wi-Fi change",
+                    message:
+                        "Importing will change the Wi-Fi network and reconnect the display.",
+                });
+            }
+
+            if (
+                typeof imported.otaPass === "string" &&
+                imported.otaPass !== (this.settings.otaPass || "")
+            ) {
+                warnings.push({
+                    type: "conflict",
+                    title: "OTA password change",
+                    message:
+                        "Importing will change the OTA password and reboot the display.",
+                });
+            }
+
+            if (
+                typeof imported.mdns === "string" &&
+                imported.mdns !== (this.settings.mdns || "")
+            ) {
+                warnings.push({
+                    type: "conflict",
+                    title: "mDNS name change",
+                    message:
+                        "Importing will change the mDNS hostname and reconnect the display.",
+                });
+            }
+
+            if (Number(imported.mode) !== Number(this.settings.mode)) {
+                warnings.push({
+                    type: "info",
+                    title: "Display mode change",
+                    message: `The display mode will change to ${Number(imported.mode)} after import.`,
+                });
+            }
+        },
+
+        analyzeImport(data) {
+            const warnings = [];
+
+            if (
+                data === null ||
+                typeof data !== "object" ||
+                Array.isArray(data)
+            ) {
+                return {
+                    fatal: "The file does not contain a valid configuration object.",
+                };
+            }
+
+            let imported = data;
+            let sourceSchemaVersion = null;
+            let sourceDeviceMac = "";
+            let sourceDeviceName = "";
+
+            if (
+                data.settings &&
+                typeof data.settings === "object" &&
+                !Array.isArray(data.settings)
+            ) {
+                if (data.format && data.format !== EXPORT_FORMAT) {
+                    return {
+                        fatal: `Unrecognized configuration format "${data.format}".`,
+                    };
+                }
+                imported = data.settings;
+                sourceSchemaVersion =
+                    typeof data.schemaVersion === "number"
+                        ? data.schemaVersion
+                        : null;
+                sourceDeviceMac = data.device?.mac || "";
+                sourceDeviceName = data.device?.name || "";
+            }
+
+            if (sourceSchemaVersion === null) {
+                warnings.push({
+                    type: "compat",
+                    title: "Legacy format",
+                    message:
+                        "This file was saved by an older version and has no schema version. Settings missing from the file will use current defaults.",
+                });
+            } else if (sourceSchemaVersion < SETTINGS_SCHEMA_VERSION) {
+                warnings.push({
+                    type: "compat",
+                    title: "Older schema",
+                    message: `This file uses an older configuration schema (v${sourceSchemaVersion}, current is v${SETTINGS_SCHEMA_VERSION}). Settings added since then will use current defaults.`,
+                });
+            } else if (sourceSchemaVersion > SETTINGS_SCHEMA_VERSION) {
+                warnings.push({
+                    type: "compat",
+                    title: "Newer schema",
+                    message: `This file was exported from a newer configuration schema (v${sourceSchemaVersion}, current is v${SETTINGS_SCHEMA_VERSION}). Some settings may not be recognized by this device.`,
+                });
+            }
+
+            if (
+                sourceDeviceMac &&
+                this.localMac &&
+                sourceDeviceMac.toUpperCase() !== this.localMac.toUpperCase()
+            ) {
+                warnings.push({
+                    type: "conflict",
+                    title: "Different device",
+                    message: `This configuration was exported from another display (${sourceDeviceMac}${sourceDeviceName ? " - " + sourceDeviceName : ""}). Wi-Fi credentials and peer MAC addresses may not be appropriate for this device.`,
+                });
+            }
+
+            const missingKeys = [];
+            const unknownKeys = [];
+            for (const key of Object.keys(SETTINGS_SCHEMA)) {
+                if (!(key in imported)) missingKeys.push(key);
+            }
+            for (const key of Object.keys(imported)) {
+                if (!(key in SETTINGS_SCHEMA)) unknownKeys.push(key);
+            }
+
+            if (missingKeys.length) {
+                warnings.push({
+                    type: "info",
+                    title: "Missing settings",
+                    message: `${missingKeys.length} setting(s) are missing from the file and will use current/default values (${missingKeys.slice(0, 8).join(", ")}${missingKeys.length > 8 ? ", ..." : ""}).`,
+                });
+            }
+
+            if (unknownKeys.length) {
+                warnings.push({
+                    type: "info",
+                    title: "Unknown settings",
+                    message: `${unknownKeys.length} setting(s) in the file are not recognized by this device and will be ignored (${unknownKeys.slice(0, 8).join(", ")}${unknownKeys.length > 8 ? ", ..." : ""}).`,
+                });
+            }
+
+            for (const key of Object.keys(SETTINGS_SCHEMA)) {
+                if (!(key in imported)) continue;
+                const err = this.validateSettingValue(key, imported[key]);
+                if (err) {
+                    warnings.push({
+                        type: "error",
+                        title: "Invalid value",
+                        message: `"${key}" ${err}`,
+                    });
+                }
+            }
+
+            this.addImportConflicts(imported, warnings);
+
+            return { settings: imported, warnings };
+        },
+
+        applyImport() {
+            if (!this.importPreview) {
+                return;
+            }
+            if (this.importPreview.warnings.some((w) => w.type === "error")) {
+                this.showDialog(
+                    "Cannot import: the configuration contains invalid values.",
+                    "error",
+                );
+                return;
+            }
+
+            const imported = this.importPreview.settings;
+            const merged = { ...this.settings };
+            for (const key of Object.keys(SETTINGS_SCHEMA)) {
+                if (key in imported) {
+                    merged[key] = imported[key];
+                }
+            }
+            this.settings = merged;
+            this.normalizeMasterGroups();
+            this.importPreview = null;
+            this.showImportModal = false;
+            this.save();
+        },
+
         showDialog(message, type = "success", persistent = false) {
             this.dialog.message = message;
             this.dialog.type = type;
@@ -611,11 +1067,7 @@ describe("Page Component - Character Offsets", () => {
 
     it("should preserve empty rows positionally", () => {
         page.settings.charOffsets = "1,2;;4,5";
-        expect(page.charOffsetMatrix).toEqual([
-            [1, 2],
-            [],
-            [4, 5],
-        ]);
+        expect(page.charOffsetMatrix).toEqual([[1, 2], [], [4, 5]]);
     });
 
     it("should set character offset at specific module and character", () => {
@@ -1239,7 +1691,9 @@ describe("Page Component - Remote Offset Management", () => {
         page.settings.masterGroupModuleCounts = "8,6,8,8,8,8";
         page.settings.rModOffs = "0,0,0,0,0,0,0,0;0,0,0,0,0,0,0,0";
         page.settings.rDispOffs = "0,0,0,0,0";
-        page.settings.rChrOff0 = Array(8).fill(Array(48).fill(0).join(",")).join(";");
+        page.settings.rChrOff0 = Array(8)
+            .fill(Array(48).fill(0).join(","))
+            .join(";");
     });
 
     describe("remoteOffsetMatrix", () => {
@@ -1334,7 +1788,9 @@ describe("Page Component - Remote Offset Management", () => {
         it("should reset remote character offsets to zeros", () => {
             page.setRemoteCharOffset(0, 0, 0, 10);
             page.resetRemoteCharOffsets(0, 0);
-            expect(page.getRemoteCharOffsetMatrix(0)[0]).toEqual(Array(48).fill(0));
+            expect(page.getRemoteCharOffsetMatrix(0)[0]).toEqual(
+                Array(48).fill(0),
+            );
         });
     });
 
@@ -1396,5 +1852,327 @@ describe("Page Component - Remote Offset Management", () => {
             page.setRemoteCharOffset(0, 0, 0, 5);
             expect(page.allZeroCurrentCharOffsets(0)).toBe(false);
         });
+    });
+});
+
+describe("Page Component - Configuration Export", () => {
+    let page;
+
+    beforeEach(() => {
+        page = createPageData();
+        page.settings = {
+            ...page.settings,
+            name: "My Display",
+            moduleCount: 4,
+        };
+        page.localMac = "AA:BB:CC:DD:EE:FF";
+    });
+
+    it("should build an export payload with format and schema version", () => {
+        const payload = page.buildExportPayload();
+        expect(payload.format).toBe(EXPORT_FORMAT);
+        expect(payload.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
+        expect(payload.exportedAt).toBeDefined();
+        expect(payload.device.mac).toBe("AA:BB:CC:DD:EE:FF");
+        expect(payload.device.name).toBe("My Display");
+        expect(payload.settings.moduleCount).toBe(4);
+    });
+
+    it("should export settings by downloading a JSON file", () => {
+        page.downloadJson = vi.fn();
+        page.showDialog = vi.fn();
+        page.exportSettings();
+        expect(page.downloadJson).toHaveBeenCalled();
+        const [filename, payload] = page.downloadJson.mock.calls[0];
+        expect(filename).toMatch(
+            /^splitflap-settings-\d{4}-\d{2}-\d{2}\.json$/,
+        );
+        expect(payload.settings).toBeDefined();
+    });
+});
+
+describe("Page Component - Configuration Import Analysis", () => {
+    let page;
+
+    beforeEach(() => {
+        page = createPageData();
+        page.settings = {
+            ...page.settings,
+            ssid: "home",
+            otaPass: "",
+            mdns: "splitflap",
+            mode: 2,
+        };
+        page.localMac = "AA:BB:CC:DD:EE:FF";
+    });
+
+    it("should accept a well-formed export file with no warnings", () => {
+        const data = {
+            format: EXPORT_FORMAT,
+            schemaVersion: SETTINGS_SCHEMA_VERSION,
+            device: { name: "Other", mac: "AA:BB:CC:DD:EE:FF" },
+            settings: { name: "Imported", moduleCount: 4, charset: 48 },
+        };
+        const analysis = page.analyzeImport(data);
+        expect(analysis.fatal).toBeUndefined();
+        expect(analysis.settings.name).toBe("Imported");
+        expect(
+            analysis.warnings.some(
+                (w) => w.type === "conflict" || w.type === "error",
+            ),
+        ).toBe(false);
+    });
+
+    it("should accept a legacy raw settings object with a compat warning", () => {
+        const analysis = page.analyzeImport({ name: "Old", moduleCount: 2 });
+        expect(analysis.fatal).toBeUndefined();
+        expect(
+            analysis.warnings.some(
+                (w) => w.type === "compat" && w.title === "Legacy format",
+            ),
+        ).toBe(true);
+    });
+
+    it("should return a fatal error for non-object files", () => {
+        expect(page.analyzeImport(null).fatal).toBeDefined();
+        expect(page.analyzeImport([1, 2, 3]).fatal).toBeDefined();
+        expect(page.analyzeImport("text").fatal).toBeDefined();
+    });
+
+    it("should return a fatal error for an unknown format", () => {
+        const analysis = page.analyzeImport({
+            format: "something-else",
+            settings: { name: "X" },
+        });
+        expect(analysis.fatal).toContain("something-else");
+    });
+
+    it("should flag missing settings", () => {
+        const analysis = page.analyzeImport({ name: "X" });
+        expect(
+            analysis.warnings.some((w) => w.title === "Missing settings"),
+        ).toBe(true);
+    });
+
+    it("should flag unknown settings", () => {
+        const analysis = page.analyzeImport({ name: "X", bogusKey: 1 });
+        expect(
+            analysis.warnings.some((w) => w.title === "Unknown settings"),
+        ).toBe(true);
+    });
+
+    it("should warn on older schema versions", () => {
+        const analysis = page.analyzeImport({
+            format: EXPORT_FORMAT,
+            schemaVersion: SETTINGS_SCHEMA_VERSION - 1,
+            settings: { name: "X" },
+        });
+        expect(analysis.warnings.some((w) => w.title === "Older schema")).toBe(
+            true,
+        );
+    });
+
+    it("should warn on newer schema versions", () => {
+        const analysis = page.analyzeImport({
+            format: EXPORT_FORMAT,
+            schemaVersion: SETTINGS_SCHEMA_VERSION + 1,
+            settings: { name: "X" },
+        });
+        expect(analysis.warnings.some((w) => w.title === "Newer schema")).toBe(
+            true,
+        );
+    });
+
+    it("should warn when the file came from a different device", () => {
+        const analysis = page.analyzeImport({
+            format: EXPORT_FORMAT,
+            schemaVersion: SETTINGS_SCHEMA_VERSION,
+            device: { name: "Other", mac: "11:22:33:44:55:66" },
+            settings: { name: "X" },
+        });
+        expect(
+            analysis.warnings.some((w) => w.title === "Different device"),
+        ).toBe(true);
+    });
+
+    it("should flag invalid values as errors", () => {
+        const analysis = page.analyzeImport({
+            name: "X",
+            moduleCount: 99,
+            charset: 42,
+        });
+        const errors = analysis.warnings.filter((w) => w.type === "error");
+        expect(errors.some((e) => e.message.includes("moduleCount"))).toBe(
+            true,
+        );
+        expect(errors.some((e) => e.message.includes("charset"))).toBe(true);
+    });
+
+    it("should flag character offsets size mismatching charset", () => {
+        const analysis = page.analyzeImport({
+            charset: 37,
+            charOffsets:
+                "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+        });
+        expect(
+            analysis.warnings.some((w) => w.title === "Character offsets size"),
+        ).toBe(true);
+    });
+
+    it("should flag module count mismatching group 1 count", () => {
+        const analysis = page.analyzeImport({
+            moduleCount: 4,
+            masterGroupModuleCounts: "8,8,8,8,8,8",
+        });
+        expect(
+            analysis.warnings.some((w) => w.title === "Module count mismatch"),
+        ).toBe(true);
+    });
+
+    it("should flag a remote group without a peer MAC", () => {
+        const analysis = page.analyzeImport({
+            masterGroupCount: 2,
+            masterGroupMacs: ",,,",
+        });
+        expect(
+            analysis.warnings.some((w) => w.title === "Missing peer MAC"),
+        ).toBe(true);
+    });
+
+    it("should flag duplicate peer MACs", () => {
+        const analysis = page.analyzeImport({
+            masterGroupCount: 3,
+            masterGroupMacs: ",AA:BB:CC:DD:EE:01,AA:BB:CC:DD:EE:01",
+        });
+        expect(
+            analysis.warnings.some((w) => w.title === "Duplicate peer MAC"),
+        ).toBe(true);
+    });
+
+    it("should flag a peer MAC matching this device", () => {
+        const analysis = page.analyzeImport({
+            masterGroupCount: 2,
+            masterGroupMacs: ",AA:BB:CC:DD:EE:FF",
+        });
+        expect(
+            analysis.warnings.some((w) => w.title === "Self-assigned peer"),
+        ).toBe(true);
+    });
+
+    it("should warn about Wi-Fi / OTA / mDNS changes", () => {
+        const analysis = page.analyzeImport({
+            ssid: "new-network",
+            otaPass: "secret",
+            mdns: "new-name",
+        });
+        const titles = analysis.warnings.map((w) => w.title);
+        expect(titles).toContain("Wi-Fi change");
+        expect(titles).toContain("OTA password change");
+        expect(titles).toContain("mDNS name change");
+    });
+});
+
+describe("Page Component - Configuration Import Preview / Apply", () => {
+    let page;
+
+    beforeEach(() => {
+        page = createPageData();
+        global.fetch = vi.fn();
+        page.localMac = "AA:BB:CC:DD:EE:FF";
+    });
+
+    it("should open the review modal from a parsed file", () => {
+        page.previewImport({
+            format: EXPORT_FORMAT,
+            schemaVersion: SETTINGS_SCHEMA_VERSION,
+            settings: { name: "X" },
+        });
+        expect(page.showImportModal).toBe(true);
+        expect(page.importPreview.settings.name).toBe("X");
+    });
+
+    it("should show a dialog for fatal analysis results", () => {
+        page.previewImport("not-an-object");
+        expect(page.showImportModal).toBe(false);
+        expect(page.dialog.type).toBe("error");
+    });
+
+    it("should report invalid JSON files", () => {
+        const page2 = { ...page, showDialog: vi.fn() };
+        const fakeEvent = {
+            target: {
+                files: [{ name: "x.json" }],
+                value: "C:\\fakepath\\x.json",
+            },
+        };
+        let readerInstance;
+        global.FileReader = class {
+            constructor() {
+                this.result = "{invalid json";
+                this.readAsText = vi.fn();
+                readerInstance = this;
+            }
+        };
+        page2.onImportFileSelected(fakeEvent);
+        readerInstance.onload();
+        expect(page2.showDialog).toHaveBeenCalledWith(
+            "Invalid configuration file: not valid JSON.",
+            "error",
+        );
+    });
+
+    it("should merge imported settings and save", async () => {
+        const mockResponse = {
+            message: "Settings saved successfully!",
+            type: "success",
+        };
+        global.fetch.mockResolvedValueOnce({
+            json: () => Promise.resolve(mockResponse),
+        });
+
+        page.importPreview = {
+            settings: { name: "Imported", moduleCount: 3 },
+            warnings: [],
+        };
+        page.showImportModal = true;
+        page.applyImport();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(page.settings.name).toBe("Imported");
+        expect(page.settings.moduleCount).toBe(3);
+        expect(page.showImportModal).toBe(false);
+        expect(global.fetch).toHaveBeenCalledWith(
+            "/settings",
+            expect.objectContaining({ method: "POST" }),
+        );
+    });
+
+    it("should block import when the file has invalid values", async () => {
+        page.importPreview = {
+            settings: { name: "X", moduleCount: 99 },
+            warnings: [
+                {
+                    type: "error",
+                    title: "Invalid value",
+                    message: "moduleCount",
+                },
+            ],
+        };
+        page.applyImport();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(page.settings.moduleCount).not.toBe(99);
+        expect(global.fetch).not.toHaveBeenCalled();
+        expect(page.dialog.type).toBe("error");
+    });
+
+    it("should expose hasImportErrors", () => {
+        page.importPreview = {
+            warnings: [{ type: "conflict" }],
+        };
+        expect(page.hasImportErrors).toBe(false);
+
+        page.importPreview.warnings.push({ type: "error" });
+        expect(page.hasImportErrors).toBe(true);
     });
 });

@@ -337,6 +337,7 @@ void SplitFlapWebServer::startWebServer() {
         JsonDocument response;
         response["settings"] = currentSettings.as<JsonObject>();
         response["localMac"] = WiFi.macAddress();
+        response["schemaVersion"] = SETTINGS_SCHEMA_VERSION;
         if (espNow) {
             JsonArray peers = response["discoveredPeers"].to<JsonArray>();
             JsonDocument peersDoc;

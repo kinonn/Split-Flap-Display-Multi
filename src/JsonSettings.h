@@ -7,6 +7,11 @@
 #include <Preferences.h>
 #include <map>
 
+// Bump this whenever the settings schema changes (keys added/removed/renamed,
+// or the meaning of an existing value changes). The web UI uses it to warn
+// about forward/backward compatibility when importing an exported config.
+#define SETTINGS_SCHEMA_VERSION 1
+
 class JsonSettings {
   public:
     JsonSettings(const char *name, std::map<String, JsonSetting> map) : name(name), map(map) {}
