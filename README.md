@@ -56,28 +56,47 @@ pio device monitor -e esp32_c3 -b 460800
 
 The erase step clears saved settings, Wi-Fi credentials, NVS data, and the filesystem. Upload both firmware and filesystem afterward.
 
-## Setup Instructions
+## Quick Start
 
-1. Install dependencies
-    - [PlatformIO Core CLI](https://platformio.org/install/cli)
-    - [Node Version Mananger](https://github.com/nvm-sh/nvm)
-    - [ClangFormat](https://clang.llvm.org/docs/ClangFormat.html) (Only required if contributing code)
-1. [Download](https://github.com/jhoff/Split-Flap-Display/archive/refs/heads/main.zip) or clone this [git repository](https://github.com/jhoff/Split-Flap-Display).
-1. Open a terminal and `cd` to the project root
-1. Install required version of npm for the project - `nvm install`
-1. Install build dependencies - `npm install`
-1. Connect the ESP32 to your computer using a USB cable.
-1. Build everything and upload to the board - `npm run build`
+### 1. Install dependencies
 
-- Automatically formats all source code ( `npm run format` - if needed )
-- Compiles and minifies all frontend assets ( `npm run assets` )
-- Downloads all required arduino / esp32 libraries
-- Compiles and uploads the esp32 firmware ( `npm run pio:firmware` or `pio run -t upload -e <environment>` )
-- Compiles and uploads the littlefs filesystem ( `npm run pio:filesystem` or `pio run -t uploadfs -e <environment>` )
+- **PlatformIO Core CLI** — https://platformio.org/install/cli
+- **Node.js LTS** (20 or 22). Prefer installing it with a version manager:
+    - **macOS / Linux** — [nvm](https://github.com/nvm-sh/nvm), then run `nvm install` (it reads the project's `.nvmrc`)
+    - **Windows** — [nvm-windows](https://github.com/coreybutler/nvm-windows), then `nvm install 22` and `nvm use 22`
+- **ClangFormat** — https://clang.llvm.org/docs/ClangFormat.html (optional — only needed when contributing code)
+
+### 2. Clone and install build tools
+
+```sh
+git clone https://github.com/kinonn/Split-Flap-Display-Multi.git
+cd Split-Flap-Display-Multi
+npm install
+```
+
+### 3. Build and upload
+
+Plug the ESP32 into your computer with a USB cable, then run:
+
+```sh
+npm run build
+```
+
+`npm run build` runs the whole pipeline: it formats the source code, compiles and minifies the web assets, downloads any missing Arduino/ESP32 libraries, then **uploads the firmware and filesystem to the connected board**.
+
+Useful commands:
+
+| Command                  | Description                                                              |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `npm run build`          | Format, compile, and upload firmware + filesystem to the connected board |
+| `npm run pio:firmware`   | Compile and upload the ESP32 firmware                                    |
+| `npm run pio:filesystem` | Compile and upload the littlefs filesystem                               |
+| `pio run -e esp32_c3`    | Compile only (no upload)                                                 |
+| `npm test`               | Run the frontend unit tests                                              |
 
 If you are switching an ESP32-C3 board from an older build or partition layout, use the erase/upload sequence in [ESP32-C3 partition layout](#esp32-c3-partition-layout) instead of only running `npm run build`.
 
-1. Enjoy!
+Enjoy!
 
 ## Multi-Display Master Mode
 
