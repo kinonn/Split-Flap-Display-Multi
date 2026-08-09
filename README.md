@@ -29,11 +29,11 @@ Firmware for the modular Split Flap Display created by [Morgan Manly](https://gi
 
 ## Supported boards
 
-| Environment          | Processor     | Tested Boards                                                            |
-| -------------------- | ------------- | ------------------------------------------------------------------------ |
-| `esp32_c3` (default) | ESP32-C3FN4   | Teyleten Robot ESP32-C3-SuperMini<br>Waveshare ESP32-C3-Zero             |
-| `esp32_s3`           | ESP32-S3FH4R2 | Waveshare ESP32-S3-Zero<sup>\*</sup><br>ESP32-S3 Super Mini<sup>\*</sup> |
-| `esp32_wroom`        | ESP32 (WROOM)| Dual-I2C builds: up to 16 modules per group on two I2C buses             |
+| Environment             | Processor     | Tested Boards                                                            |
+| ----------------------- | ------------- | ------------------------------------------------------------------------ |
+| `esp32_c3`              | ESP32-C3FN4   | Teyleten Robot ESP32-C3-SuperMini<br>Waveshare ESP32-C3-Zero             |
+| `esp32_s3`              | ESP32-S3FH4R2 | Waveshare ESP32-S3-Zero<sup>\*</sup><br>ESP32-S3 Super Mini<sup>\*</sup> |
+| `esp32_wroom` (default) | ESP32 (WROOM) | Dual-I2C builds: up to 16 modules per group on two I2C buses             |
 
 <sub>\* Requires manually resetting the board into firmware upload mode by holding BOOT, pressing & releasing RESET, then releasing BOOT prior to upload. After uploading is successful, either press & release RESET or power cycle the board to put it in normal operation mode.</sub>
 
@@ -42,7 +42,7 @@ Firmware for the modular Split Flap Display created by [Morgan Manly](https://gi
 Each PCF8575 module has 3 address pins (A0-A2), so a single I2C bus supports at most 8 unique addresses (`0x20`-`0x27`). To drive more than 8 modules from one controller, the `esp32_wroom` environment compiles with `ENABLE_DUAL_I2C`:
 
 - Modules 0-7 live on `Wire` (default SDA=21 / SCL=22).
-- Modules 8-15 live on `Wire1` (default SDA2=33 / SCL2=32, configurable in the web UI).
+- Modules 8-15 live on `Wire1` (default SDA2=18 / SCL2=19, configurable in the web UI).
 - A group may be configured with up to 16 modules (`Number of Modules` in Hardware Settings).
 - Multi-group chunking is width-aware: a 16-module local group still chunks messages left-to-right across the full group width, exactly like an 8-module group.
 
@@ -74,24 +74,156 @@ The erase step clears saved settings, Wi-Fi credentials, NVS data, and the files
 
 ## Setup Instructions
 
-1. Install dependencies
-    - [PlatformIO Core CLI](https://platformio.org/install/cli)
-    - [Node Version Mananger](https://github.com/nvm-sh/nvm)
-    - [ClangFormat](https://clang.llvm.org/docs/ClangFormat.html) (Only required if contributing code)
-1. [Download](https://github.com/jhoff/Split-Flap-Display/archive/refs/heads/main.zip) or clone this [git repository](https://github.com/jhoff/Split-Flap-Display).
-1. Open a terminal and `cd` to the project root
-1. Install required version of npm for the project - `nvm install`
-1. Install build dependencies - `npm install`
-1. Connect the ESP32 to your computer using a USB cable.
-1. Build everything and upload to the board - `npm run build`
+This guide takes you from a completely fresh computer and a brand-new ESP32
+board all the way to a configured, running display — step by step.
 
-- Automatically formats all source code ( `npm run format` - if needed )
-- Compiles and minifies all frontend assets ( `npm run assets` )
-- Downloads all required arduino / esp32 libraries
-- Compiles and uploads the esp32 firmware ( `npm run pio:firmware` or `pio run -t upload -e <environment>` )
-- Compiles and uploads the littlefs filesystem ( `npm run pio:filesystem` or `pio run -t uploadfs -e <environment>` )
+### 0. One-time tooling install
 
-If you are switching an ESP32-C3 board from an older build or partition layout, use the erase/upload sequence in [ESP32-C3 partition layout](#esp32-c3-partition-layout) instead of only running `npm run build`.
+- [PlatformIO Core CLI](https://platformio.org/install/cli) — the build/upload
+  toolchain. Alternatively install the
+  [PlatformIO extension for VS Code](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide),
+  which bundles the CLI and adds a project toolbar.
+- [Node.js](https://nodejs.org/) with [nvm](https://github.com/nvm-sh/nvm) —
+  used to build the web interface. The project pins Node `lts/hydrogen`
+  (see `.nvmrc`); running `nvm install` in the project root selects it.
+- [ClangFormat](https://clang.llvm.org/docs/ClangFormat.html) — _optional_,
+  only needed when editing C/C++ source and using `npm run format`. The build
+  skips it gracefully if it is not installed.
+
+> **Windows only:** most ESP32 dev boards use a CP210x or CH340 USB-to-serial
+> chip. If the board is not detected after plugging it in, install the matching
+> driver — [CP210x](https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers)
+> or [CH340](https://www.wch-ic.com/downloads/CH341SER_ZIP.html).
+
+### Step 1 — Get the code
+
+```sh
+git clone https://github.com/jhoff/Split-Flap-Display.git
+cd Split-Flap-Display
+nvm install   # optional: selects the pinned Node version from .nvmrc
+npm install   # installs the frontend build tooling (vite, tailwind, ...)
+```
+
+### Step 2 — Connect the board and pick an environment
+
+Connect the ESP32 to your computer with a USB **data** cable (charge-only
+cables will not work). Confirm the board is detected:
+
+```sh
+pio device list
+```
+
+Note the serial port (e.g. `COM4` on Windows, `/dev/ttyUSB0` on Linux/macOS).
+
+Pick the environment that matches your board — this controls build flags,
+flash size and serial baud rate (see the
+[Supported boards](#supported-boards) table). The default environment is
+`esp32_wroom`; to use another board as the default, change `default_envs` at
+the top of `platformio.ini`.
+
+| Your board                | Environment   | Add to `pio` commands  |
+| ------------------------- | ------------- | ---------------------- |
+| ESP32-WROOM **(default)** | `esp32_wroom` | _(none — the default)_ |
+| ESP32-C3                  | `esp32_c3`    | `-e esp32_c3`          |
+| ESP32-S3                  | `esp32_s3`    | `-e esp32_s3`          |
+
+### Step 3 — Build and flash
+
+The one-command path formats the code, builds the web assets, compiles the
+firmware, uploads the firmware, then uploads the LittleFS filesystem:
+
+```sh
+npm run build
+```
+
+If you prefer to run the steps separately (useful when iterating on code, or
+when using a non-default environment), the underlying commands are:
+
+```sh
+npm run assets                          # compile + minify web UI (src/web -> build/web)
+pio run -t upload -e esp32_wroom        # compile + upload firmware
+pio run -t uploadfs -e esp32_wroom      # pack + upload the web filesystem
+```
+
+For non-default boards, replace `esp32_wroom` with your environment (for
+example `-e esp32_c3`).
+
+### Step 4 — Erase a fresh / first-time board
+
+A brand-new ESP32 flashes and boots fine without erasing — the NVS settings
+namespace is created automatically on first boot. However, erasing is:
+
+- **Recommended** on a brand-new board to guarantee there is no stale data from
+  another project, and **required** when re-flashing a board that previously
+  ran different firmware or a different partition layout.
+- **Required** for the `esp32_c3` environment — it uses the custom
+  `no_ota.csv` partition table (see
+  [ESP32-C3 partition layout](#esp32-c3-partition-layout)).
+
+Erase wipes saved settings, Wi-Fi credentials, NVS data and the filesystem, so
+re-upload the firmware **and** the filesystem afterward:
+
+```sh
+pio run -t erase -e esp32_c3
+pio run -t upload -e esp32_c3
+pio run -t uploadfs -e esp32_c3
+```
+
+### Step 5 — Watch it boot (optional but recommended)
+
+```sh
+pio device monitor -e esp32_wroom       # baud rate comes from the environment
+```
+
+The baud rate is set per environment (`115200` for `esp32_wroom`/`esp32_s3`,
+`460800` for `esp32_c3`), so `-b` is usually not needed. A successful boot ends
+with something like:
+
+```text
+[boot] setup complete in access point mode
+```
+
+### Step 6 — First boot: connect to the display
+
+1. The display starts in **access point mode**. On your phone or laptop, join
+   the Wi-Fi network named **`Split Flap Display`** (no password).
+2. Open <http://192.168.4.1> (or <http://splitflap.local> via mDNS).
+3. Go to `Settings`, enter your Wi-Fi network name and password, then click
+   `Save Settings`. The display reboots and joins your network.
+4. Reconnect to your normal Wi-Fi and open the display's new address (check
+   your router's DHCP list, or use <http://splitflap.local>).
+
+> **I2C pins:** if your hardware uses custom SDA/SCL wiring instead of the
+> defaults (bus 1: SDA=21 / SCL=22, bus 2: SDA2=18 / SCL2=19), set the pins in
+> the web UI under `Hardware Settings`. The firmware rejects reserved/strapping
+> GPIOs (`0, 2, 5, 6-11, 12, 15`) and skips I2C rather than crash — but only
+> safe, wired-up pins will actually drive modules.
+
+### Updating an existing device
+
+If the board already runs this firmware and you only changed code or settings,
+you normally do **not** need to erase — saved settings, Wi-Fi credentials and
+offsets are preserved in flash:
+
+```sh
+npm run build
+```
+
+### Troubleshooting
+
+- **`Failed to connect to COMx` / no port found** — the board is not detected.
+  Install the USB driver (see the note above), try another USB cable/port, and
+  re-run `pio device list`.
+- **ESP32-S3 does not upload** — put the board into download mode: hold
+  **BOOT**, tap **RESET**, release **BOOT**, then upload. Power-cycle the board
+  after the upload finishes.
+- **Board boot-loops with `rst:0x8 (TG1WDT_SYS_RESET)`** — this is almost
+  always caused by I2C pins that are reserved/strapping GPIOs (e.g. 8/9).
+  Erase the board so it picks up the safe defaults (21/22 and 18/19), then
+  reconfigure pins in the web UI if needed.
+- **`esp32_c3` app does not fit / resets before `setup()`** — the C3 build
+  needs the `no_ota.csv` partition layout; run the erase/upload sequence in
+  Step 4 so the new partition table is applied.
 
 1. Enjoy!
 
@@ -200,7 +332,7 @@ Requires a reboot after changing either setting.
 - `git clone https://github.com/your-username/Split-Flap-Display.git`
 
 1. Install the dependencies listed in [Setup Instructions](#setup-instructions)
-1. Skip step 2, complete the setup and use `npm run build` to test and upload your changes.
+1. Skip step 1 (you already have a clone), complete the rest of the setup, and use `npm run build` to test and upload your changes.
 
 ### Create your feature
 

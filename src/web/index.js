@@ -47,19 +47,17 @@ document.addEventListener("alpine:init", () => {
 
         get bus2AddressArray() {
             return (
-                this.settings.wire1Addresses
-                    ?.split(",")
-                    .map((s) => s.trim()) || []
+                this.settings.wire1Addresses?.split(",").map((s) => s.trim()) ||
+                []
             );
         },
         // Merged view: modules 0-7 from moduleAddresses (Wire),
         // modules 8-15 from wire1Addresses (Wire1) on dual-I2C builds.
         get addressArray() {
-            const a = (
+            const a =
                 this.settings.moduleAddresses
                     ?.split(",")
-                    .map((s) => s.trim()) || []
-            );
+                    .map((s) => s.trim()) || [];
             const b = this.bus2AddressArray;
             const count = Number(this.settings.moduleCount) || a.length || 8;
             const merged = [];
@@ -82,10 +80,9 @@ document.addEventListener("alpine:init", () => {
         },
 
         get offsetArray() {
-            const a = (
+            const a =
                 this.settings.moduleOffsets?.split(",").map((s) => s.trim()) ||
-                []
-            );
+                [];
             const b = this.bus2OffsetArray;
             const count = Number(this.settings.moduleCount) || a.length || 8;
             const merged = [];
@@ -117,7 +114,11 @@ document.addEventListener("alpine:init", () => {
             if (!this.settings.charOffsets) return [];
             return this.settings.charOffsets
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setCharOffset(modIndex, charIndex, value) {
             const matrix = this.charOffsetMatrix;
@@ -152,7 +153,11 @@ document.addEventListener("alpine:init", () => {
             if (!this.settings.rModOffs) return [];
             return this.settings.rModOffs
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setRemoteOffset(groupRow, modIndex, value) {
             const matrix = this.remoteOffsetMatrix;
@@ -182,7 +187,11 @@ document.addEventListener("alpine:init", () => {
             if (!this.settings[key]) return [];
             return this.settings[key]
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setRemoteCharOffset(groupRow, modIndex, charIndex, value) {
             const key = "rChrOff" + groupRow;

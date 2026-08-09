@@ -78,6 +78,21 @@ void SplitFlapModule::init() {
     // coils are powered down as early as possible after boot.
 }
 
+bool SplitFlapModule::isPresent() {
+    if (hasErrored) {
+        return false;
+    }
+    wire->beginTransmission(address);
+    byte error = wire->endTransmission();
+    if (error != 0) {
+        // Mark as errored so subsequent writeIO()/readHallEffectSensor()
+        // calls return immediately instead of blocking on the bus timeout.
+        hasErrored = true;
+        return false;
+    }
+    return true;
+}
+
 void SplitFlapModule::updateOffsets(const int newCharOffsets[], int newMagnetOffset) {
     magnetPosition = newMagnetOffset;
 

@@ -56,6 +56,12 @@ class SplitFlapDisplay {
     bool checkAllFalse(bool array[], int size);
     void stopMotors();
     void startMotors();
+    // Write the power-down (all coils low) state to every possible module
+    // address (0x20-0x27) on a bus, regardless of how many modules are
+    // configured. Used at boot so PCF8575s that power up with all outputs
+    // HIGH (coils energized) are pulled low even when no module object
+    // exists for their address.
+    void powerDownCoils(TwoWire *bus);
 
     // Split a string into chunks of <= numModules chars, breaking only at word
     // boundaries. A word longer than numModules is split mid-word (no other

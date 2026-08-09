@@ -13,6 +13,13 @@ class SplitFlapModule {
     void init();
     void updateOffsets(const int newCharOffsets[], int newMagnetOffset);
 
+    // Probe the module's I2C address with a zero-length transaction. Returns
+    // true if a device ACKs. On failure, marks the module as errored so all
+    // later I2C traffic is skipped (a missing module would otherwise block
+    // every write until the bus timeout, stalling setup and tripping the
+    // watchdog).
+    bool isPresent();
+
     void step(bool updatePosition = true);                   // step motor
     void stop();                                             // write all motor input pins to low
     void start();                                            // re-energize coils to last position, not stepping motor

@@ -36,14 +36,14 @@ JsonSettings settings = JsonSettings("config", {
     {"magnetPosition", JsonSetting(730)},
     {"moduleOffsets", JsonSetting({0, 0, 0, 0, 0, 0, 0, 0})},
     {"displayOffset", JsonSetting(0)},
-    {"sdaPin", JsonSetting(8)},
-    {"sclPin", JsonSetting(9)},
+    {"sdaPin", JsonSetting(21)},
+    {"sclPin", JsonSetting(22)},
 #ifdef ENABLE_DUAL_I2C
     // Bus 2 (Wire1) — modules 8..15 in a 16-module group
     {"wire1Addresses", JsonSetting({0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27})},
     {"wire1Offsets", JsonSetting({0, 0, 0, 0, 0, 0, 0, 0})},
-    {"sda2Pin", JsonSetting(33)},
-    {"scl2Pin", JsonSetting(32)},
+    {"sda2Pin", JsonSetting(18)},
+    {"scl2Pin", JsonSetting(19)},
 #endif
     {"stepsPerRot", JsonSetting(2048)},
     {"maxVel", JsonSetting(15.0f)},

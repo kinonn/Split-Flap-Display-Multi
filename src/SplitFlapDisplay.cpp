@@ -5,6 +5,30 @@
 #include "SplitFlapMqtt.h"
 #include "SplitFlapMotorScheduler.h"
 
+// ESP32 pins that must never be used as I2C. GPIO 6-11 are the SPI flash pins
+// (driving them hangs the chip and trips the watchdog during boot), and the
+// rest are boot strapping pins. Configuring any of these as SDA/SCL makes the
+// device boot-loop, so we reject them up front and skip I2C entirely.
+static bool isValidI2CPin(int pin) {
+    if (pin < 0 || pin > 39) return false;
+    switch (pin) {
+        case 0:    // strapping (boot mode)
+        case 2:    // strapping
+        case 5:    // strapping
+        case 6:    // SPI flash
+        case 7:    // SPI flash
+        case 8:    // SPI flash / VDD_SDIO
+        case 9:    // SPI flash / boot
+        case 10:   // SPI flash
+        case 11:   // SPI flash
+        case 12:   // strapping (MTDI / VDD_SDIO voltage)
+        case 15:   // strapping (MTDO)
+            return false;
+        default:
+            return true;
+    }
+}
+
 SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings), maxConcurrentMotors(-1) {
     for (int i = 0; i < MAX_MODULES; i++) {
         lastDisplayedChar[i] = ' ';
@@ -78,22 +102,76 @@ void SplitFlapDisplay::init() {
     SDAPin = settings.getInt("sdaPin");
     SCLPin = settings.getInt("sclPin");
 
+    // Reject reserved/strapping pins before touching the I2C hardware. Calling
+    // Wire.begin() with e.g. GPIO 8/9 (SPI flash pins) hangs the chip and trips
+    // the watchdog, boot-looping the device. If the configured pins are bad we
+    // skip I2C entirely so the board still boots (WiFi/AP/web server stay up).
+    if (!isValidI2CPin(SDAPin) || !isValidI2CPin(SCLPin)) {
+        Serial.printf("[i2c] WARNING: invalid I2C pins SDA=%d SCL=%d (reserved/strapping), skipping I2C init\n", SDAPin, SCLPin);
+        Serial.printf("[i2c] initialized 0/%d modules\n", numModules);
+        Serial.flush();
+        return;
+    }
+
     Wire.begin(SDAPin, SCLPin);
     Wire.setClock(400000);
+    // Bound each I2C transaction so a stuck bus or a missing module can't
+    // block setup() indefinitely (which trips the watchdog and boot-loops).
+    Wire.setTimeOut(50);
 
 #ifdef ENABLE_DUAL_I2C
-    if (wire1Count > 0) {
-        SDA2Pin = settings.getInt("sda2Pin");
-        SCL2Pin = settings.getInt("scl2Pin");
+    // Always bring up bus 2 (Wire1), even when wire1Count is 0, so we can
+    // power down any expanders physically present on it below.
+    bool wire1Active = false;
+    SDA2Pin = settings.getInt("sda2Pin");
+    SCL2Pin = settings.getInt("scl2Pin");
+    if (!isValidI2CPin(SDA2Pin) || !isValidI2CPin(SCL2Pin)) {
+        Serial.printf("[i2c] WARNING: invalid Wire1 I2C pins SDA2=%d SCL2=%d (reserved/strapping), skipping bus 2\n", SDA2Pin, SCL2Pin);
+    } else {
         Wire1.begin(SDA2Pin, SCL2Pin);
         Wire1.setClock(400000);
+        Wire1.setTimeOut(50);
+        wire1Active = true;
         Serial.printf("[i2c] bus 2 (Wire1) enabled: SDA=%d SCL=%d modules=%d\n", SDA2Pin, SCL2Pin, wire1Count);
     }
+    Serial.flush();
 #endif
 
-    for (uint8_t i = 0; i < numModules; i++) {
-        modules[i].init();
+    // Power down all motor coils on EVERY possible module address of BOTH
+    // buses before probing/initializing the configured modules, regardless
+    // of how many modules are configured. PCF8575 expanders power up with
+    // all outputs HIGH and the ULN2003 boards invert that, so any expander
+    // we never write to leaves every coil of its module energized at boot.
+    // On dual-I2C builds that includes all 8 addresses on bus 2 even when
+    // wire1Count is 0. Writing an address with no device just NACKs and
+    // returns immediately (only a stuck bus hits the 50ms timeout).
+    powerDownCoils(&Wire);
+#ifdef ENABLE_DUAL_I2C
+    if (wire1Active) {
+        powerDownCoils(&Wire1);
     }
+    Serial.println("[i2c] all module coils powered down (both buses)");
+#else
+    Serial.println("[i2c] all module coils powered down");
+#endif
+    Serial.flush();
+
+    // Probe each configured address and only initialize modules that are
+    // actually present. A missing module would otherwise block every write
+    // until the I2C timeout — 16 transactions with no modules on the bus is
+    // enough to trip the watchdog during boot. isPresent() also marks absent
+    // modules as errored so later writes/reads short-circuit instantly.
+    int detected = 0;
+    for (uint8_t i = 0; i < numModules; i++) {
+        if (modules[i].isPresent()) {
+            modules[i].init();
+            detected++;
+        } else {
+            Serial.printf("[i2c] module %d (0x%02X) not detected, skipping\n", i, moduleAddresses[i]);
+        }
+    }
+    Serial.printf("[i2c] initialized %d/%d modules\n", detected, numModules);
+    Serial.flush();
 }
 
 void SplitFlapDisplay::reloadOffsets() {
@@ -648,6 +726,22 @@ void SplitFlapDisplay::stopMotors() {
     // Serial.println("Stopping Motors");
     for (int i = 0; i < numModules; i++) {
         modules[i].stop();
+    }
+}
+
+void SplitFlapDisplay::powerDownCoils(TwoWire *bus) {
+    // Same state as SplitFlapModule::init()/stop(): pin 15 as INPUT (hall
+    // sensor), pins 1-4 as OUTPUT driven LOW so all four motor coils are
+    // de-energized. Written to every address in the PCF8575 A0-A2 range so
+    // expanders power up de-energized even if no module object exists for
+    // them. A write to an address with no device just NACKs and returns
+    // immediately; only a stuck bus reaches the 50ms setTimeOut().
+    const uint16_t powerDownState = 0b1111111111100001;
+    for (uint8_t addr = 0x20; addr <= 0x27; addr++) {
+        bus->beginTransmission(addr);
+        bus->write(powerDownState & 0xFF);        // lower byte
+        bus->write((powerDownState >> 8) & 0xFF); // upper byte
+        bus->endTransmission();                   // ignore result (may be NACK)
     }
 }
 

@@ -38,6 +38,12 @@ class JsonSettings {
     void putPrefInt(const char *key, int value);
     void putPrefFloat(const char *key, float value);
 
+    // Creates the Preferences/NVS namespace if it doesn't exist yet. Reads
+    // use read-only mode which never creates a namespace, so on a fresh
+    // device (first boot after a flash erase) every read would otherwise
+    // fail with NOT_FOUND. A one-time read-write open auto-creates it.
+    void ensureNamespace();
+
     const char *name;
     std::map<String, JsonSetting> map;
 
@@ -47,4 +53,5 @@ class JsonSettings {
     JsonSetting find(const char *key);
 
     Preferences preferences;
+    bool namespaceCreated = false;
 };

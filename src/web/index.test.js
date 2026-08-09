@@ -71,7 +71,11 @@ const createPageData = (type = "Settings") => {
             if (!this.settings.charOffsets) return [];
             return this.settings.charOffsets
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setCharOffset(modIndex, charIndex, value) {
             const matrix = this.charOffsetMatrix;
@@ -108,7 +112,11 @@ const createPageData = (type = "Settings") => {
             if (!this.settings.rModOffs) return [];
             return this.settings.rModOffs
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setRemoteOffset(groupRow, modIndex, value) {
             const matrix = this.remoteOffsetMatrix;
@@ -138,7 +146,11 @@ const createPageData = (type = "Settings") => {
             if (!this.settings[key]) return [];
             return this.settings[key]
                 .split(";")
-                .map((r) => r.length === 0 ? [] : r.split(",").map((v) => parseInt(v) || 0));
+                .map((r) =>
+                    r.length === 0
+                        ? []
+                        : r.split(",").map((v) => parseInt(v) || 0),
+                );
         },
         setRemoteCharOffset(groupRow, modIndex, charIndex, value) {
             const key = "rChrOff" + groupRow;
@@ -213,7 +225,11 @@ const createPageData = (type = "Settings") => {
 
         getCharOffset(modIdx, charIdx) {
             const matrix = this.charOffsetMatrix;
-            if (modIdx >= matrix.length || charIdx >= (matrix[modIdx]?.length || 0)) return 0;
+            if (
+                modIdx >= matrix.length ||
+                charIdx >= (matrix[modIdx]?.length || 0)
+            )
+                return 0;
             return matrix[modIdx][charIdx];
         },
         getCurrentCharOffset(modIdx, charIdx) {
@@ -265,7 +281,7 @@ const createPageData = (type = "Settings") => {
         allZeroCharOffsets(modIdx) {
             const matrix = this.charOffsetMatrix;
             if (modIdx >= matrix.length) return true;
-            return matrix[modIdx].every(v => v === 0);
+            return matrix[modIdx].every((v) => v === 0);
         },
         allZeroCurrentCharOffsets(modIdx) {
             if (this.selectedOffsetGroup === 0)
@@ -611,11 +627,7 @@ describe("Page Component - Character Offsets", () => {
 
     it("should preserve empty rows positionally", () => {
         page.settings.charOffsets = "1,2;;4,5";
-        expect(page.charOffsetMatrix).toEqual([
-            [1, 2],
-            [],
-            [4, 5],
-        ]);
+        expect(page.charOffsetMatrix).toEqual([[1, 2], [], [4, 5]]);
     });
 
     it("should set character offset at specific module and character", () => {
@@ -1239,7 +1251,9 @@ describe("Page Component - Remote Offset Management", () => {
         page.settings.masterGroupModuleCounts = "8,6,8,8,8,8";
         page.settings.rModOffs = "0,0,0,0,0,0,0,0;0,0,0,0,0,0,0,0";
         page.settings.rDispOffs = "0,0,0,0,0";
-        page.settings.rChrOff0 = Array(8).fill(Array(48).fill(0).join(",")).join(";");
+        page.settings.rChrOff0 = Array(8)
+            .fill(Array(48).fill(0).join(","))
+            .join(";");
     });
 
     describe("remoteOffsetMatrix", () => {
@@ -1334,7 +1348,9 @@ describe("Page Component - Remote Offset Management", () => {
         it("should reset remote character offsets to zeros", () => {
             page.setRemoteCharOffset(0, 0, 0, 10);
             page.resetRemoteCharOffsets(0, 0);
-            expect(page.getRemoteCharOffsetMatrix(0)[0]).toEqual(Array(48).fill(0));
+            expect(page.getRemoteCharOffsetMatrix(0)[0]).toEqual(
+                Array(48).fill(0),
+            );
         });
     });
 

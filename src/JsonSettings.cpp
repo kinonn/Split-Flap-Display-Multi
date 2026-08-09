@@ -23,8 +23,22 @@ String JsonSettings::storageKey(const char *key) {
     return storage.substring(0, 11) + suffix;
 }
 
+void JsonSettings::ensureNamespace() {
+    if (namespaceCreated) {
+        return;
+    }
+    // A read-write open creates the namespace if it's missing (e.g. first
+    // boot after a flash erase). Only remember success so a transient
+    // failure is retried on the next access.
+    if (preferences.begin(name, false)) {
+        preferences.end();
+        namespaceCreated = true;
+    }
+}
+
 String JsonSettings::getPrefString(const char *key, const String &def) {
     String storeKey = storageKey(key);
+    ensureNamespace();
     preferences.begin(name, true);
     String value = preferences.isKey(storeKey.c_str()) ? preferences.getString(storeKey.c_str(), def) : def;
     preferences.end();
@@ -33,6 +47,7 @@ String JsonSettings::getPrefString(const char *key, const String &def) {
 
 int JsonSettings::getPrefInt(const char *key, int def) {
     String storeKey = storageKey(key);
+    ensureNamespace();
     preferences.begin(name, true);
     int value = preferences.getInt(storeKey.c_str(), def);
     preferences.end();
@@ -41,6 +56,7 @@ int JsonSettings::getPrefInt(const char *key, int def) {
 
 float JsonSettings::getPrefFloat(const char *key, float def) {
     String storeKey = storageKey(key);
+    ensureNamespace();
     preferences.begin(name, true);
     float value = preferences.getFloat(storeKey.c_str(), def);
     preferences.end();
