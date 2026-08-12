@@ -1,5 +1,7 @@
 #include "SplitFlapMqtt.h"
 
+#include "StatusPayload.h"
+
 SplitFlapMqtt::SplitFlapMqtt(JsonSettings &settings, WiFiClient &wifiClient)
     : settings(settings), wifiClient(wifiClient), mqttClient(wifiClient), display(nullptr) {}
 
@@ -17,6 +19,7 @@ void SplitFlapMqtt::setup() {
     topic_avail = "splitflap/" + mdns + "/availability";
     topic_config_text = "homeassistant/text/splitflap_text_" + mdns + "/config";
     topic_config_sensor = "homeassistant/sensor/splitflap_sensor_" + mdns + "/config";
+    topic_status = "splitflap/" + mdns + "/status";
 
     mqttClient.setServer(mqttServer.c_str(), mqttPort);
     mqttClient.setCallback([this](char *topic, byte *payload, unsigned int length) {
@@ -105,6 +108,8 @@ void SplitFlapMqtt::connectToMqtt() {
 
             mqttClient.publish(topic_config_text.c_str(), payload_text.c_str(), true);
             mqttClient.publish(topic_config_sensor.c_str(), payload_sensor.c_str(), true);
+
+            publishStatus();
         } else {
             Serial.println("[MQTT] Failed to connect");
         }
@@ -123,6 +128,27 @@ void SplitFlapMqtt::publishState(const String &message) {
     Serial.println("[MQTT] Publishing state: " + message);
     lastPublishedState = message;        // remember for reconnects
     mqttClient.publish(topic_state.c_str(), message.c_str(), true);
+    publishStatus();
+}
+
+void SplitFlapMqtt::publishStatus() {
+    if (!display || !mqttClient.connected()) {
+        return;
+    }
+    // Additive JSON status topic: current message + display size (module
+    // count). The legacy plain-string `state` topic is untouched, so
+    // existing consumers are unaffected.
+    //
+    // Multi-group: report the TOTAL module count across all groups (sum of
+    // masterGroupModuleCounts + local display), which is the physical display
+    // width a message spans. getTotalModuleCount() degenerates to the local
+    // count in single-group mode, so one call is correct in both modes.
+    int moduleCount = (espNow != nullptr) ? espNow->getTotalModuleCount()
+                                          : display->getNumModules();
+    std::string payload = buildStatusPayload(
+        lastPublishedState.c_str(), moduleCount
+    );
+    mqttClient.publish(topic_status.c_str(), payload.c_str(), true);
 }
 
 void SplitFlapMqtt::loop() {

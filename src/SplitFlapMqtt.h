@@ -27,6 +27,7 @@ class SplitFlapMqtt {
     SplitFlapEspNow *espNow = nullptr;
 
     void connectToMqtt();
+    void publishStatus();                                      // publish JSON status topic (retained)
 
     // MQTT config
     String mqttServer;
@@ -38,6 +39,7 @@ class SplitFlapMqtt {
     String topic_avail;
     String topic_config_text;
     String topic_config_sensor;
+    String topic_status;                  // splitflap/{mdns}/status — JSON state info (additive)
 
     unsigned long lastAttempt = 0;
     int retryCount = 0;
