@@ -4,8 +4,11 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <Preferences.h>
 #include <map>
+
+// Forward declaration: the Arduino-esp32 Preferences/NVS wrapper. Call-local
+// instances live in JsonSettings.cpp; this class holds none as a member.
+class Preferences;
 
 // Bump this whenever the settings schema changes (keys added/removed/renamed,
 // or the meaning of an existing value changes). The web UI uses it to warn
@@ -35,6 +38,7 @@ class JsonSettings {
     String getLastValidationError() { return lastValidationError; }
     static String storageKey(const char *key);
     String getLastValidationKey() { return lastValidationKey; }
+
   private:
     String getPrefString(const char *key, const String &def);
     int getPrefInt(const char *key, int def);
@@ -51,5 +55,7 @@ class JsonSettings {
 
     JsonSetting find(const char *key);
 
-    Preferences preferences;
+    // No `Preferences preferences` member: NVS handles are opened and closed
+    // per call (see JsonSettings.cpp). Sharing one handle across tasks is
+    // what let one task's end() close the handle another task was using.
 };

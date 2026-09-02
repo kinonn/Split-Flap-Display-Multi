@@ -1,7 +1,19 @@
 #include "JsonSettings.h"
 
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <sstream>
+
+// Every access below opens its own call-local NVS handle and closes it before
+// returning. The class deliberately holds NO shared Preferences instance:
+// JsonSettings is used from at least three tasks on this firmware (the Arduino
+// loop task reads settings on every pass, the AsyncTCP task serving the web
+// handlers reads and writes them, and the ESP-NOW receive task writes remote
+// offsets and mode). With a shared handle, one task's end() closed the handle
+// another task was part way through using: reads silently fell back to the
+// compiled default and writes were dropped while the request still answered
+// success. Call-local instances make every transaction self-contained, so no
+// cross-task lock is needed (and none can be forgotten at a new call site).
 
 String JsonSettings::storageKey(const char *key) {
     String storage = String(key);
@@ -25,6 +37,7 @@ String JsonSettings::storageKey(const char *key) {
 
 String JsonSettings::getPrefString(const char *key, const String &def) {
     String storeKey = storageKey(key);
+    Preferences preferences;
     preferences.begin(name, true);
     String value = preferences.isKey(storeKey.c_str()) ? preferences.getString(storeKey.c_str(), def) : def;
     preferences.end();
@@ -33,6 +46,7 @@ String JsonSettings::getPrefString(const char *key, const String &def) {
 
 int JsonSettings::getPrefInt(const char *key, int def) {
     String storeKey = storageKey(key);
+    Preferences preferences;
     preferences.begin(name, true);
     int value = preferences.getInt(storeKey.c_str(), def);
     preferences.end();
@@ -41,6 +55,7 @@ int JsonSettings::getPrefInt(const char *key, int def) {
 
 float JsonSettings::getPrefFloat(const char *key, float def) {
     String storeKey = storageKey(key);
+    Preferences preferences;
     preferences.begin(name, true);
     float value = preferences.getFloat(storeKey.c_str(), def);
     preferences.end();
@@ -49,6 +64,7 @@ float JsonSettings::getPrefFloat(const char *key, float def) {
 
 void JsonSettings::putPrefString(const char *key, const String &value) {
     String storeKey = storageKey(key);
+    Preferences preferences;
     preferences.begin(name, false);
     preferences.putString(storeKey.c_str(), value);
     preferences.end();
@@ -56,6 +72,7 @@ void JsonSettings::putPrefString(const char *key, const String &value) {
 
 void JsonSettings::putPrefInt(const char *key, int value) {
     String storeKey = storageKey(key);
+    Preferences preferences;
     preferences.begin(name, false);
     preferences.putInt(storeKey.c_str(), value);
     preferences.end();
@@ -63,6 +80,7 @@ void JsonSettings::putPrefInt(const char *key, int value) {
 
 void JsonSettings::putPrefFloat(const char *key, float value) {
     String storeKey = storageKey(key);
+    Preferences preferences;
     preferences.begin(name, false);
     preferences.putFloat(storeKey.c_str(), value);
     preferences.end();
@@ -189,6 +207,11 @@ bool JsonSettings::fromJson(JsonDocument settings) {
         const char *key = kv.key().c_str();
         auto it = this->map.find(key);
         if (it == this->map.end()) {
+            // Unknown keys are ignored rather than rejected: a browser still
+            // holding a settings page from a different firmware version will
+            // post keys this build has never heard of. find() throws for them.
+            Serial.print("Ignoring unknown setting: ");
+            Serial.println(key);
             continue;
         }
         JsonSetting setting = it->second;
@@ -218,9 +241,14 @@ bool JsonSettings::fromJson(JsonDocument settings) {
 }
 
 bool JsonSettings::reset() {
-    preferences.begin("config", false);
-    preferences.clear();
-    preferences.end();
+    // Use this namespace's own name; the previous hardcoded "config" only
+    // worked because every caller happens to construct JsonSettings("config").
+    {
+        Preferences preferences;
+        preferences.begin(name, false);
+        preferences.clear();
+        preferences.end();
+    }
 
     return fromJson(toJson());
 }
