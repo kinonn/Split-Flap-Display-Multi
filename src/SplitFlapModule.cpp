@@ -12,7 +12,19 @@ const char SplitFlapModule::ExtendedChars[48] = {
     '5', '6', '7', '8', '9', '\'', ':', '?', '!', '.', '-', '/', '$', '@', '#', '%',
 };
 
-bool hasErrored = false;
+// Full-step (2-phase-on) coil patterns for one electrical revolution of the
+// 28BYJ-48, see the header for the bit layout. Index 0..3 is the order in
+// which step() writes them; writing them in increasing order turns the drum
+// forwards.
+const uint16_t SplitFlapModule::CoilStates[4] = {
+    0b1111111111100111, // P01 + P02
+    0b1111111111110011, // P01 + P04
+    0b1111111111111001, // P03 + P04
+    0b1111111111101101, // P02 + P03
+};
+
+// All four coil pins low: the motor is released and draws no current.
+const uint16_t SplitFlapModule::IdleState = 0b1111111111100001;
 
 // Default Constructor
 SplitFlapModule::SplitFlapModule()
@@ -42,17 +54,28 @@ void SplitFlapModule::writeIO(uint16_t data) {
 
     byte error = Wire.endTransmission();
 
-    if (error > 0 && ! hasErrored) {
-        hasErrored = true; // Set the error flag
-        Serial.print("Error writing data to module ");
+    if (error > 0) {
+        if (! hasErrored) {
+            hasErrored = true; // Set the error flag
+            Serial.print("Error writing data to module ");
+            Serial.print(address);
+            Serial.print(", error code: ");
+            Serial.println(error); // Error codes:
+            // 0 = success
+            // 1 = data too long to fit in transmit buffer
+            // 2 = received NACK on transmit of address
+            // 3 = received NACK on transmit of data
+            // 4 = other error
+        }
+    } else if (hasErrored) {
+        // A single glitch on the bus must not disable this module forever
+        // (readHallEffectSensor() refuses to read while hasErrored is set, so
+        // a latched flag would disable magnet correction permanently): clear
+        // the flag as soon as the module answers again.
+        hasErrored = false;
+        Serial.print("Module ");
         Serial.print(address);
-        Serial.print(", error code: ");
-        Serial.println(error); // Error codes:
-        // 0 = success
-        // 1 = data too long to fit in transmit buffer
-        // 2 = received NACK on transmit of address
-        // 3 = received NACK on transmit of data
-        // 4 = other error
+        Serial.println(" recovered");
     }
 }
 
@@ -65,10 +88,10 @@ void SplitFlapModule::init() {
         currentPosition += stepSize;
     }
 
-    uint16_t initState = 0b1111111111100001; // Pin 15 (17) as INPUT, Pins 1-4 as OUTPUT
+    uint16_t initState = IdleState; // Pin 15 (17) as INPUT, Pins 1-4 as OUTPUT
     writeIO(initState);
 
-    stop();                                  // Write all motor coil inputs LOW
+    stop();                         // Write all motor coil inputs LOW
 
     // NOTE: this used to "prime" the motor with 4 steps (4x100ms delays).
     // It serves no functional purpose — homing finds the magnet via the
@@ -103,39 +126,27 @@ int SplitFlapModule::getCharPosition(char inputChar) {
 }
 
 void SplitFlapModule::stop() {
-    uint16_t stepState = 0b1111111111100001;
-    writeIO(stepState);
+    writeIO(IdleState);
 }
 
+// Re-energize the coil pattern the rotor is already resting on so the drum is
+// held before a move begins. step() leaves stepNumber pointing at the *next*
+// pattern to write, so the pattern currently energizing the rotor is
+// stepNumber - 1.
+//
+// This must NOT change stepNumber: advancing it and writing the "next"
+// pattern would drag the drum a full step forwards, and any of the old
+// rewind-then-write approaches made a second start() without an intervening
+// step() write a pattern the rotor is not resting on, dragging it backwards
+// and silently de-calibrating held modules.
 void SplitFlapModule::start() {
-    stepNumber = (stepNumber + 3) % 4; // effectively take one off stepNumber
-    step(false);                       // write the "previous" step high again, in case turned off
+    writeIO(CoilStates[(stepNumber + 3) % 4]);
 }
 
-void SplitFlapModule::step(bool updatePosition) {
-    uint16_t stepState;
-    switch (stepNumber) {
-        case 0:
-            stepState = 0b1111111111100111;
-            writeIO(stepState);
-            break;
-        case 1:
-            stepState = 0b1111111111110011;
-            writeIO(stepState);
-            break;
-        case 2:
-            stepState = 0b1111111111111001;
-            writeIO(stepState);
-            break;
-        case 3:
-            stepState = 0b1111111111101101;
-            writeIO(stepState);
-            break;
-    }
-    if (updatePosition) {
-        position = (position + 1) % stepsPerRot;
-        stepNumber = (stepNumber + 1) % 4;
-    }
+void SplitFlapModule::step() {
+    writeIO(CoilStates[stepNumber]);
+    stepNumber = (stepNumber + 1) % 4;
+    position = (position + 1) % stepsPerRot;
 }
 
 bool SplitFlapModule::readHallEffectSensor() {
