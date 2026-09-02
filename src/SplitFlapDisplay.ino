@@ -157,9 +157,9 @@ void setup() {
             Serial.println("[boot] esp-now initialization failed");
         }
         Serial.flush();
-        splitflapMqtt.setup();
         splitflapMqtt.setDisplay(&display);
         splitflapMqtt.setEspNow(getSplitFlapEspNow());
+        splitflapMqtt.setup();
         display.setMqtt(&splitflapMqtt);
         Serial.println("[boot] mqtt setup complete");
         Serial.flush();

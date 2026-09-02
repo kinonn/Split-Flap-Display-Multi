@@ -88,6 +88,10 @@ class SplitFlapEspNow {
         unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
         int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT
     );
+    // Total module count across all groups (group 0 = local display). Equals
+    // the local count in single-group mode. Read-only; used by MQTT status
+    // reporting of the physical display size.
+    int getTotalModuleCount();
 
   private:
     JsonSettings &settings;
@@ -115,7 +119,6 @@ class SplitFlapEspNow {
     bool ensureInitialized();
     int getGroupCount();
     int getGroupModuleCount(int groupIndex);
-    int getTotalModuleCount();
     String getGroupMac(int groupIndex);
     String getCsvToken(const String &csv, int index);
     String sliceMessage(const String &message, int start, int width);
