@@ -4,6 +4,7 @@
 #include "SplitFlapModule.h"
 #include "SplitFlapMqtt.h"
 #include "SplitFlapMotorScheduler.h"
+#include "StepMath.h"
 
 SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings), maxConcurrentMotors(-1) {
     for (int i = 0; i < MAX_MODULES; i++) {
@@ -469,7 +470,7 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
 
     bool resetLatches[numModules] = {};          // start with latch on to prevent case where the
     // motion starts with the magnet over the sensor
-    bool needsStepping[numModules] = {};         // modules that still require moving
+    int stepsRemaining[numModules] = {};         // steps each module still has to turn
     bool motorsOn[numModules] = {};              // modules whose coils are currently energized
     unsigned long lastStepTimes[numModules] = {}; // track when each module was last stepped
     unsigned long lastSensorCheckTime = currentTime; // track when we last read all the hall effect sensors
@@ -487,24 +488,40 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
         ); // Constrain to avoid errors with incorrect inputs
         resetLatches[i] = true;
         lastStepTimes[i] = currentTime;
-        needsStepping[i] = (modules[i].getPosition() != targetPositions[i]);
+
+        // The drum only ever turns forwards, so the work left to do is the
+        // forward distance to the target. Counting steps instead of comparing
+        // positions for equality means a mid-move magnet correction that
+        // snaps `position` past the target cannot strand a module here (the
+        // old equality test never matched again, sending it round for
+        // another full revolution) — the count is re-derived from the
+        // corrected position inside the sensor check below.
+        stepsRemaining[i] = forwardSteps(modules[i].getPosition(), targetPositions[i], stepsPerRot);
+
+        // Energize movers only, and only on the uncapped path. Holding every
+        // module — even ones that don't move — costs ~200mA each for nothing,
+        // and on a shared supply that extra draw is exactly what makes the
+        // moving modules lose steps. Capped (homing) moves energize lazily
+        // when the scheduler grants a slot (the motor's first step()).
+        if (stepsRemaining[i] > 0 && maxConcurrentMotors < 0) {
+            modules[i].start(); // hold the drum on its current pattern without moving
+        }
     }
 
-    // Previously this energized EVERY module (even ones that don't need to
-    // move) and left them all on until the end of the move. Now each motor
-    // is energized only when it has a scheduling slot, and released the
-    // instant it reaches its target, so the instantaneous coil current is
-    // bounded by the cap instead of the full module count.
-    if (maxConcurrentMotors < 0) {
-        startMotors();
-        delay(startStopDelay); // give the motor time to align to magnetic field
+    // Uncapped movers were just energized: give the coils time to align to the
+    // magnetic field before the first step. Capped (homing) moves energize
+    // lazily per slot instead, and each motor gets this settle time when it
+    // gets its slot (see lastStepTimes below).
+    bool anyMoving = ! allStepsDone(stepsRemaining, numModules);
+    if (anyMoving && maxConcurrentMotors < 0) {
+        delay(startStopDelay);
     }
 
-    bool isFinished = checkAllFalse(needsStepping, numModules);
+    bool isFinished = ! anyMoving;
     while (! isFinished) {
         currentTime = micros();
         for (int i = 0; i < numModules; i++) {
-            if (! needsStepping[i]) {
+            if (stepsRemaining[i] <= 0) {
                 continue;
             }
 
@@ -530,10 +547,9 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
 
             if ((currentTime - lastStepTimes[i]) > timePerStep) {
                 modules[i].step();
+                stepsRemaining[i]--;
                 lastStepTimes[i] = micros();
-                if (modules[i].getPosition() == targetPositions[i]) { // this module is not in the correct position,
-                    // requires stepping
-                    needsStepping[i] = false;
+                if (stepsRemaining[i] == 0) { // this module has arrived
                     // Release this motor's coils immediately instead of
                     // holding it until the slowest module finishes.
                     modules[i].stop();
@@ -546,9 +562,9 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
         if ((currentTime - lastSensorCheckTime) > checkIntervalUs) { // check hall effect sensor every checkIntervalMs
             // check every modules sensor
             for (int i = 0; i < numModules; i++) {
-                if (needsStepping[i] && motorsOn[i] &&
-                    (modules[i].readHallEffectSensor() == true
-                    )) { // only check sensors where the module is still moving
+                if (stepsRemaining[i] > 0 && motorsOn[i] &&
+                    (modules[i].readHallEffectSensor() ==
+                     true)) { // only check sensors where the module is still moving
                     if (! resetLatches[i]) {
                         // UNCOMMENTING THIS WILL PROBBALY MAKE THE MOTORS INACCURATE, DUE
                         // TO TIME TAKEN TO PRINT
@@ -563,16 +579,29 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
                         //  modules[i].getPosition()));
                         modules[i].magnetDetected(); // update position to the modules
                         // magnet position
+
+                        // The magnet correction snaps `position` to the known magnet
+                        // position, which can move it in either direction. Re-derive
+                        // what is left to turn from the corrected position — with the
+                        // old equality test, a correction past the target could never
+                        // match and the module went round for another full revolution.
+                        stepsRemaining[i] = forwardSteps(modules[i].getPosition(), targetPositions[i], stepsPerRot);
+                        if (stepsRemaining[i] == 0) {
+                            modules[i].stop();
+                            motorsOn[i] = false;
+                            scheduler.finish(i);
+                        }
                         resetLatches[i] = true;
                     }
                 } else if (resetLatches[i] == true) {
                     resetLatches[i] = false;
                 }
             }
-            isFinished = checkAllFalse(needsStepping, numModules);
             lastSensorCheckTime = currentTime; // recall micros because for loop may
             // take a moment to execute
         }
+
+        isFinished = allStepsDone(stepsRemaining, numModules);
     }
     if (releaseMotors) {
         delay(startStopDelay); // allow all motors time to settle
@@ -580,20 +609,13 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
     }
 }
 
-bool SplitFlapDisplay::checkAllFalse(bool array[], int size) {
+bool SplitFlapDisplay::allStepsDone(const int stepsRemaining[], int size) {
     for (int i = 0; i < size; i++) {
-        if (array[i] == true) {
-            return false;              // As soon as a true value is found, return false
+        if (stepsRemaining[i] > 0) {
+            return false; // As soon as a module with work left is found, return false
         }
     }
-    return true;                       // All values were false
-}
-
-void SplitFlapDisplay::startMotors() { // Probably broken somewhere, not sure
-    // why, haven't looked
-    for (int i = 0; i < numModules; i++) {
-        modules[i].start();
-    }
+    return true;          // Every module has arrived
 }
 
 void SplitFlapDisplay::stopMotors() {

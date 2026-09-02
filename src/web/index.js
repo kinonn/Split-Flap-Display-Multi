@@ -67,7 +67,7 @@ document.addEventListener("alpine:init", () => {
         settings: {
             mode: 2,
             dateFormat: "ddd dd/MM",
-            timeFormat: "HH:mm",
+            timeFormat: "{HH}:{MM}",
             masterGroupCount: 1,
             masterGroupModuleCounts: "8,8,8,8,8,8",
             masterGroupMacs: ",,,,,",

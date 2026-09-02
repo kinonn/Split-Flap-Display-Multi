@@ -13,9 +13,9 @@ class SplitFlapModule {
     void init();
     void updateOffsets(const int newCharOffsets[], int newMagnetOffset);
 
-    void step(bool updatePosition = true);                   // step motor
-    void stop();                                             // write all motor input pins to low
-    void start();                                            // re-energize coils to last position, not stepping motor
+    void step();  // advance the motor one full step
+    void stop();  // write all motor input pins to low
+    void start(); // re-energize the coil pattern the rotor is resting on, without moving
 
     int getMagnetPosition() const { return magnetPosition; } // position where magnet is detected
     int getCharPosition(char inputChar);                     // get integer position given single character
@@ -31,22 +31,28 @@ class SplitFlapModule {
     bool getHasErrored() const { return hasErrored; }
 
   private:
-    uint8_t address;                // i2c address of module
-    int position;                   // character drum position
-    int stepNumber;                 // current position in the stepping order, to make motor move
-    int stepsPerRot;                // number of steps per rotation
-    bool hasErrored = false;        // flag to indicate if an error has occurred
+    uint8_t address;             // i2c address of module
+    int position;                // character drum position
+    int stepNumber;              // index of the NEXT coil pattern to write (0-3)
+    int stepsPerRot;             // number of steps per rotation
+    bool hasErrored = false;     // set when the last i2c transaction failed, cleared when one succeeds
 
-    void writeIO(uint16_t data);    // write to motor in pins
+    void writeIO(uint16_t data); // write to motor in pins
 
-    int magnetPosition;             // altered by offsets
-    static const int motorPins[];   // Array of motor pins
-    static const int HallEffectPIN; // Hall Effect Sensor Pin (On PCF8575)
+    int magnetPosition;          // altered by offsets
 
-    const char *chars;              // pointer to active character set
-    int charPositions[48];          // support up to 48 characters
-    int charOffsets[48];            // per-character step offsets
-    int numChars;                   // current number of characters
+    // Coil patterns for one electrical revolution of the 28BYJ-48 (2-phase-on
+    // full stepping). Bits 1-4 drive the motor coils, bit 0 and bit 15 are
+    // left high: bit 15 reads the hall effect sensor input on the PCF8575,
+    // bit 0 is unused. Writing the patterns in increasing order turns the
+    // drum forwards, in decreasing order backwards.
+    static const uint16_t CoilStates[4];
+    static const uint16_t IdleState; // all four coils low, hall input left high
+
+    const char *chars;               // pointer to active character set
+    int charPositions[48];           // support up to 48 characters
+    int charOffsets[48];             // per-character step offsets
+    int numChars;                    // current number of characters
     int charSetSize;
 
     static const char StandardChars[37];

@@ -49,9 +49,8 @@ class SplitFlapDisplay {
   private:
     JsonSettings &settings;
 
-    bool checkAllFalse(bool array[], int size);
+    bool allStepsDone(const int stepsRemaining[], int size);
     void stopMotors();
-    void startMotors();
 
     // Split a string into chunks of <= numModules chars, breaking only at word
     // boundaries. A word longer than numModules is split mid-word (no other
