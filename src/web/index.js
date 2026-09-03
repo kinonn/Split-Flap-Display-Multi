@@ -437,6 +437,41 @@ document.addEventListener("alpine:init", () => {
             );
         },
 
+        swapRemoteOffsetRows(rowA, rowB) {
+            if (rowA === rowB) return;
+            // rModOffs is a matrix with one row per remote group; a missing
+            // key means every row is implicitly zero, so swapping is a no-op.
+            if (this.settings.rModOffs) {
+                const matrix = this.remoteOffsetMatrix;
+                while (matrix.length <= Math.max(rowA, rowB))
+                    matrix.push(Array(8).fill(0));
+                [matrix[rowA], matrix[rowB]] = [matrix[rowB], matrix[rowA]];
+                this.settings.rModOffs = matrix
+                    .map((r) => r.join(","))
+                    .join(";");
+            }
+            if (this.settings.rDispOffs) {
+                const arr = this.remoteDisplayOffsetArray;
+                while (arr.length <= Math.max(rowA, rowB)) arr.push(0);
+                [arr[rowA], arr[rowB]] = [arr[rowB], arr[rowA]];
+                this.settings.rDispOffs = arr.join(",");
+            }
+            // rChrOffN holds the whole char-offset matrix for remote row N.
+            const keyA = "rChrOff" + rowA;
+            const keyB = "rChrOff" + rowB;
+            if (
+                this.settings[keyA] !== undefined ||
+                this.settings[keyB] !== undefined
+            ) {
+                const tmp = this.settings[keyA];
+                if (this.settings[keyB] === undefined)
+                    delete this.settings[keyA];
+                else this.settings[keyA] = this.settings[keyB];
+                if (tmp === undefined) delete this.settings[keyB];
+                else this.settings[keyB] = tmp;
+            }
+        },
+
         moveGroupUp(index) {
             if (index <= 1) return;
             const macs = this.groupMacArray;
@@ -448,6 +483,9 @@ document.addEventListener("alpine:init", () => {
             ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
+            // Offset rows are per physical display (row = group index - 1),
+            // so they must travel with the MAC, not stay in place.
+            this.swapRemoteOffsetRows(index - 2, index - 1);
         },
 
         moveGroupDown(index) {
@@ -461,6 +499,9 @@ document.addEventListener("alpine:init", () => {
             ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
+            // Offset rows are per physical display (row = group index - 1),
+            // so they must travel with the MAC, not stay in place.
+            this.swapRemoteOffsetRows(index - 1, index);
         },
 
         init() {

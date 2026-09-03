@@ -448,6 +448,41 @@ const createPageData = (type = "Settings") => {
             );
         },
 
+        swapRemoteOffsetRows(rowA, rowB) {
+            if (rowA === rowB) return;
+            // rModOffs is a matrix with one row per remote group; a missing
+            // key means every row is implicitly zero, so swapping is a no-op.
+            if (this.settings.rModOffs) {
+                const matrix = this.remoteOffsetMatrix;
+                while (matrix.length <= Math.max(rowA, rowB))
+                    matrix.push(Array(8).fill(0));
+                [matrix[rowA], matrix[rowB]] = [matrix[rowB], matrix[rowA]];
+                this.settings.rModOffs = matrix
+                    .map((r) => r.join(","))
+                    .join(";");
+            }
+            if (this.settings.rDispOffs) {
+                const arr = this.remoteDisplayOffsetArray;
+                while (arr.length <= Math.max(rowA, rowB)) arr.push(0);
+                [arr[rowA], arr[rowB]] = [arr[rowB], arr[rowA]];
+                this.settings.rDispOffs = arr.join(",");
+            }
+            // rChrOffN holds the whole char-offset matrix for remote row N.
+            const keyA = "rChrOff" + rowA;
+            const keyB = "rChrOff" + rowB;
+            if (
+                this.settings[keyA] !== undefined ||
+                this.settings[keyB] !== undefined
+            ) {
+                const tmp = this.settings[keyA];
+                if (this.settings[keyB] === undefined)
+                    delete this.settings[keyA];
+                else this.settings[keyA] = this.settings[keyB];
+                if (tmp === undefined) delete this.settings[keyB];
+                else this.settings[keyB] = tmp;
+            }
+        },
+
         moveGroupUp(index) {
             if (index <= 1) return;
             const macs = this.groupMacArray;
@@ -459,6 +494,9 @@ const createPageData = (type = "Settings") => {
             ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
+            // Offset rows are per physical display (row = group index - 1),
+            // so they must travel with the MAC, not stay in place.
+            this.swapRemoteOffsetRows(index - 2, index - 1);
         },
 
         moveGroupDown(index) {
@@ -472,6 +510,9 @@ const createPageData = (type = "Settings") => {
             ];
             this.settings.masterGroupMacs = macs.join(",");
             this.settings.masterGroupModuleCounts = counts.join(",");
+            // Offset rows are per physical display (row = group index - 1),
+            // so they must travel with the MAC, not stay in place.
+            this.swapRemoteOffsetRows(index - 1, index);
         },
 
         init() {
@@ -1575,6 +1616,57 @@ describe("Page Component - Group Reordering", () => {
         expect(page.groupMacArray[2]).toBe("AA:BB:CC:DD:EE:01");
         expect(page.groupModuleArray[1]).toBe("4");
         expect(page.groupModuleArray[2]).toBe("6");
+    });
+
+    it("should move offset rows with the device when moving up", () => {
+        page.settings.rModOffs = "1,1,1,1,1,1,1,1;2,2,2,2,2,2,2,2";
+        page.settings.rDispOffs = "10,20";
+        page.settings.rChrOff0 = "5,6;7,8";
+        page.settings.rChrOff1 = "15,16;17,18";
+
+        page.moveGroupUp(2);
+
+        // Device AA:...:02 (row of 2s) moved from group 2 to group 1,
+        // so its calibration must now live in row 0.
+        expect(page.remoteOffsetMatrix[0]).toEqual([2, 2, 2, 2, 2, 2, 2, 2]);
+        expect(page.remoteOffsetMatrix[1]).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
+        expect(page.settings.rDispOffs).toBe("20,10");
+        expect(page.settings.rChrOff0).toBe("15,16;17,18");
+        expect(page.settings.rChrOff1).toBe("5,6;7,8");
+    });
+
+    it("should move offset rows with the device when moving down", () => {
+        page.settings.rModOffs = "1,1,1,1,1,1,1,1;2,2,2,2,2,2,2,2";
+        page.settings.rDispOffs = "10,20";
+        page.settings.rChrOff0 = "5,6;7,8";
+        page.settings.rChrOff1 = "15,16;17,18";
+
+        page.moveGroupDown(1);
+
+        expect(page.remoteOffsetMatrix[0]).toEqual([2, 2, 2, 2, 2, 2, 2, 2]);
+        expect(page.remoteOffsetMatrix[1]).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
+        expect(page.settings.rDispOffs).toBe("20,10");
+        expect(page.settings.rChrOff0).toBe("15,16;17,18");
+        expect(page.settings.rChrOff1).toBe("5,6;7,8");
+    });
+
+    it("should not create offset keys when none exist", () => {
+        page.moveGroupUp(2);
+
+        expect(page.groupMacArray[1]).toBe("AA:BB:CC:DD:EE:02");
+        expect(page.settings.rModOffs).toBeUndefined();
+        expect(page.settings.rDispOffs).toBeUndefined();
+        expect(page.settings.rChrOff0).toBeUndefined();
+        expect(page.settings.rChrOff1).toBeUndefined();
+    });
+
+    it("should move a one-sided char offset row without leaving junk behind", () => {
+        page.settings.rChrOff1 = "15,16;17,18";
+
+        page.moveGroupUp(2);
+
+        expect(page.settings.rChrOff0).toBe("15,16;17,18");
+        expect(page.settings.rChrOff1).toBeUndefined();
     });
 });
 
