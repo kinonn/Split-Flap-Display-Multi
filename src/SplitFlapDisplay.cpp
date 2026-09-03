@@ -14,10 +14,10 @@ SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings),
 
 void SplitFlapDisplay::init() {
     numModules = constrain(settings.getInt("moduleCount"), 1, MAX_MODULES);
-    stepsPerRot = settings.getInt("stepsPerRot");
+    stepsPerRot = sanitizeStepsPerRot(settings.getInt("stepsPerRot"));
     displayOffset = settings.getInt("displayOffset");
     magnetPosition = settings.getInt("magnetPosition");
-    maxVel = settings.getFloat("maxVel");
+    maxVel = sanitizeMaxVel(settings.getFloat("maxVel"));
     charSetSize = settings.getInt("charset");
 
     std::vector<int> settingAddresses = settings.getIntVector("moduleAddresses");

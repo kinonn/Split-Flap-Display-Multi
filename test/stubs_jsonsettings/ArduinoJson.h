@@ -161,3 +161,24 @@ class JsonObject {
 template<> inline JsonObject JsonDocument::as<JsonObject>() const {
     return JsonObject(const_cast<JsonDocument *>(this));
 }
+
+// serializeJson(doc, std::string&) for StatusPayload.h: appends a tiny JSON
+// object. The exact formatting is not under test here — only that a payload
+// can be built without the real ArduinoJson.
+inline void serializeJson(const JsonDocument &doc, std::string &out) {
+    out += "{";
+    bool first = true;
+    for (const auto &e : doc.entries_) {
+        if (! first) out += ",";
+        first = false;
+        out += "\"" + e.key + "\":";
+        if (e.type == 1) {
+            out += std::to_string(e.i);
+        } else if (e.type == 2) {
+            out += std::to_string(e.f);
+        } else {
+            out += "\"" + e.s + "\"";
+        }
+    }
+    out += "}";
+}

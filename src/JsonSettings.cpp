@@ -203,6 +203,11 @@ JsonDocument JsonSettings::toJson() {
 }
 
 bool JsonSettings::fromJson(JsonDocument settings) {
+    // Transactional batch: validate EVERY present, known key before writing
+    // ANY of them. The previous single validate-then-write loop left keys
+    // persisted when a later key failed, while callers reported the whole
+    // save as failed — worst case, re-homing modules on offsets the web UI
+    // said were not saved.
     for (JsonPair kv : settings.as<JsonObject>()) {
         const char *key = kv.key().c_str();
         auto it = this->map.find(key);
@@ -214,15 +219,22 @@ bool JsonSettings::fromJson(JsonDocument settings) {
             Serial.println(key);
             continue;
         }
-        JsonSetting setting = it->second;
-
-        if (! setting.validate(kv.value().as<String>())) {
-            lastValidationError = setting.getLastValidationError();
+        if (! it->second.validate(kv.value().as<String>())) {
+            lastValidationError = it->second.getLastValidationError();
             lastValidationKey = String(key);
             return false;
         }
+    }
 
-        switch (setting.type) {
+    // Everything validated — now write.
+    for (JsonPair kv : settings.as<JsonObject>()) {
+        const char *key = kv.key().c_str();
+        auto it = this->map.find(key);
+        if (it == this->map.end()) {
+            continue;
+        }
+
+        switch (it->second.type) {
             case JsonSettingType::JST_INT_VECTOR:
             case JsonSettingType::JST_INT_MATRIX:
             case JsonSettingType::JST_STR:

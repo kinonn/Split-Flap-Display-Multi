@@ -11,6 +11,14 @@ void SplitFlapMqtt::setup() {
     mqttUser = settings.getString("mqtt_user");
     mqttPass = settings.getString("mqtt_pass");
 
+    // PubSubClient defaults to a 256-byte receive buffer (PubSubClient.h
+    // MQTT_MAX_PACKET_SIZE). The command topic alone is ~25 bytes and a
+    // message spanning a multi-group fleet does not fit in what remains —
+    // anything longer was silently dropped (or disconnected the client).
+    // 512 covers the largest scannable payload (~256 chars) plus topic and
+    // protocol framing, with headroom.
+    mqttClient.setBufferSize(512);
+
     String mdns = settings.getString("mdns");
     String name = settings.getString("name");
 

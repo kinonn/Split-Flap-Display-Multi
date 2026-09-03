@@ -40,6 +40,13 @@ class SerialStub {
     }
     void begin(unsigned long) {}
     void flush() {}
+
+    // printf is used by SplitFlapMqtt.cpp logging; capture like println.
+    template<typename... Args> void printf(const char *fmt, Args... args) {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), fmt, args...);
+        g_serialLines.push_back(std::string(buf));
+    }
 };
 
 extern SerialStub Serial;
