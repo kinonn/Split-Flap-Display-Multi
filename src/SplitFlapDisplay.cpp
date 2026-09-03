@@ -22,12 +22,16 @@ void SplitFlapDisplay::init() {
 
     std::vector<int> settingAddresses = settings.getIntVector("moduleAddresses");
     for (int i = 0; i < numModules; i++) {
-        moduleAddresses[i] = (uint8_t) settingAddresses[i];
+        // The stored list is free-form: a short or malformed one must not read
+        // past the end of the vector. Missing entries fall back to the stock
+        // address chain (the schema default for moduleAddresses).
+        moduleAddresses[i] =
+            (uint8_t) (i < (int) settingAddresses.size() ? settingAddresses[i] : 0x20 + i);
     }
 
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
     for (int i = 0; i < numModules; i++) {
-        moduleOffsets[i] = settingOffsets[i];
+        moduleOffsets[i] = i < (int) settingOffsets.size() ? settingOffsets[i] : 0;
     }
 
     std::vector<std::vector<int>> settingCharOffsets = settings.getIntMatrix("charOffsets");
@@ -77,7 +81,10 @@ void SplitFlapDisplay::reloadOffsets() {
 
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
     for (int i = 0; i < numModules; i++) {
-        moduleOffsets[i] = settingOffsets[i];
+        // Keep the module's current offset when the stored list is shorter
+        // than numModules: zeroing here would physically re-home modules
+        // whose calibration never changed.
+        moduleOffsets[i] = i < (int) settingOffsets.size() ? settingOffsets[i] : moduleOffsets[i];
     }
 
     std::vector<std::vector<int>> settingCharOffsets = settings.getIntMatrix("charOffsets");

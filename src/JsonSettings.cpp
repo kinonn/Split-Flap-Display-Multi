@@ -2,7 +2,79 @@
 
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include <sstream>
+#include <errno.h>
+#include <limits.h>
+#include <stdexcept>
+#include <stdlib.h>
+
+// ---------------------------------------------------------------------------
+// Integer-list parsing without <sstream>.
+//
+// <sstream> drags the C++ iostreams and std::locale machinery into the image,
+// and with it newlib's wide-character and floating-point printf/scanf
+// families — hundreds of KB of flash that nothing else in this firmware uses.
+// These helpers do the same job with strtol() and Arduino String.
+//
+// Grammar (a row is one vector, matrices are ';'-separated rows):
+//   list   : [ws] int ([ws] ',' [ws] int)* [ws] [',']
+//
+// Deliberate leniency: junk between numbers is skipped rather than rejected
+// ("1,x,3" yields {1, 3}), so a malformed value can never make getIntVector
+// throw while settings load — callers must not rely on exceptions for length
+// safety (SplitFlapDisplay bounds-checks every index it reads).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Parse comma-separated integers from [begin, end). Whitespace is skipped;
+// junk is skipped so a malformed value can never hang the parser. Empty
+// entries (",,", trailing ',') produce no value.
+void parseIntList(const char *begin, const char *end, std::vector<int> &out) {
+    const char *cursor = begin;
+
+    while (cursor < end) {
+        while (cursor < end && (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' || *cursor == '\r')) {
+            cursor++;
+        }
+        if (cursor >= end) {
+            break;
+        }
+
+        char c = *cursor;
+        if (c == ',') {
+            cursor++; // empty entry (",,") or repeated separator; skip it
+            continue;
+        }
+
+        char *stop = nullptr;
+        errno = 0;
+        long parsed = strtol(cursor, &stop, 10);
+        if (stop == cursor) {
+            cursor++; // junk token: skip one character so we can never spin
+            continue;
+        }
+        if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
+            // Out-of-range value: keep the number's position as a 0 rather
+            // than dropping it, so entry order survives. This preserves the
+            // old code's guarantee that absurd input can't produce a bogus
+            // large offset — without the throw the old code relied on.
+            out.push_back(0);
+            cursor = stop;
+        } else {
+            out.push_back((int) parsed);
+            cursor = stop;
+        }
+
+        // Consume separator/whitespace run after the number so trailing
+        // commas or padding spaces don't confuse the top of the loop.
+        while (cursor < end &&
+               (*cursor == ',' || *cursor == ' ' || *cursor == '\t' || *cursor == '\n' || *cursor == '\r')) {
+            cursor++;
+        }
+    }
+}
+
+} // namespace
 
 // Every access below opens its own call-local NVS handle and closes it before
 // returning. The class deliberately holds NO shared Preferences instance:
@@ -102,17 +174,7 @@ std::vector<int> JsonSettings::getIntVector(const char *key) {
     String value = getPrefString(key, this->find(key).strDefault);
 
     std::vector<int> intVector;
-    std::istringstream stream(value.c_str());
-    std::string token;
-    while (std::getline(stream, token, ',')) {
-        try {
-            intVector.push_back(std::stoi(token));
-        } catch (const std::invalid_argument &) {
-            throw std::runtime_error("Invalid CSV: Non-integer value found");
-        } catch (const std::out_of_range &) {
-            throw std::runtime_error("Invalid CSV: Integer value out of range");
-        }
-    }
+    parseIntList(value.c_str(), value.c_str() + value.length(), intVector);
     return intVector;
 }
 
@@ -120,22 +182,19 @@ std::vector<std::vector<int>> JsonSettings::getIntMatrix(const char *key) {
     String value = getPrefString(key, this->find(key).strDefault);
 
     std::vector<std::vector<int>> matrix;
-    std::istringstream rowStream(value.c_str());
-    std::string rowStr;
-    while (std::getline(rowStream, rowStr, ';')) {
-        std::vector<int> row;
-        std::istringstream colStream(rowStr.c_str());
-        std::string token;
-        while (std::getline(colStream, token, ',')) {
-            try {
-                row.push_back(std::stoi(token));
-            } catch (const std::invalid_argument &) {
-                throw std::runtime_error("Invalid matrix: Non-integer value found");
-            } catch (const std::out_of_range &) {
-                throw std::runtime_error("Invalid matrix: Integer value out of range");
-            }
+    const char *cursor = value.c_str();
+    const char *end = cursor + value.length();
+    while (cursor < end) {
+        const char *rowEnd = cursor;
+        while (rowEnd < end && *rowEnd != ';') {
+            rowEnd++;
         }
+
+        std::vector<int> row;
+        parseIntList(cursor, rowEnd, row);
         matrix.push_back(row);
+
+        cursor = (rowEnd < end) ? rowEnd + 1 : rowEnd;
     }
     return matrix;
 }
@@ -153,28 +212,30 @@ void JsonSettings::putFloat(const char *key, float value) {
 }
 
 void JsonSettings::putIntVector(const char *key, std::vector<int> value) {
-    std::ostringstream stream;
+    String joined;
     for (size_t i = 0; i < value.size(); ++i) {
-        stream << value[i];
-        if (i < value.size() - 1) {
-            stream << ",";
+        if (i > 0) {
+            joined += ',';
         }
+        joined += String(value[i]);
     }
-    putString(key, stream.str().c_str());
+    putString(key, joined);
 }
 
 void JsonSettings::putIntMatrix(const char *key, std::vector<std::vector<int>> value) {
-    std::ostringstream stream;
+    String joined;
     for (size_t r = 0; r < value.size(); ++r) {
-        if (r > 0) stream << ";";
+        if (r > 0) {
+            joined += ';';
+        }
         for (size_t c = 0; c < value[r].size(); ++c) {
-            stream << value[r][c];
-            if (c < value[r].size() - 1) {
-                stream << ",";
+            if (c > 0) {
+                joined += ',';
             }
+            joined += String(value[r][c]);
         }
     }
-    putString(key, stream.str().c_str());
+    putString(key, joined);
 }
 
 JsonDocument JsonSettings::toJson() {
