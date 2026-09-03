@@ -538,8 +538,6 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
     memcpy(&pendingPacket, data, sizeof(pendingPacket));
     pendingMessage = true;
     portEXIT_CRITICAL(&packetMux);
-    Serial.printf("[esp-now] queued received group=%d modules=%d text='%s'\n",
-        pendingPacket.groupIndex + 1, pendingPacket.moduleCount, pendingPacket.text);
 }
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -808,10 +806,14 @@ void SplitFlapEspNow::ensurePeer(const uint8_t mac[6]) {
 
 void SplitFlapEspNow::learnMasterMac(const uint8_t mac[6]) {
     if (!masterMacKnown) {
-        memcpy(masterMac, mac, 6);
-        masterMacKnown = true;
-        Serial.printf("[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        portENTER_CRITICAL(&packetMux);
+        if (!masterMacKnown) {
+            memcpy(masterMac, mac, 6);
+            masterMacKnown = true;
+            Serial.printf("[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
+        portEXIT_CRITICAL(&packetMux);
     }
 }
 
@@ -821,7 +823,6 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
     uint8_t charMask = 0;
     SplitFlapCharOffsetsPushMessage charPkts[MAX_MODULES];
 
-    noInterrupts();
     portENTER_CRITICAL(&packetMux);
     gotOffsetsPush = pendingOffsetsPush;
     if (gotOffsetsPush) {
@@ -838,7 +839,6 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
         pendingCharOffsetsMask = 0;
     }
     portEXIT_CRITICAL(&packetMux);
-    interrupts();
 
     bool processedAny = false;
 
