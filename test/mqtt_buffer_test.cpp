@@ -26,6 +26,12 @@ std::atomic<int> g_openHandles{0};
 
 extern size_t g_clientBufferSize;
 extern int g_publishCalls;
+extern PubSubClient *g_lastClient;
+extern int g_distributeCalls;
+extern std::string g_lastDistributed;
+extern int g_writeStringCalls;
+extern std::string g_lastWritten;
+extern float g_lastWriteSpeed;
 
 static int failures = 0;
 static int checks = 0;
@@ -69,6 +75,65 @@ int main() {
 
         CHECK(g_clientBufferSize >= 512);
         CHECK(g_clientBufferSize >= (size_t) (MAX_DISPLAY_GROUPS * 8 + 64));
+    }
+
+    // RED for issue #6 (audit): the /set callback must only STAGE the
+    // message. Executing a potentially tens-of-seconds scroll inline blows
+    // the 15 s keepalive and disconnects the client mid-callback. The staged
+    // command must drain from loop() instead.
+    {
+        g_distributeCalls = 0;
+        g_writeStringCalls = 0;
+        g_lastWritten = "";
+        g_lastDistributed = "";
+        g_publishCalls = 0;
+
+        JsonSettings settings("mqtttest", testSchema());
+        settings.putInt("masterGroupCount", 1);
+        WiFiClient wifiClient;
+        SplitFlapDisplay display(settings);
+        SplitFlapMqtt mqtt(settings, wifiClient);
+        mqtt.setDisplay(&display);
+        mqtt.setup(); // registers the real staging callback
+        g_lastClient->forceConnected(true); // stub: mark the client online
+
+        CHECK(g_writeStringCalls == 0); // nothing dispatched yet
+
+        // Deliver a /set command through the REAL callback.
+        char topic[] = "splitflap/splitflap/set";
+        byte payload[] = "hello there";
+        g_lastClient->deliver(topic, payload, 11);
+
+        // Core regression: the callback itself must not dispatch.
+        CHECK(g_writeStringCalls == 0);
+        CHECK(g_distributeCalls == 0);
+
+        // loop() is the dispatcher.
+        mqtt.loop();
+        CHECK(g_writeStringCalls == 1);
+        CHECK(g_lastWritten == "hello there");
+        CHECK(g_distributeCalls == 0); // single-group: no ESP-NOW
+
+        // A second loop() must not re-run the consumed command.
+        mqtt.loop();
+        CHECK(g_writeStringCalls == 1);
+
+        // Multi-group branch: message routed via ESP-NOW + explicit
+        // publishState with the FULL original message (multi_group_mqtt_
+        // state_test covers the same branch with its own mocks).
+        g_distributeCalls = 0;
+        g_writeStringCalls = 0;
+        g_publishCalls = 0;
+        settings.putInt("masterGroupCount", 2);
+        SplitFlapEspNow espnow(settings, display);
+        mqtt.setEspNow(&espnow);
+        byte payload2[] = "fleet message";
+        g_lastClient->deliver(topic, payload2, 13);
+        mqtt.loop();
+        CHECK(g_distributeCalls == 1);
+        CHECK(g_lastDistributed == "fleet message");
+        CHECK(g_writeStringCalls == 0); // multi-group: no local writeString
+        CHECK(g_publishCalls >= 1);     // state topic still published
     }
 
     std::printf("%d checks, %d failures\n", checks, failures);

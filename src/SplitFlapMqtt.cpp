@@ -30,38 +30,62 @@ void SplitFlapMqtt::setup() {
     topic_status = "splitflap/" + mdns + "/status";
 
     mqttClient.setServer(mqttServer.c_str(), mqttPort);
-    mqttClient.setCallback([this](char *topic, byte *payload, unsigned int length) {
+    // The callback only stages the command in pendingMessage/pendingText;
+    // the scroll can run for tens of seconds and must not execute here or
+    // the 15 s keepalive would lapse mid-callback and disconnect us (the
+    // publishState after the scroll would then silently fail). loop()
+    // drains it via processPendingMessage().
+    mqttClient.setCallback([this](char * /*topic*/, byte *payload, unsigned int length) {
         String message;
         for (unsigned int i = 0; i < length; i++) {
             message += (char) payload[i];
         }
         Serial.printf("[MQTT] Message received: %s\n", message.c_str());
-        if (display) {
-            float maxVel = settings.getFloat("maxVel");
-            if (settings.getInt("masterGroupCount") > 1 && espNow) {
-                int groupCount = settings.getInt("masterGroupCount");
-                Serial.printf("[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount);
-                espNow->distributeMessage(
-                    message,
-                    false,
-                    settings.getInt("scrollDelayMs"),
-                    settings.getInt("scrollRepeatCount")
-                );
-                // Single-group mode publishes the full message via
-                // display->writeString() (publishState defaults to true). In
-                // multi-group mode, writeString is not called, so publish the
-                // state here with the original message (not a per-group slice).
-                if (mqttClient.connected()) {
-                    publishState(message);
-                }
-            } else {
-                Serial.println("[MQTT] Displaying message locally on Group 1");
-                display->writeString(message, maxVel, false);
-            }
-        }
+        pendingText = message;
+        pendingMessage = true;
     });
 
     connectToMqtt();
+}
+
+void SplitFlapMqtt::processPendingMessage() {
+    if (! pendingMessage) {
+        return;
+    }
+
+    // Consume the flag first so a message staged while we run can only
+    // trigger one additional pass, never re-enter this one.
+    pendingMessage = false;
+    if (! display) {
+        return;
+    }
+
+    String message = pendingText;
+    pendingText = ""; // release the buffer before the long scroll
+
+    float maxVel = settings.getFloat("maxVel");
+    if (settings.getInt("masterGroupCount") > 1 && espNow) {
+        int groupCount = settings.getInt("masterGroupCount");
+        Serial.printf("[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount);
+        espNow->distributeMessage(
+            message,
+            false,
+            settings.getInt("scrollDelayMs"),
+            settings.getInt("scrollRepeatCount")
+        );
+        // Single-group mode publishes the full message via
+        // display->writeString() (publishState defaults to true). In
+        // multi-group mode, writeString is not called, so publish the
+        // state here with the original message (not a per-group slice).
+        // Called unconditionally: publish() fails silently when the broker
+        // dropped us during a long scroll, but lastPublishedState is still
+        // updated, so the reconnect path republishes the correct retained
+        // state instead of leaving the old message in place.
+        publishState(message);
+    } else {
+        Serial.println("[MQTT] Displaying message locally on Group 1");
+        display->writeString(message, maxVel, false);
+    }
 }
 
 void SplitFlapMqtt::connectToMqtt() {
@@ -168,6 +192,10 @@ void SplitFlapMqtt::loop() {
         }
     }
     mqttClient.loop();
+    // Drain staged /set commands only after the network loop has had its
+    // turn — a scroll may run for tens of seconds, so it must never delay
+    // the keepalive servicing that mqttClient.loop() performs.
+    processPendingMessage();
 }
 
 bool SplitFlapMqtt::isConnected() {

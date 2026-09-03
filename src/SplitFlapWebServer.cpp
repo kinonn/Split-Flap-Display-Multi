@@ -489,29 +489,36 @@ void SplitFlapWebServer::startWebServer() {
         // {"mode":"multiple","words":["asdf","asdfasdf","fffff"],"delay":"14","center":true}
         JsonDocument response;
 
+        // First error wins: report the earliest invalid field instead of
+        // letting later checks overwrite it.
         if (! json["mode"].is<String>()) {
             response["message"] = "Invalid mode type";
-        }
-
-        if (! json["words"].is<JsonArray>()) {
-            response["message"] = "Invalid words array";
-        }
-
-        float delay = json["delay"].as<float>();
-        if (delay < 1) {
-            response["message"] = "Invalid delay type / value";
-        }
-
-        if (! json["center"].is<bool>()) {
-            response["message"] = "Invalid center type";
-        }
-
-        if (response["message"].is<String>()) {
             response["type"] = "error";
             return request->send(400, "application/json", response.as<String>());
         }
 
-        this->setMultiDelay(delay * 1000);
+        if (! json["words"].is<JsonArray>()) {
+            response["message"] = "Invalid words array";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+
+        // NB: named delaySec — a local `float delay` would shadow the
+        // Arduino delay() function in this scope.
+        float delaySec = json["delay"].as<float>();
+        if (delaySec < 1) {
+            response["message"] = "Invalid delay type / value";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+
+        if (! json["center"].is<bool>()) {
+            response["message"] = "Invalid center type";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+
+        this->setMultiDelay(delaySec * 1000);
         Serial.println("Delay: " + String(this->getMultiWordDelay()));
 
         centering = json["center"].as<bool>() ? 1 : 0;
@@ -554,41 +561,33 @@ void SplitFlapWebServer::startWebServer() {
 }
 
 String SplitFlapWebServer::decodeURIComponent(String encodedString) {
-    String decodedString = encodedString;
-    // Replace common URL-encoded characters with their actual symbols
-    decodedString.replace("%20", " ");  // space
-    decodedString.replace("%21", "!");  // exclamation mark
-    decodedString.replace("%22", "\""); // double quote
-    decodedString.replace("%23", "#");  // hash
-    decodedString.replace("%24", "$");  // dollar sign
-    decodedString.replace("%25", "%");  // percent
-    decodedString.replace("%26", "&");  // ampersand
-    decodedString.replace("%27", "'");  // single quote
-    decodedString.replace("%28", "(");  // left parenthesis
-    decodedString.replace("%29", ")");  // right parenthesis
-    decodedString.replace("%2A", "*");  // asterisk
-    decodedString.replace("%2B", "+");  // plus
-    decodedString.replace("%2C", ",");  // comma
-    decodedString.replace("%2D", "-");  // hyphen
-    decodedString.replace("%2E", ".");  // period
-    decodedString.replace("%2F", "/");  // forward slash
-    decodedString.replace("%3A", ":");  // colon
-    decodedString.replace("%3B", ";");  // semicolon
-    decodedString.replace("%3C", "<");  // less than
-    decodedString.replace("%3D", "=");  // equal sign
-    decodedString.replace("%3E", ">");  // greater than
-    decodedString.replace("%3F", "?");  // question mark
-    decodedString.replace("%40", "@");  // at symbol
-    decodedString.replace("%5B", "[");  // left bracket
-    decodedString.replace("%5C", "\\"); // backslash
-    decodedString.replace("%5D", "]");  // right bracket
-    decodedString.replace("%5E", "^");  // caret
-    decodedString.replace("%5F", "_");  // underscore
-    decodedString.replace("%60", "`");  // grave accent
-    decodedString.replace("%7B", "{");  // left brace
-    decodedString.replace("%7C", "|");  // vertical bar
-    decodedString.replace("%7D", "}");  // right brace
-    decodedString.replace("%7E", "~");  // tilde
+    // Real percent-decoder: handles both %XX cases and leaves stray '%' or
+    // malformed escapes (e.g. "%2", "%G1", trailing "%") untouched. Replaces
+    // the previous uppercase-only replace() chain, which passed lowercase
+    // escapes like "%2a" through literally.
+    String decodedString = "";
+    decodedString.reserve(encodedString.length());
+
+    for (unsigned int i = 0; i < encodedString.length(); i++) {
+        char c = encodedString[i];
+        if (
+            c != '%' || i + 2 >= encodedString.length() ||
+            ! isxdigit((unsigned char) encodedString[i + 1]) ||
+            ! isxdigit((unsigned char) encodedString[i + 2])
+        ) {
+            decodedString += c;
+            continue;
+        }
+
+        auto hexVal = [](char h) -> int {
+            if (h >= '0' && h <= '9') return h - '0';
+            if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+            return h - 'A' + 10;
+        };
+        decodedString += (char) ((hexVal(encodedString[i + 1]) << 4) |
+                                 hexVal(encodedString[i + 2]));
+        i += 2;
+    }
 
     return decodedString;
 }

@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <ctype.h>
 #include <string.h>
+#include <vector>
 
 SplitFlapEspNow *SplitFlapEspNow::instance = nullptr;
 
@@ -192,9 +193,11 @@ void SplitFlapEspNow::distributeMessage(
         scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
     );
     const int maxChunks = MAX_DISPLAY_GROUPS * MAX_MODULES * 4;
-    String chunks[maxChunks];
+    // Heap-allocate: 192 Strings is ~2-3 KB, too much for the 8 KB
+    // loop-task stack on top of nested writeString locals.
+    std::vector<String> chunks(maxChunks);
     int chunkCount = 0;
-    splitIntoChunks(message, totalModuleCount, chunks, maxChunks, chunkCount);
+    splitIntoChunks(message, totalModuleCount, chunks.data(), maxChunks, chunkCount);
 
     Serial.printf(
         "[esp-now scroll] input=%d chars, totalModules=%d, chunks=%d, repeats=%d\n",
