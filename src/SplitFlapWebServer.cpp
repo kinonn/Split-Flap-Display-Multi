@@ -442,11 +442,14 @@ void SplitFlapWebServer::startWebServer() {
             for (auto &row : chrOffs) for (auto &v : row) v = constrain(v, -32, 32);
             settings.putIntMatrix("charOffsets", chrOffs);
 
-            display.reloadOffsets();
-            response["message"] = "Settings saved and offsets applied!";
+            // Defer the display work to the loop task: reloadOffsets() homes
+            // modules (seconds of Wire I/O) and must not run in the AsyncTCP
+            // task racing the loop task's own display access.
+            pendingActions_.requestReloadOffsets();
+            response["message"] = "Settings saved, offsets will be applied";
 
             if (!isMultiDisplayMasterEnabled() && espNow) {
-                espNow->reportOffsetsToMaster();
+                pendingActions_.requestReportOffsets();
             }
         }
 
@@ -458,10 +461,9 @@ void SplitFlapWebServer::startWebServer() {
                 settings.putIntMatrix(key.c_str(), rChrOffs);
             }
 
-            int groupCount = settings.getInt("masterGroupCount");
-            for (int i = 1; i < groupCount; i++) {
-                espNow->pushOffsetsToGroup(i);
-            }
+            // ESP-NOW pushes take hundreds of ms of esp_now_send + spacing
+            // delays — also loop-task work (audit issue #12).
+            pendingActions_.requestPushOffsets();
         }
 
         response["type"] = "success";

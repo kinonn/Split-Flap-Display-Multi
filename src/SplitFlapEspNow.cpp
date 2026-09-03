@@ -65,7 +65,7 @@ void SplitFlapEspNow::loop() {
 
     unsigned long now = millis();
     if (now - lastExpiryCheckMs >= 10000) {
-        noInterrupts();
+        portENTER_CRITICAL(&peerListMux);
         for (int i = 0; i < discoveredCount; i++) {
             if (now - discoveredPeers[i].lastSeenMs > 30000) {
                 for (int j = i; j < discoveredCount - 1; j++) {
@@ -75,7 +75,7 @@ void SplitFlapEspNow::loop() {
                 i--;
             }
         }
-        interrupts();
+        portEXIT_CRITICAL(&peerListMux);
         lastExpiryCheckMs = now;
     }
 
@@ -86,10 +86,10 @@ void SplitFlapEspNow::loop() {
     }
 
     SplitFlapEspNowMessage packet;
-    noInterrupts();
+    portENTER_CRITICAL(&packetMux);
     memcpy(&packet, &pendingPacket, sizeof(packet));
     pendingMessage = false;
-    interrupts();
+    portEXIT_CRITICAL(&packetMux);
 
     if (packet.version != ESP_NOW_TEXT_VERSION) {
         return;
@@ -138,10 +138,10 @@ bool SplitFlapEspNow::isMacAssigned(const String &mac) {
 String SplitFlapEspNow::getDiscoveredPeersJson() {
     DiscoveredPeer copy[MAX_DISPLAY_GROUPS];
     int count;
-    noInterrupts();
+    portENTER_CRITICAL(&peerListMux);
     count = discoveredCount;
     memcpy(copy, discoveredPeers, sizeof(copy));
-    interrupts();
+    portEXIT_CRITICAL(&peerListMux);
 
     String json = "[";
     for (int i = 0; i < count; i++) {
@@ -489,14 +489,18 @@ bool SplitFlapEspNow::sendToPeer(int groupIndex, const String &text, int moduleC
 
 void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int len) {
     if (len == sizeof(SplitFlapAnnounceMessage) && data[0] == ESP_NOW_ANNOUNCE_VERSION) {
+        // Announcements carry no shared pending state; take the peer-list
+        // spinlock inside processAnnouncement.
         processAnnouncement(mac, (const SplitFlapAnnounceMessage *) data);
         return;
     }
 
     if (len == sizeof(SplitFlapOffsetsPushMessage) && data[0] == ESP_NOW_OFFSETS_PUSH) {
         learnMasterMac(mac);
+        portENTER_CRITICAL(&packetMux);
         memcpy(&pendingOffsetsPushPkt, data, sizeof(pendingOffsetsPushPkt));
         pendingOffsetsPush = true;
+        portEXIT_CRITICAL(&packetMux);
         return;
     }
 
@@ -504,8 +508,10 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         learnMasterMac(mac);
         const SplitFlapCharOffsetsPushMessage *cpkt = (const SplitFlapCharOffsetsPushMessage *) data;
         int modIdx = constrain((int) cpkt->moduleIndex, 0, MAX_MODULES - 1);
+        portENTER_CRITICAL(&packetMux);
         memcpy(&pendingCharOffsetsPkts[modIdx], data, sizeof(pendingCharOffsetsPkts[modIdx]));
         pendingCharOffsetsMask |= (1 << modIdx);
+        portEXIT_CRITICAL(&packetMux);
         return;
     }
 
@@ -524,14 +530,14 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         return;
     }
 
+    portENTER_CRITICAL(&packetMux);
     if (!masterMacKnown) {
-        learnMasterMac(mac);
+        memcpy(masterMac, mac, 6);
+        masterMacKnown = true;
     }
-
     memcpy(&pendingPacket, data, sizeof(pendingPacket));
     pendingMessage = true;
-    Serial.printf("[esp-now] queued received group=%d modules=%d text='%s'\n",
-        pendingPacket.groupIndex + 1, pendingPacket.moduleCount, pendingPacket.text);
+    portEXIT_CRITICAL(&packetMux);
 }
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -575,10 +581,12 @@ void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnn
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+    portENTER_CRITICAL(&peerListMux);
     for (int i = 0; i < discoveredCount; i++) {
         if (memcmp(discoveredPeers[i].mac, mac, 6) == 0) {
             discoveredPeers[i].moduleCount = pkt->moduleCount;
             discoveredPeers[i].lastSeenMs = millis();
+            portEXIT_CRITICAL(&peerListMux);
             Serial.printf("[esp-now] updated discovery %s modules=%d\n",
                 macStr, pkt->moduleCount);
             return;
@@ -590,8 +598,11 @@ void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnn
         discoveredPeers[discoveredCount].moduleCount = pkt->moduleCount;
         discoveredPeers[discoveredCount].lastSeenMs = millis();
         discoveredCount++;
+        portEXIT_CRITICAL(&peerListMux);
         Serial.printf("[esp-now] new discovery %s modules=%d\n",
             macStr, pkt->moduleCount);
+    } else {
+        portEXIT_CRITICAL(&peerListMux);
     }
 }
 
@@ -795,10 +806,14 @@ void SplitFlapEspNow::ensurePeer(const uint8_t mac[6]) {
 
 void SplitFlapEspNow::learnMasterMac(const uint8_t mac[6]) {
     if (!masterMacKnown) {
-        memcpy(masterMac, mac, 6);
-        masterMacKnown = true;
-        Serial.printf("[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        portENTER_CRITICAL(&packetMux);
+        if (!masterMacKnown) {
+            memcpy(masterMac, mac, 6);
+            masterMacKnown = true;
+            Serial.printf("[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
+        portEXIT_CRITICAL(&packetMux);
     }
 }
 
@@ -808,7 +823,7 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
     uint8_t charMask = 0;
     SplitFlapCharOffsetsPushMessage charPkts[MAX_MODULES];
 
-    noInterrupts();
+    portENTER_CRITICAL(&packetMux);
     gotOffsetsPush = pendingOffsetsPush;
     if (gotOffsetsPush) {
         memcpy(&offsetsPkt, &pendingOffsetsPushPkt, sizeof(offsetsPkt));
@@ -823,7 +838,7 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
         }
         pendingCharOffsetsMask = 0;
     }
-    interrupts();
+    portEXIT_CRITICAL(&packetMux);
 
     bool processedAny = false;
 

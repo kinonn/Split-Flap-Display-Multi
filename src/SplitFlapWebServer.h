@@ -1,6 +1,7 @@
 #pragma once
 
 #include "JsonSettings.h"
+#include "PendingActions.h"
 #include "SplitFlapDisplay.h"
 
 #include <Arduino.h>
@@ -69,6 +70,11 @@ class SplitFlapWebServer {
 
     void setEspNow(SplitFlapEspNow *espNow) { this->espNow = espNow; }
 
+    // Cross-task mailbox: web handlers only REQUEST deferred work here; the
+    // Arduino loop task drains it and performs the actual display/ESP-NOW
+    // work as the single owner of the I2C bus (see PendingActions.h).
+    PendingActions &getPendingActions() { return pendingActions_; }
+
   private:
     JsonSettings &settings;
     SplitFlapDisplay &display;
@@ -103,5 +109,6 @@ class SplitFlapWebServer {
     bool attemptReconnect;
     unsigned long lastCheckWifiTime;
     int wifiCheckInterval;
+    PendingActions pendingActions_;
     AsyncWebServer server; // Declare server as a class member
 };

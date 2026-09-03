@@ -188,6 +188,32 @@ static void test_from_json_rejects_invalid_vector() {
     CHECK(settings.getIntVector("moduleOffsets").size() == 8); // default
 }
 
+// Regression: fromJson used to write each key as it validated, so a failure
+// partway through left earlier keys persisted while the caller reported the
+// whole save as failed (web UI: "Failed to save settings" + half the payload
+// stored, offsets physically re-homed). The batch must be transactional:
+// ANY validation failure => NOTHING is written.
+static void test_from_json_failure_is_transactional() {
+    nvsReset();
+    JsonSettings settings = makeSettings();
+
+    // Seed one key with a known non-default value so we can prove the failed
+    // batch did not overwrite it either.
+    settings.putInt("mode", 7);
+
+    JsonDocument doc;
+    doc["mode"] = 5;                          // valid, appears FIRST
+    doc["moduleOffsets"] = String("1,oops,3"); // invalid, appears AFTER it
+
+    bool ok = settings.fromJson(doc);
+    CHECK(ok == false);
+    CHECK(settings.getLastValidationKey() == String("moduleOffsets"));
+
+    // The valid key that precedes the failure must NOT have been written.
+    CHECK(settings.getInt("mode") == 7);
+    CHECK(g_openHandles == 0);
+}
+
 static void test_unknown_keys_are_skipped_not_fatal() {
     nvsReset();
     JsonSettings settings = makeSettings();
@@ -259,6 +285,7 @@ int main() {
     test_put_then_get_roundtrip();
     test_toJson_fromJson_roundtrip();
     test_from_json_rejects_invalid_vector();
+    test_from_json_failure_is_transactional();
     test_unknown_keys_are_skipped_not_fatal();
     test_reset_restores_defaults_and_clears_own_namespace();
     test_reset_only_clears_its_own_namespace();

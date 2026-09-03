@@ -7,11 +7,14 @@
 #include <esp_arduino_version.h>
 #include <esp_now.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 #define MAX_DISPLAY_GROUPS 6
 #define ESP_NOW_REMOTE_MODE 7
 #define ESP_NOW_TEXT_VERSION 1
 #define ESP_NOW_ANNOUNCE_VERSION 0xFE
-#define ESP_NOW_OFFSETS_PUSH   0xFC
+#define ESP_NOW_OFFSETS_PUSH 0xFC
 #define ESP_NOW_OFFSETS_REPORT 0xFB
 #define OFFSET_RELOAD_SETTLE_MS 250
 #define OFFSET_PACKET_SPACING_MS 10
@@ -98,12 +101,21 @@ class SplitFlapEspNow {
     SplitFlapDisplay &display;
 
     volatile bool pendingMessage;
+    // Spinlock guarding the packet handoff between the WiFi/protocol task
+    // (queueReceived) and the loop task (loop/processPendingOffsetPackets).
+    // noInterrupts() is not sufficient: it only stops interrupts on the
+    // calling core, so on dual-core targets (esp32_s3) the writer and reader
+    // could still interleave. portENTER_CRITICAL spins across cores.
+    portMUX_TYPE packetMux = portMUX_INITIALIZER_UNLOCKED;
     SplitFlapEspNowMessage pendingPacket;
     String lastRemoteText;
     bool initialized;
 
     DiscoveredPeer discoveredPeers[MAX_DISPLAY_GROUPS];
     int discoveredCount;
+    // Spinlock for the discovered-peer list, shared by the receive task
+    // (processAnnouncement) and the loop task (expiry sweep, JSON dump).
+    portMUX_TYPE peerListMux = portMUX_INITIALIZER_UNLOCKED;
     unsigned long lastAnnounceMs;
     unsigned long lastExpiryCheckMs;
     uint8_t masterMac[6];

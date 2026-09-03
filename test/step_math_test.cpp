@@ -61,9 +61,34 @@ static void test_forward_steps_other_sizes() {
     CHECK(forwardSteps(47, 0, 48) == 1);
 }
 
+// Regression: settings accepts any int for stepsPerRot / float for maxVel,
+// and moveTo() divides by both (timePerStep = 1000000 / stepsPerSecond with
+// stepsPerSecond ∝ stepsPerRot × maxVel). A stored 0 (or negative) turned a
+// plain settings POST into a division by zero → timePerStep = inf → the
+// while (!isFinished) loop never terminated → task watchdog reset.
+static void test_sanitize_steps_per_rot() {
+    // Zero and negative collapse to the firmware default (2048).
+    CHECK(sanitizeStepsPerRot(0) == 2048);
+    CHECK(sanitizeStepsPerRot(-2048) == 2048);
+    // Real values pass through untouched.
+    CHECK(sanitizeStepsPerRot(2048) == 2048);
+    CHECK(sanitizeStepsPerRot(4096) == 4096);
+}
+
+static void test_sanitize_max_vel() {
+    // Zero and negative collapse to the firmware default (15 RPM).
+    CHECK(sanitizeMaxVel(0.0f) == 15.0f);
+    CHECK(sanitizeMaxVel(-5.0f) == 15.0f);
+    // Real values pass through untouched.
+    CHECK(sanitizeMaxVel(15.0f) == 15.0f);
+    CHECK(sanitizeMaxVel(7.5f) == 7.5f);
+}
+
 int main() {
     test_forward_steps();
     test_forward_steps_other_sizes();
+    test_sanitize_steps_per_rot();
+    test_sanitize_max_vel();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

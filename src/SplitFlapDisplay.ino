@@ -173,6 +173,26 @@ void setup() {
 }
 
 void loop() {
+    // Drain the web task's deferred-work mailbox first: the loop task is the
+    // single owner of the display (I2C) and ESP-NOW push paths, so settings
+    // saves can never run display work inside the AsyncTCP task.
+    if (webServer.getPendingActions().takeReloadOffsets()) {
+        display.reloadOffsets();
+    }
+    if (webServer.getPendingActions().takeReportOffsets()) {
+        if (splitflapEspNow) {
+            splitflapEspNow->reportOffsetsToMaster();
+        }
+    }
+    if (webServer.getPendingActions().takePushOffsets()) {
+        if (splitflapEspNow) {
+            int groupCount = settings.getInt("masterGroupCount");
+            for (int i = 1; i < groupCount; i++) {
+                splitflapEspNow->pushOffsetsToGroup(i);
+            }
+        }
+    }
+
     if (splitflapEspNow) {
         splitflapEspNow->loop();
     }
