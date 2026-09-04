@@ -27,8 +27,8 @@ class SplitFlapMqtt {
     SplitFlapEspNow *espNow = nullptr;
 
     void connectToMqtt();
-    void publishStatus();                                      // publish JSON status topic (retained)
-    void processPendingMessage();   // run a staged /set command in loop()
+    void publishStatus();         // publish JSON status topic (retained)
+    void processPendingMessage(); // run a staged /set command in loop()
 
     // Deferred /set commands: the PubSubClient callback only stages the
     // message here; the potentially long scroll runs from loop() so the

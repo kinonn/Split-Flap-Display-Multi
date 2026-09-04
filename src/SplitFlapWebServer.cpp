@@ -570,11 +570,8 @@ String SplitFlapWebServer::decodeURIComponent(String encodedString) {
 
     for (unsigned int i = 0; i < encodedString.length(); i++) {
         char c = encodedString[i];
-        if (
-            c != '%' || i + 2 >= encodedString.length() ||
-            ! isxdigit((unsigned char) encodedString[i + 1]) ||
-            ! isxdigit((unsigned char) encodedString[i + 2])
-        ) {
+        if (c != '%' || i + 2 >= encodedString.length() || ! isxdigit((unsigned char) encodedString[i + 1]) ||
+            ! isxdigit((unsigned char) encodedString[i + 2])) {
             decodedString += c;
             continue;
         }
@@ -584,8 +581,7 @@ String SplitFlapWebServer::decodeURIComponent(String encodedString) {
             if (h >= 'a' && h <= 'f') return h - 'a' + 10;
             return h - 'A' + 10;
         };
-        decodedString += (char) ((hexVal(encodedString[i + 1]) << 4) |
-                                 hexVal(encodedString[i + 2]));
+        decodedString += (char) ((hexVal(encodedString[i + 1]) << 4) | hexVal(encodedString[i + 2]));
         i += 2;
     }
 
