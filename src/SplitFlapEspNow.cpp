@@ -1,11 +1,11 @@
 #include "SplitFlapEspNow.h"
 
+#include "CsvUtils.h"
+
 #include <WiFi.h>
 #include <ctype.h>
 #include <string.h>
 #include <vector>
-
-#include "CsvUtils.h"
 
 SplitFlapEspNow *SplitFlapEspNow::instance = nullptr;
 
