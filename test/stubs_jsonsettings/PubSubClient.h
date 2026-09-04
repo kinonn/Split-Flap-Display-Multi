@@ -12,15 +12,21 @@
 
 typedef unsigned char byte; // Arduino.h compatibility
 
+class PubSubClient; // fwd: global below references the type
+
 // Buffer state for assertions. Reset to the library default on construction.
 inline size_t g_clientBufferSize = 256;
 inline int g_publishCalls = 0;
+inline PubSubClient *g_lastClient = nullptr; // latest constructed client
 
 class PubSubClient {
   public:
     using Callback = std::function<void(char *, byte *, unsigned int)>;
 
-    explicit PubSubClient(WiFiClient &client) : client_(client) { g_clientBufferSize = 256; }
+    explicit PubSubClient(WiFiClient &client) : client_(client) {
+        g_clientBufferSize = 256;
+        g_lastClient = this; // tests deliver messages via the latest client
+    }
 
     void setServer(const char *host, int port) {
         server_ = host;

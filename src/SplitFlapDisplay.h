@@ -60,7 +60,8 @@ class SplitFlapDisplay {
     );
 
     // Display one already-sized chunk using the same center/pad logic as
-    // writeString, but without truncation (chunk is already <= numModules).
+    // writeString. Overlong input is truncated to numModules (defensive —
+    // homeToString() forwards its argument unchecked).
     void displayChunk(
         const String &chunk, float speed = MAX_RPM, bool centering = true
     );

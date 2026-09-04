@@ -58,6 +58,22 @@ struct SplitFlapOffsetsReportMessage
     int16_t moduleOffsets[8];
 };
 
+// Compile-time guards: these packet fields are sized for the current
+// MAX_MODULES (8). Raising MAX_MODULES without resizing them would silently
+// overflow the packet struct at the memcpy sites, so tie them together.
+static_assert(
+    sizeof(SplitFlapEspNowMessage::text) >= MAX_MODULES + 1,
+    "SplitFlapEspNowMessage::text must hold MAX_MODULES chars + NUL"
+);
+static_assert(
+    sizeof(SplitFlapOffsetsPushMessage::moduleOffsets) / sizeof(int16_t) >= MAX_MODULES,
+    "SplitFlapOffsetsPushMessage::moduleOffsets must hold MAX_MODULES entries"
+);
+static_assert(
+    sizeof(SplitFlapOffsetsReportMessage::moduleOffsets) / sizeof(int16_t) >= MAX_MODULES,
+    "SplitFlapOffsetsReportMessage::moduleOffsets must hold MAX_MODULES entries"
+);
+
 struct SplitFlapCharOffsetsReportMessage
 {
     uint8_t version;

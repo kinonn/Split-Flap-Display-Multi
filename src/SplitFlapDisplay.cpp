@@ -328,7 +328,15 @@ void SplitFlapDisplay::writeString(
 }
 
 void SplitFlapDisplay::displayChunk(const String &chunk, float speed, bool centering) {
-    String displayString = chunk; // already <= numModules by construction
+    // Defensive: every caller passes chunk.length() <= numModules today, but
+    // the guard lives only in the callers (e.g. writeString/splitIntoChunks)
+    // — homeToString() forwards its argument unchecked, and one refactor
+    // away this would overflow targetPositions[lastDisplayedChar] below.
+    // Truncate to the physical width instead of trusting the caller.
+    String displayString = chunk;
+    if (displayString.length() > (unsigned int) numModules) {
+        displayString.remove(numModules);
+    }
 
     if (centering) {
         int totalPadding = numModules - displayString.length();
