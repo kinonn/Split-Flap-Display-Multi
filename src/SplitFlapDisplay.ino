@@ -4,6 +4,7 @@
 // Thom Koopman 03/30/2025
 
 // Enjoy :)
+#include "CsvUtils.h"
 #include "JsonSettings.h"
 #include "SplitFlapDisplay.h"
 #include "SplitFlapEspNow.h"
@@ -250,7 +251,7 @@ void multiInputMode() {
     if (millis() - webServer.getLastSwitchMultiTime() > webServer.getMultiWordDelay()) {
         // get user input, extract correct word from index using webserver counter, and display
         String userInput = webServer.getMultiInputString();
-        String currWord = extractFromCSV(userInput, webServer.getMultiWordCurrentIndex());
+        String currWord = getCsvToken(userInput, webServer.getMultiWordCurrentIndex());
         if (currWord != webServer.getWrittenString()) {
             if (isMultiDisplayMasterEnabled()) {
                 getSplitFlapEspNow()->distributeMessage(
@@ -349,25 +350,6 @@ void reconnectIfNeeded() {
             splitflapEspNow->reinit();
         }
     }
-}
-
-String extractFromCSV(String str, int index) {
-    int startIndex = 0;
-    int endIndex = str.length();
-
-    int commaCount = 0;
-    for (int i = 0; i < str.length(); i++) {
-        if (str[i] == ',') {
-            commaCount++;
-            if (commaCount == index) {
-                startIndex = i + 1; // skip past the comma
-            } else if (commaCount == index + 1) {
-                endIndex = i;
-            }
-        }
-    }
-
-    return str.substring(startIndex, endIndex);
 }
 
 String renderDate(const String &format) {

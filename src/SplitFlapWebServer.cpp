@@ -1,4 +1,6 @@
 #include "SplitFlapWebServer.h"
+
+#include "CsvUtils.h"
 #include "SplitFlapEspNow.h"
 
 #include <ArduinoJson.h>
@@ -73,79 +75,6 @@ void SplitFlapWebServer::setTimezone() {
 
     Serial.println("POSIX Timezone set to: " + posixTimezone);
     configTzTime(posixTimezone.c_str(), sntpServer);
-}
-
-// Totally didn't use AI to make these functions
-//  Function to get current minute as a string
-String SplitFlapWebServer::getCurrentMinute() {
-    struct tm timeinfo;
-    if (! getLocalTime(&timeinfo)) {
-        return "";
-    }
-    char minuteStr[3];                           // Max "59" + null terminator
-    sprintf(minuteStr, "%02d", timeinfo.tm_min); // Format as two-digit string
-    return String(minuteStr);
-}
-
-// Function to get current hour as a string
-String SplitFlapWebServer::getCurrentHour() {
-    struct tm timeinfo;
-    if (! getLocalTime(&timeinfo)) {
-        return "";
-    }
-    char hourStr[3];                            // Max "59" + null terminator
-    sprintf(hourStr, "%02d", timeinfo.tm_hour); // Format as two-digit string
-    return String(hourStr);
-}
-
-// Function to get the first n characters of the day
-String SplitFlapWebServer::getDayPrefix(int n) {
-    struct tm timeinfo;
-    if (! getLocalTime(&timeinfo)) {
-        return "Err"; // Return error if time not available
-    }
-
-    // Get full weekday name
-    char fullDay[10]; // Buffer for full day name
-    strftime(fullDay, sizeof(fullDay), "%A", &timeinfo);
-
-    // Extract first n characters
-    char dayPrefix[n + 1];
-    strncpy(dayPrefix, fullDay, n);
-    dayPrefix[n] = '\0'; // Null-terminate the string
-
-    return String(dayPrefix);
-}
-
-// Function to get the first n characters of the month
-String SplitFlapWebServer::getMonthPrefix(int n) {
-    struct tm timeinfo;
-    if (! getLocalTime(&timeinfo)) {
-        return "Err"; // Return error if time not available
-    }
-
-    // Get full month name
-    char fullMonth[10]; // Buffer for full month name
-    strftime(fullMonth, sizeof(fullMonth), "%B", &timeinfo);
-
-    // Extract first n characters
-    char monthPrefix[n + 1];
-    strncpy(monthPrefix, fullMonth, n);
-    monthPrefix[n] = '\0'; // Null-terminate the string
-
-    return String(monthPrefix);
-}
-
-String SplitFlapWebServer::getCurrentDay() {
-    struct tm timeinfo;
-    if (! getLocalTime(&timeinfo)) {
-        return "Err";                          // Return error if time is not available
-    }
-
-    char dayStr[3];                            // Buffer for the day number (max "31" + null terminator)
-    sprintf(dayStr, "%02d", timeinfo.tm_mday); // Format as two-digit string
-
-    return String(dayStr);
 }
 
 void SplitFlapWebServer::setMode(int targetMode) {
@@ -684,23 +613,4 @@ bool SplitFlapWebServer::validateMacAddress(String macString) {
     }
 
     return digitCount == 12;
-}
-
-String SplitFlapWebServer::getCsvToken(const String &csv, int index) {
-    int tokenStart = 0;
-    int tokenIndex = 0;
-
-    for (int i = 0; i <= (int) csv.length(); i++) {
-        if (i == (int) csv.length() || csv[i] == ',') {
-            if (tokenIndex == index) {
-                String token = csv.substring(tokenStart, i);
-                token.trim();
-                return token;
-            }
-            tokenStart = i + 1;
-            tokenIndex++;
-        }
-    }
-
-    return "";
 }

@@ -40,7 +40,6 @@ class SplitFlapDisplay {
     void homeToChar(char homeChar,
                     float speed = MAX_RPM); // moves home and then sets all modules to a char
     void testAll();
-    void testCount();
     void testRandom(float speed = MAX_RPM);
     int getNumModules() { return numModules; }
     int getCharsetSize() const { return charSetSize; }

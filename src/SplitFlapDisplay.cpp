@@ -154,20 +154,24 @@ void SplitFlapDisplay::homeAffectedModules(bool affected[], float speed) {
     moveTo(targetPositions, speed);
 }
 
+namespace {
+// Characters exercised by the diagnostic test modes: space, A-Z, 0-9.
+const char kTestChars[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
+                           'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y',
+                           'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
+} // namespace
+
 void SplitFlapDisplay::testAll() {
     maxConcurrentMotors = -1; // unlimited — test/display moves are short
-    char testChars[37] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
-                          'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
-    int numChars = sizeof(testChars) / sizeof(testChars[0]);
+    int numChars = sizeof(kTestChars) / sizeof(kTestChars[0]);
     int targetPositions[numModules];
 
-    int charPos;
     for (int i = 0; i < numChars; i++) {
         // Serial.print("Target Positions: [");
         // fill array with same char
 
         for (int j = 0; j < numModules; j++) {
-            targetPositions[j] = modules[j].getCharPosition(testChars[i]);
+            targetPositions[j] = modules[j].getCharPosition(kTestChars[i]);
             // Serial.print(targetPositions[j]);
             // Serial.print(" , ");
         }
@@ -180,42 +184,18 @@ void SplitFlapDisplay::testAll() {
 
 void SplitFlapDisplay::testRandom(float speed) {
     maxConcurrentMotors = -1; // unlimited — test/display moves are short
-    char testChars[37] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
-                          'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
 
     int targetPositions[numModules];
     char randChar;
 
     Serial.print("Target: ");
     for (int i = 0; i < numModules; i++) {
-        randChar = testChars[random(0, 37)];
+        randChar = kTestChars[random(0, (int) (sizeof(kTestChars) / sizeof(kTestChars[0])))];
         targetPositions[i] = modules[i].getCharPosition(randChar);
         Serial.print(randChar);
     }
     Serial.println(" ");
     moveTo(targetPositions, speed);
-}
-
-void SplitFlapDisplay::testCount() {
-    maxConcurrentMotors = -1; // unlimited — test/display moves are short
-    int count = 0;
-    int maxCount = pow(10, numModules);
-    char targetChar;
-    int targetInteger;
-
-    int targetPositions[numModules];
-
-    for (int i = 0; i < maxCount; i++) {
-        // get each character in the count integer
-        for (int j = 0; j < numModules; j++) {
-            targetInteger = (i % (int) pow(10, j + 1)) / (int) pow(10, j);
-            targetChar = targetInteger + '0'; // convert to char
-            targetPositions[numModules - j - 1] = modules[j].getCharPosition(targetChar);
-        }
-
-        moveTo(targetPositions);
-        delay(250);
-    }
 }
 
 void SplitFlapDisplay::home(float speed) {

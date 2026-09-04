@@ -1,5 +1,7 @@
 #include "SplitFlapEspNow.h"
 
+#include "CsvUtils.h"
+
 #include <WiFi.h>
 #include <ctype.h>
 #include <string.h>
@@ -244,25 +246,6 @@ int SplitFlapEspNow::getTotalModuleCount() {
 
 String SplitFlapEspNow::getGroupMac(int groupIndex) {
     return getCsvToken(settings.getString("masterGroupMacs"), groupIndex);
-}
-
-String SplitFlapEspNow::getCsvToken(const String &csv, int index) {
-    int tokenStart = 0;
-    int tokenIndex = 0;
-
-    for (int i = 0; i <= (int) csv.length(); i++) {
-        if (i == (int) csv.length() || csv[i] == ',') {
-            if (tokenIndex == index) {
-                String token = csv.substring(tokenStart, i);
-                token.trim();
-                return token;
-            }
-            tokenStart = i + 1;
-            tokenIndex++;
-        }
-    }
-
-    return "";
 }
 
 String SplitFlapEspNow::sliceMessage(const String &message, int start, int width) {
