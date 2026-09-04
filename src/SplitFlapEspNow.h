@@ -148,7 +148,6 @@ class SplitFlapEspNow {
     int getGroupCount();
     int getGroupModuleCount(int groupIndex);
     String getGroupMac(int groupIndex);
-    String getCsvToken(const String &csv, int index);
     String sliceMessage(const String &message, int start, int width);
     String buildFrame(const String &message, int width, bool centering);
     void distributeFrame(const String &frame);

@@ -56,12 +56,6 @@ class SplitFlapWebServer {
     int getNumMultiWords() const { return numMultiWords; }
 
     // Mode 2, Date
-    // Function to get current minute as a string
-    String getCurrentMinute();
-    String getCurrentHour();
-    String getDayPrefix(int n);
-    String getMonthPrefix(int n);
-    String getCurrentDay();
     unsigned long getLastCheckDateTime() { return lastCheckDateTime; }
     void setLastCheckDateTime(unsigned long input) { lastCheckDateTime = input; }
     int getDateCheckInterval() { return checkDateInterval; }
@@ -83,7 +77,6 @@ class SplitFlapWebServer {
     String decodeURIComponent(String encodedString);
     bool validateMasterSettings(JsonVariant &json, JsonDocument &response);
     bool validateMacAddress(String macString);
-    String getCsvToken(const String &csv, int index);
     void setInputString(String input) { inputString = input; }
     void setMultiInputString(String input) { multiInputString = input; }
 
