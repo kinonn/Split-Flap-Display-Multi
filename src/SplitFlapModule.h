@@ -30,6 +30,10 @@ class SplitFlapModule {
 
     bool getHasErrored() const { return hasErrored; }
 
+    // Canonical 37-char drum table, shared with the display's diagnostic test
+    // modes so the two can never drift apart.
+    static const char StandardChars[37];
+
   private:
     uint8_t address;             // i2c address of module
     int position;                // character drum position
@@ -55,7 +59,6 @@ class SplitFlapModule {
     int numChars;                    // current number of characters
     int charSetSize;
 
-    static const char StandardChars[37];
     static const char ExtendedChars[48];
 };
 

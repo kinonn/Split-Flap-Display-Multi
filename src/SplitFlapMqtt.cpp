@@ -94,10 +94,15 @@ void SplitFlapMqtt::connectToMqtt() {
         String mdns = settings.getString("mdns");
         String name = settings.getString("name");
 
+        // Last Will on the availability topic (retained "offline"): without it
+        // the broker keeps our retained "online" after a crash/power loss and
+        // Home Assistant shows the entities available forever.
         if (mqttUser.length() > 0) {
-            mqttClient.connect(mdns.c_str(), mqttUser.c_str(), mqttPass.c_str());
+            mqttClient.connect(
+                mdns.c_str(), mqttUser.c_str(), mqttPass.c_str(), topic_avail.c_str(), 0, true, "offline"
+            );
         } else {
-            mqttClient.connect(mdns.c_str());
+            mqttClient.connect(mdns.c_str(), topic_avail.c_str(), 0, true, "offline");
         }
 
         if (mqttClient.connected()) {

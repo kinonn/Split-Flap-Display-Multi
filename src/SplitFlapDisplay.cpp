@@ -18,7 +18,11 @@ void SplitFlapDisplay::init() {
     displayOffset = settings.getInt("displayOffset");
     magnetPosition = settings.getInt("magnetPosition");
     maxVel = sanitizeMaxVel(settings.getFloat("maxVel"));
-    charSetSize = settings.getInt("charset");
+    // The charset setting is free-form firmware-side (the web schema enum
+    // only warns on config-file import): anything other than 48 selects the
+    // 37-char drum. Clamp here so getCharPosition() can never iterate past
+    // chars/charPositions on a stored value like 40, 200 or 0.
+    charSetSize = (settings.getInt("charset") == 48) ? 48 : 37;
 
     std::vector<int> settingAddresses = settings.getIntVector("moduleAddresses");
     for (int i = 0; i < numModules; i++) {
@@ -154,16 +158,9 @@ void SplitFlapDisplay::homeAffectedModules(bool affected[], float speed) {
     moveTo(targetPositions, speed);
 }
 
-namespace {
-// Characters exercised by the diagnostic test modes: space, A-Z, 0-9.
-const char kTestChars[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
-                           'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y',
-                           'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
-} // namespace
-
 void SplitFlapDisplay::testAll() {
     maxConcurrentMotors = -1; // unlimited — test/display moves are short
-    int numChars = sizeof(kTestChars) / sizeof(kTestChars[0]);
+    int numChars = sizeof(SplitFlapModule::StandardChars) / sizeof(SplitFlapModule::StandardChars[0]);
     int targetPositions[numModules];
 
     for (int i = 0; i < numChars; i++) {
@@ -171,7 +168,7 @@ void SplitFlapDisplay::testAll() {
         // fill array with same char
 
         for (int j = 0; j < numModules; j++) {
-            targetPositions[j] = modules[j].getCharPosition(kTestChars[i]);
+            targetPositions[j] = modules[j].getCharPosition(SplitFlapModule::StandardChars[i]);
             // Serial.print(targetPositions[j]);
             // Serial.print(" , ");
         }
@@ -190,7 +187,9 @@ void SplitFlapDisplay::testRandom(float speed) {
 
     Serial.print("Target: ");
     for (int i = 0; i < numModules; i++) {
-        randChar = kTestChars[random(0, (int) (sizeof(kTestChars) / sizeof(kTestChars[0])))];
+        randChar = SplitFlapModule::StandardChars[random(
+            0, (int) (sizeof(SplitFlapModule::StandardChars) / sizeof(SplitFlapModule::StandardChars[0]))
+        )];
         targetPositions[i] = modules[i].getCharPosition(randChar);
         Serial.print(randChar);
     }

@@ -5,8 +5,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "WiFiClient.h"
 
@@ -36,6 +38,19 @@ class PubSubClient {
 
     bool connect(const char *id) { return connectImpl(id, nullptr, nullptr); }
     bool connect(const char *id, const char *user, const char *pass) { return connectImpl(id, user, pass); }
+    // Last-Will overloads mirroring the real library: record the will so
+    // tests can assert the firmware registers one (audit issue #21).
+    bool connect(const char *id, const char *willTopic, uint8_t willQos, bool willRetain, const char *willMessage) {
+        (void) willQos;
+        return connectWillImpl(id, nullptr, nullptr, willTopic, willRetain, willMessage);
+    }
+    bool connect(
+        const char *id, const char *user, const char *pass, const char *willTopic, uint8_t willQos, bool willRetain,
+        const char *willMessage
+    ) {
+        (void) willQos;
+        return connectWillImpl(id, user, pass, willTopic, willRetain, willMessage);
+    }
 
     bool connected() const { return connected_; }
     bool subscribe(const char *topic) {
@@ -67,6 +82,9 @@ class PubSubClient {
     }
     const std::string &lastTopic() const { return lastTopic_; }
     const std::string &lastPayload() const { return lastPayload_; }
+    const std::string &willTopic() const { return willTopic_; }
+    const std::string &willMessage() const { return willMessage_; }
+    bool willRetain() const { return willRetain_; }
 
   private:
     bool connectImpl(const char *id, const char *user, const char *pass) {
@@ -74,6 +92,15 @@ class PubSubClient {
         user_ = user ? user : "";
         pass_ = pass ? pass : "";
         return connected_; // stays false unless the test forces it
+    }
+    bool connectWillImpl(
+        const char *id, const char *user, const char *pass, const char *willTopic, bool willRetain,
+        const char *willMessage
+    ) {
+        willTopic_ = willTopic ? willTopic : "";
+        willRetain_ = willRetain;
+        willMessage_ = willMessage ? willMessage : "";
+        return connectImpl(id, user, pass);
     }
 
     WiFiClient &client_;
@@ -83,5 +110,7 @@ class PubSubClient {
     std::string clientId_, user_, pass_;
     std::vector<std::string> topics_;
     std::string lastTopic_, lastPayload_;
+    std::string willTopic_, willMessage_;
+    bool willRetain_ = false;
     bool connected_ = false;
 };
