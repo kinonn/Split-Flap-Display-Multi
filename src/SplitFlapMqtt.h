@@ -47,9 +47,9 @@ class SplitFlapMqtt {
     String topic_avail;
     String topic_config_text;
     String topic_config_sensor;
-    String topic_status;                  // splitflap/{mdns}/status — JSON state info (additive)
+    String topic_status; // splitflap/{mdns}/status — JSON state info (additive)
 
     unsigned long lastAttempt = 0;
     int retryCount = 0;
-    String lastPublishedState;         // mirror of the most recent state publish
+    String lastPublishedState; // mirror of the most recent state publish
 };

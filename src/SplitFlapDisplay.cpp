@@ -2,8 +2,8 @@
 
 #include "JsonSettings.h"
 #include "SplitFlapModule.h"
-#include "SplitFlapMqtt.h"
 #include "SplitFlapMotorScheduler.h"
+#include "SplitFlapMqtt.h"
 #include "StepMath.h"
 
 SplitFlapDisplay::SplitFlapDisplay(JsonSettings &settings) : settings(settings), maxConcurrentMotors(-1) {
@@ -29,8 +29,7 @@ void SplitFlapDisplay::init() {
         // The stored list is free-form: a short or malformed one must not read
         // past the end of the vector. Missing entries fall back to the stock
         // address chain (the schema default for moduleAddresses).
-        moduleAddresses[i] =
-            (uint8_t) (i < (int) settingAddresses.size() ? settingAddresses[i] : 0x20 + i);
+        moduleAddresses[i] = (uint8_t) (i < (int) settingAddresses.size() ? settingAddresses[i] : 0x20 + i);
     }
 
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
@@ -41,8 +40,9 @@ void SplitFlapDisplay::init() {
     std::vector<std::vector<int>> settingCharOffsets = settings.getIntMatrix("charOffsets");
     for (int i = 0; i < numModules; i++) {
         for (int j = 0; j < 48; j++) {
-            charOffsets[i][j] = (i < (int)settingCharOffsets.size() && j < (int)settingCharOffsets[i].size())
-                ? settingCharOffsets[i][j] : 0;
+            charOffsets[i][j] = (i < (int) settingCharOffsets.size() && j < (int) settingCharOffsets[i].size())
+                ? settingCharOffsets[i][j]
+                : 0;
         }
     }
 
@@ -55,7 +55,12 @@ void SplitFlapDisplay::init() {
 
     for (uint8_t i = 0; i < numModules; i++) {
         modules[i] = SplitFlapModule(
-            moduleAddresses[i], stepsPerRot, moduleOffsets[i] + displayOffset, magnetPosition, charSetSize, charOffsets[i]
+            moduleAddresses[i],
+            stepsPerRot,
+            moduleOffsets[i] + displayOffset,
+            magnetPosition,
+            charSetSize,
+            charOffsets[i]
         );
     }
 
@@ -94,8 +99,9 @@ void SplitFlapDisplay::reloadOffsets() {
     std::vector<std::vector<int>> settingCharOffsets = settings.getIntMatrix("charOffsets");
     for (int i = 0; i < numModules; i++) {
         for (int j = 0; j < 48; j++) {
-            charOffsets[i][j] = (i < (int)settingCharOffsets.size() && j < (int)settingCharOffsets[i].size())
-                ? settingCharOffsets[i][j] : 0;
+            charOffsets[i][j] = (i < (int) settingCharOffsets.size() && j < (int) settingCharOffsets[i].size())
+                ? settingCharOffsets[i][j]
+                : 0;
         }
     }
 
@@ -256,8 +262,8 @@ void SplitFlapDisplay::writeChar(char inputChar, float speed) {
 }
 
 void SplitFlapDisplay::writeString(
-    String inputString, float speed, bool centering, unsigned long scrollDelayMs,
-    int scrollRepeatCount, bool publishState
+    String inputString, float speed, bool centering, unsigned long scrollDelayMs, int scrollRepeatCount,
+    bool publishState
 ) {
     // Normal display writes are not concurrency-capped (homing is).
     maxConcurrentMotors = -1;
@@ -274,9 +280,7 @@ void SplitFlapDisplay::writeString(
     // repeating the full chunk sequence scrollRepeatCount times end-to-end.
     // Clamp the count to a sane range so a misconfigured value (0, negative,
     // or absurdly large) can't lock up the display loop.
-    int repeats = constrain(
-        scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
-    );
+    int repeats = constrain(scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT);
 
     String chunks[MAX_MODULES * 4]; // generous upper bound for very long input
     int chunkCount = 0;
@@ -284,7 +288,10 @@ void SplitFlapDisplay::writeString(
 
     Serial.printf(
         "[scroll] input=%d chars, numModules=%d, chunks=%d, repeats=%d\n",
-        inputString.length(), numModules, chunkCount, repeats
+        inputString.length(),
+        numModules,
+        chunkCount,
+        repeats
     );
 
     for (int r = 0; r < repeats; r++) {
@@ -346,9 +353,7 @@ void SplitFlapDisplay::displayChunk(const String &chunk, float speed, bool cente
     moveTo(targetPositions, speed);
 }
 
-void SplitFlapDisplay::splitIntoChunks(
-    const String &input, String chunks[], int maxChunks, int &outCount
-) {
+void SplitFlapDisplay::splitIntoChunks(const String &input, String chunks[], int maxChunks, int &outCount) {
     outCount = 0;
 
     // Normalize: collapse internal whitespace to single spaces and trim ends.
@@ -462,11 +467,11 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
     int startStopDelay = 200; // time to wait to let motor realign itself to
     // magnetic field on stop and start
 
-    bool resetLatches[numModules] = {};          // start with latch on to prevent case where the
+    bool resetLatches[numModules] = {}; // start with latch on to prevent case where the
     // motion starts with the magnet over the sensor
-    int stepsRemaining[numModules] = {};         // steps each module still has to turn
-    bool motorsOn[numModules] = {};              // modules whose coils are currently energized
-    unsigned long lastStepTimes[numModules] = {}; // track when each module was last stepped
+    int stepsRemaining[numModules] = {};             // steps each module still has to turn
+    bool motorsOn[numModules] = {};                  // modules whose coils are currently energized
+    unsigned long lastStepTimes[numModules] = {};    // track when each module was last stepped
     unsigned long lastSensorCheckTime = currentTime; // track when we last read all the hall effect sensors
 
     // Concurrency cap: limits how many motors are energized at once. Homing
@@ -557,8 +562,8 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
             // check every modules sensor
             for (int i = 0; i < numModules; i++) {
                 if (stepsRemaining[i] > 0 && motorsOn[i] &&
-                    (modules[i].readHallEffectSensor() ==
-                     true)) { // only check sensors where the module is still moving
+                    (modules[i].readHallEffectSensor() == true
+                    )) { // only check sensors where the module is still moving
                     if (! resetLatches[i]) {
                         // UNCOMMENTING THIS WILL PROBBALY MAKE THE MOTORS INACCURATE, DUE
                         // TO TIME TAKEN TO PRINT

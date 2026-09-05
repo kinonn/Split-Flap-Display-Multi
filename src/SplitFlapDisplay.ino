@@ -225,7 +225,8 @@ void singleInputMode() {
     if (userInput != webServer.getWrittenString()) {
         if (isMultiDisplayMasterEnabled()) {
             getSplitFlapEspNow()->distributeMessage(
-                userInput, webServer.getCentering(),
+                userInput,
+                webServer.getCentering(),
                 settings.getInt("scrollDelayMs"),
                 settings.getInt("scrollRepeatCount")
             );
@@ -234,7 +235,9 @@ void singleInputMode() {
             }
         } else {
             display.writeString(
-                userInput, MAX_RPM, webServer.getCentering(),
+                userInput,
+                MAX_RPM,
+                webServer.getCentering(),
                 settings.getInt("scrollDelayMs"),
                 settings.getInt("scrollRepeatCount")
             );
@@ -255,7 +258,8 @@ void multiInputMode() {
         if (currWord != webServer.getWrittenString()) {
             if (isMultiDisplayMasterEnabled()) {
                 getSplitFlapEspNow()->distributeMessage(
-                    currWord, webServer.getCentering(),
+                    currWord,
+                    webServer.getCentering(),
                     settings.getInt("scrollDelayMs"),
                     settings.getInt("scrollRepeatCount")
                 );
@@ -264,7 +268,9 @@ void multiInputMode() {
                 }
             } else {
                 display.writeString(
-                    currWord, MAX_RPM, webServer.getCentering(),
+                    currWord,
+                    MAX_RPM,
+                    webServer.getCentering(),
                     settings.getInt("scrollDelayMs"),
                     settings.getInt("scrollRepeatCount")
                 );

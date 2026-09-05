@@ -6,7 +6,6 @@
 #include <Arduino.h>
 #include <esp_arduino_version.h>
 #include <esp_now.h>
-
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -103,8 +102,7 @@ class SplitFlapEspNow {
     void reportOffsetsToMaster();
     void processPendingOffsetPackets();
     void distributeMessage(
-        const String &message, bool centering = true,
-        unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
+        const String &message, bool centering = true, unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
         int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT
     );
     // Total module count across all groups (group 0 = local display). Equals
@@ -151,10 +149,7 @@ class SplitFlapEspNow {
     String sliceMessage(const String &message, int start, int width);
     String buildFrame(const String &message, int width, bool centering);
     void distributeFrame(const String &frame);
-    void splitIntoChunks(
-        const String &input, int width, String chunks[], int maxChunks,
-        int &outCount
-    );
+    void splitIntoChunks(const String &input, int width, String chunks[], int maxChunks, int &outCount);
     bool parseMacAddress(const String &macString, uint8_t mac[6]);
     bool sendToPeer(int groupIndex, const String &text, int moduleCount);
     void queueReceived(const uint8_t *mac, const uint8_t *data, int len);

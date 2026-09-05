@@ -20,9 +20,9 @@ bool isMultiDisplayMasterEnabled();
 #endif
 
 SplitFlapWebServer::SplitFlapWebServer(JsonSettings &settings, SplitFlapDisplay &display)
-    : settings(settings), display(display), server(80), multiWordDelay(1000), rebootRequired(false), attemptReconnect(false),
-      multiWordCurrentIndex(0), numMultiWords(0), wifiCheckInterval(1000), connectionMode(0), checkDateInterval(250),
-      centering(1) {
+    : settings(settings), display(display), server(80), multiWordDelay(1000), rebootRequired(false),
+      attemptReconnect(false), multiWordCurrentIndex(0), numMultiWords(0), wifiCheckInterval(1000), connectionMode(0),
+      checkDateInterval(250), centering(1) {
     lastSwitchMultiTime = millis();
 }
 
@@ -339,7 +339,8 @@ void SplitFlapWebServer::startWebServer() {
         }
 
         bool offsetsChanged = false;
-        if (json["moduleOffsets"].is<String>() && json["moduleOffsets"].as<String>() != settings.getString("moduleOffsets")) {
+        if (json["moduleOffsets"].is<String>() &&
+            json["moduleOffsets"].as<String>() != settings.getString("moduleOffsets")) {
             offsetsChanged = true;
         }
         if (json["charOffsets"].is<String>() && json["charOffsets"].as<String>() != settings.getString("charOffsets")) {
@@ -350,7 +351,9 @@ void SplitFlapWebServer::startWebServer() {
         }
 
         bool remoteOffsetsChanged = false;
-        const char *remoteOffsetKeys[] = {"rModOffs", "rChrOff0", "rChrOff1", "rChrOff2", "rChrOff3", "rChrOff4", "rDispOffs"};
+        const char *remoteOffsetKeys[] = {
+            "rModOffs", "rChrOff0", "rChrOff1", "rChrOff2", "rChrOff3", "rChrOff4", "rDispOffs"
+        };
         for (const char *k : remoteOffsetKeys) {
             if (json[k].is<String>() && json[k].as<String>() != settings.getString(k)) {
                 remoteOffsetsChanged = true;
@@ -368,7 +371,8 @@ void SplitFlapWebServer::startWebServer() {
 
         if (offsetsChanged) {
             auto chrOffs = settings.getIntMatrix("charOffsets");
-            for (auto &row : chrOffs) for (auto &v : row) v = constrain(v, -32, 32);
+            for (auto &row : chrOffs)
+                for (auto &v : row) v = constrain(v, -32, 32);
             settings.putIntMatrix("charOffsets", chrOffs);
 
             // Defer the display work to the loop task: reloadOffsets() homes
@@ -377,7 +381,7 @@ void SplitFlapWebServer::startWebServer() {
             pendingActions_.requestReloadOffsets();
             response["message"] = "Settings saved, offsets will be applied";
 
-            if (!isMultiDisplayMasterEnabled() && espNow) {
+            if (! isMultiDisplayMasterEnabled() && espNow) {
                 pendingActions_.requestReportOffsets();
             }
         }
@@ -386,7 +390,8 @@ void SplitFlapWebServer::startWebServer() {
             for (int r = 0; r < 5; r++) {
                 String key = "rChrOff" + String(r);
                 auto rChrOffs = settings.getIntMatrix(key.c_str());
-                for (auto &row : rChrOffs) for (auto &v : row) v = constrain(v, -32, 32);
+                for (auto &row : rChrOffs)
+                    for (auto &v : row) v = constrain(v, -32, 32);
                 settings.putIntMatrix(key.c_str(), rChrOffs);
             }
 
