@@ -156,6 +156,23 @@ Remote groups automatically switch into ESP-NOW remote display mode when they re
 - Discovery works over ESP-NOW regardless of Wi-Fi connectivity — it only requires that controllers share the same radio channel.
 - If a remote controller is not discovered (e.g. different Wi-Fi channel), its MAC address can still be entered manually. The module count must then be set manually as well.
 
+## MQTT
+
+Point the display at an MQTT broker (e.g. [Mosquitto](https://mosquitto.org/)) from the Settings page: **MQTT Server**, **Port** (default `1883`), **Username**, and **Password**. The Settings page includes a Home Assistant help block with the same steps.
+
+Topics use the device's mDNS name (`{mdns}`):
+
+| Topic                         | Direction      | Retained | Description                                                        |
+| ----------------------------- | -------------- | -------- | ------------------------------------------------------------------ |
+| `splitflap/{mdns}/set`        | to display     | no       | Send a message to show                                             |
+| `splitflap/{mdns}/state`      | from display   | yes      | Last message shown                                                 |
+| `splitflap/{mdns}/availability` | from display | yes      | `online` / `offline` (see below)                                   |
+| `splitflap/{mdns}/status`     | from display   | yes      | JSON status: `{"message","num_modules"}`                           |
+
+Availability is retained: the display publishes `online` on connect and registers a retained `offline` Last Will, so a crash or power loss shows the device as offline instead of stuck online.
+
+Home Assistant MQTT auto-discovery is supported — a text entity and a sensor entity appear automatically under Settings → Devices & Services → MQTT.
+
 ## Tuning
 
 The settings page provides two levels of offset adjustment for precise flap alignment:
