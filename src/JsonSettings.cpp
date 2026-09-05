@@ -170,20 +170,16 @@ float JsonSettings::getFloat(const char *key) {
     return getPrefFloat(key, this->find(key).floatDefault);
 }
 
-std::vector<int> JsonSettings::getIntVector(const char *key) {
-    String value = getPrefString(key, this->find(key).strDefault);
-
+std::vector<int> JsonSettings::parseIntVector(const String &csv) {
     std::vector<int> intVector;
-    parseIntList(value.c_str(), value.c_str() + value.length(), intVector);
+    parseIntList(csv.c_str(), csv.c_str() + csv.length(), intVector);
     return intVector;
 }
 
-std::vector<std::vector<int>> JsonSettings::getIntMatrix(const char *key) {
-    String value = getPrefString(key, this->find(key).strDefault);
-
+std::vector<std::vector<int>> JsonSettings::parseIntMatrix(const String &csv) {
     std::vector<std::vector<int>> matrix;
-    const char *cursor = value.c_str();
-    const char *end = cursor + value.length();
+    const char *cursor = csv.c_str();
+    const char *end = cursor + csv.length();
     while (cursor < end) {
         const char *rowEnd = cursor;
         while (rowEnd < end && *rowEnd != ';') {
@@ -197,6 +193,14 @@ std::vector<std::vector<int>> JsonSettings::getIntMatrix(const char *key) {
         cursor = (rowEnd < end) ? rowEnd + 1 : rowEnd;
     }
     return matrix;
+}
+
+std::vector<int> JsonSettings::getIntVector(const char *key) {
+    return parseIntVector(getPrefString(key, this->find(key).strDefault));
+}
+
+std::vector<std::vector<int>> JsonSettings::getIntMatrix(const char *key) {
+    return parseIntMatrix(getPrefString(key, this->find(key).strDefault));
 }
 
 void JsonSettings::putString(const char *key, String value) {

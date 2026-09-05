@@ -75,18 +75,23 @@ void SplitFlapDisplay::init() {
     }
 }
 
-void SplitFlapDisplay::reloadOffsets() {
-    int oldDisplayOffset = displayOffset;
-    int oldModuleOffsets[MAX_MODULES];
-    int oldCharOffsets[MAX_MODULES][48];
+CalibrationSnapshot SplitFlapDisplay::liveCalibration() const {
+    CalibrationSnapshot snapshot;
+    snapshot.displayOffset = displayOffset;
+    snapshot.magnetPosition = magnetPosition;
+    snapshot.moduleOffsets.assign(moduleOffsets, moduleOffsets + numModules);
+    snapshot.charOffsets.resize(numModules);
     for (int i = 0; i < numModules; i++) {
-        oldModuleOffsets[i] = moduleOffsets[i];
-        for (int j = 0; j < 48; j++) {
-            oldCharOffsets[i][j] = charOffsets[i][j];
-        }
+        snapshot.charOffsets[i].assign(charOffsets[i], charOffsets[i] + 48);
     }
+    return snapshot;
+}
+
+void SplitFlapDisplay::reloadOffsets() {
+    CalibrationSnapshot previous = liveCalibration();
 
     displayOffset = settings.getInt("displayOffset");
+    magnetPosition = settings.getInt("magnetPosition");
 
     std::vector<int> settingOffsets = settings.getIntVector("moduleOffsets");
     for (int i = 0; i < numModules; i++) {
@@ -105,39 +110,21 @@ void SplitFlapDisplay::reloadOffsets() {
         }
     }
 
-    bool affected[MAX_MODULES] = {};
-    bool anyAffected = false;
-
-    if (oldDisplayOffset != displayOffset) {
-        for (int i = 0; i < numModules; i++) {
-            affected[i] = true;
-        }
-        anyAffected = true;
-    } else {
-        for (int i = 0; i < numModules; i++) {
-            bool moduleChanged = (oldModuleOffsets[i] != moduleOffsets[i]);
-            if (! moduleChanged) {
-                for (int j = 0; j < 48; j++) {
-                    if (oldCharOffsets[i][j] != charOffsets[i][j]) {
-                        moduleChanged = true;
-                        break;
-                    }
-                }
-            }
-            affected[i] = moduleChanged;
-            if (moduleChanged) {
-                anyAffected = true;
-            }
-        }
-    }
+    std::vector<char> affected = affectedModules(previous, liveCalibration(), numModules);
 
     for (uint8_t i = 0; i < numModules; i++) {
         int newMagnetOffset = magnetPosition + moduleOffsets[i] + displayOffset;
         modules[i].updateOffsets(charOffsets[i], newMagnetOffset);
     }
 
+    bool affectedFlags[MAX_MODULES] = {};
+    bool anyAffected = false;
+    for (int i = 0; i < numModules; i++) {
+        affectedFlags[i] = (affected[i] != 0);
+        anyAffected = anyAffected || affectedFlags[i];
+    }
     if (anyAffected) {
-        homeAffectedModules(affected);
+        homeAffectedModules(affectedFlags);
     }
 }
 

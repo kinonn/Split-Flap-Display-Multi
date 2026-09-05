@@ -1,5 +1,6 @@
 #include "SplitFlapWebServer.h"
 
+#include "CalibrationTriggers.h"
 #include "CsvUtils.h"
 #include "SplitFlapEspNow.h"
 
@@ -338,17 +339,64 @@ void SplitFlapWebServer::startWebServer() {
             return request->send(400, "application/json", response.as<String>());
         }
 
-        bool offsetsChanged = false;
-        if (json["moduleOffsets"].is<String>() &&
-            json["moduleOffsets"].as<String>() != settings.getString("moduleOffsets")) {
-            offsetsChanged = true;
+        // Keys consumed once in SplitFlapDisplay::init() only take effect after
+        // a reboot — flag it (like the OTA password change above) instead of
+        // reporting success that silently changes nothing.
+        bool hardwareChanged = false;
+        if (json["moduleAddresses"].is<String>() &&
+            JsonSettings::parseIntVector(json["moduleAddresses"].as<String>()) !=
+                settings.getIntVector("moduleAddresses")) {
+            hardwareChanged = true;
         }
-        if (json["charOffsets"].is<String>() && json["charOffsets"].as<String>() != settings.getString("charOffsets")) {
-            offsetsChanged = true;
+        if ((json["maxVel"].is<float>() || json["maxVel"].is<int>()) &&
+            json["maxVel"].as<float>() != settings.getFloat("maxVel")) {
+            hardwareChanged = true;
         }
-        if (json["displayOffset"].is<int>() && json["displayOffset"].as<int>() != settings.getInt("displayOffset")) {
-            offsetsChanged = true;
+        const char *hardwareIntKeys[] = {"moduleCount", "stepsPerRot", "charset", "sdaPin", "sclPin"};
+        for (const char *k : hardwareIntKeys) {
+            if (json[k].is<int>() || json[k].is<float>() || json[k].is<String>()) {
+                if (json[k].as<int>() != settings.getInt(k)) {
+                    hardwareChanged = true;
+                    break;
+                }
+            }
         }
+        if (hardwareChanged) {
+            rebootRequired = true;
+            response["message"] = "Settings updated successfully, hardware settings have changed. Rebooting...";
+        }
+
+        // Single numeric trigger point for calibration homing (see
+        // CalibrationTriggers.h): compare parsed values, not CSV text, so a
+        // whitespace-only edit ("0,0" vs "0, 0") schedules nothing — while
+        // magnetPosition, which feeds the same magnet-target computation as
+        // displayOffset, triggers a reload like any other calibration key.
+        CalibrationSnapshot storedCalibration;
+        storedCalibration.displayOffset = settings.getInt("displayOffset");
+        storedCalibration.magnetPosition = settings.getInt("magnetPosition");
+        storedCalibration.moduleOffsets = settings.getIntVector("moduleOffsets");
+        storedCalibration.charOffsets = settings.getIntMatrix("charOffsets");
+
+        CalibrationSnapshot incomingCalibration = storedCalibration;
+        if (json["moduleOffsets"].is<String>()) {
+            incomingCalibration.moduleOffsets = JsonSettings::parseIntVector(json["moduleOffsets"].as<String>());
+        }
+        if (json["charOffsets"].is<String>()) {
+            incomingCalibration.charOffsets = JsonSettings::parseIntMatrix(json["charOffsets"].as<String>());
+        }
+        // Ints arrive as JSON numbers from the settings page (parseInt) or
+        // numeric strings via config import — accept both, like fromJson's
+        // as<int>() does. Anything else (including a missing key) means the
+        // key is not being changed.
+        if (json["displayOffset"].is<int>() || json["displayOffset"].is<float>() ||
+            json["displayOffset"].is<String>()) {
+            incomingCalibration.displayOffset = json["displayOffset"].as<int>();
+        }
+        if (json["magnetPosition"].is<int>() || json["magnetPosition"].is<float>() ||
+            json["magnetPosition"].is<String>()) {
+            incomingCalibration.magnetPosition = json["magnetPosition"].as<int>();
+        }
+        bool offsetsChanged = calibrationChanged(storedCalibration, incomingCalibration);
 
         bool remoteOffsetsChanged = false;
         const char *remoteOffsetKeys[] = {
