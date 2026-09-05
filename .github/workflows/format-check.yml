@@ -13,16 +13,22 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        # Supply-chain hardening: pin to the exact commit tags/v3 resolves to
+        # (v3 is a lightweight tag; SHA verified via git ls-remote 2026-09-04).
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        # Pinned to the exact commit tags/v4 resolves to (lightweight tag;
+        # SHA verified via git ls-remote 2026-09-04).
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
 
       - name: Install Dependencies
         run: npm ci
 
       - name: Install Clang Format
-        uses: jidicula/clang-format-action@v4.15.0
+        # Pinned to the exact commit tags/v4.15.0 resolves to (annotated tag;
+        # SHA is the peeled commit, verified via git ls-remote 2026-09-04).
+        uses: jidicula/clang-format-action@4726374d1aa3c6aecf132e5197e498979588ebc8
         with:
             clang-format-version: '20'
             check-path: 'src'
