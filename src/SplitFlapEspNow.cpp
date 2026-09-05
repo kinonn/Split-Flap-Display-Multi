@@ -728,6 +728,7 @@ void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOf
 
     auto modOffs = settings.getIntMatrix("rModOffs");
     while ((int)modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
+    if ((int)modOffs[row].size() < 8) modOffs[row].resize(8, 0);
     for (int i = 0; i < 8; i++) {
         modOffs[row][i] = (i < moduleCount) ? pkt->moduleOffsets[i] : 0;
     }
