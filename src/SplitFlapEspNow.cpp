@@ -11,8 +11,8 @@ SplitFlapEspNow *SplitFlapEspNow::instance = nullptr;
 
 SplitFlapEspNow::SplitFlapEspNow(JsonSettings &settings, SplitFlapDisplay &display)
     : settings(settings), display(display), pendingMessage(false), lastRemoteText(""), initialized(false),
-      discoveredCount(0), lastAnnounceMs(0), lastExpiryCheckMs(0), masterMacKnown(false),
-      pendingOffsetsPush(false), pendingCharOffsetsMask(0), offsetDataDirty(false), lastOffsetRxMs(0) {
+      discoveredCount(0), lastAnnounceMs(0), lastExpiryCheckMs(0), masterMacKnown(false), pendingOffsetsPush(false),
+      pendingCharOffsetsMask(0), offsetDataDirty(false), lastOffsetRxMs(0) {
     memset(discoveredPeers, 0, sizeof(discoveredPeers));
     memset(masterMac, 0, sizeof(masterMac));
 }
@@ -107,10 +107,7 @@ void SplitFlapEspNow::loop() {
     }
 
     settings.putInt("mode", ESP_NOW_REMOTE_MODE);
-    display.writeString(
-        text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS,
-        DEFAULT_SCROLL_REPEAT_COUNT, false
-    );
+    display.writeString(text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
     lastRemoteText = text;
 }
 
@@ -177,8 +174,7 @@ bool SplitFlapEspNow::ensureInitialized() {
 }
 
 void SplitFlapEspNow::distributeMessage(
-    const String &message, bool centering, unsigned long scrollDelayMs,
-    int scrollRepeatCount
+    const String &message, bool centering, unsigned long scrollDelayMs, int scrollRepeatCount
 ) {
     if (! ensureInitialized()) {
         return;
@@ -191,9 +187,7 @@ void SplitFlapEspNow::distributeMessage(
         return;
     }
 
-    int repeats = constrain(
-        scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT
-    );
+    int repeats = constrain(scrollRepeatCount, MIN_SCROLL_REPEAT_COUNT, MAX_SCROLL_REPEAT_COUNT);
     const int maxChunks = MAX_DISPLAY_GROUPS * MAX_MODULES * 4;
     // Heap-allocate: 192 Strings is ~2-3 KB, too much for the 8 KB
     // loop-task stack on top of nested writeString locals.
@@ -203,7 +197,10 @@ void SplitFlapEspNow::distributeMessage(
 
     Serial.printf(
         "[esp-now scroll] input=%d chars, totalModules=%d, chunks=%d, repeats=%d\n",
-        message.length(), totalModuleCount, chunkCount, repeats
+        message.length(),
+        totalModuleCount,
+        chunkCount,
+        repeats
     );
 
     for (int r = 0; r < repeats; r++) {
@@ -300,24 +297,22 @@ void SplitFlapEspNow::distributeFrame(const String &frame) {
     for (int groupIndex = 1; groupIndex < groupCount; groupIndex++) {
         int moduleCount = getGroupModuleCount(groupIndex);
         String segment = sliceMessage(frame, offset + localModuleCount, moduleCount);
-        Serial.printf("[esp-now] send to group %d text='%s' modules=%d offset=%d\n",
-            groupIndex + 1, segment.c_str(), moduleCount, offset + localModuleCount);
+        Serial.printf(
+            "[esp-now] send to group %d text='%s' modules=%d offset=%d\n",
+            groupIndex + 1,
+            segment.c_str(),
+            moduleCount,
+            offset + localModuleCount
+        );
         sendToPeer(groupIndex, segment, moduleCount);
         offset += moduleCount;
     }
 
-    Serial.printf("[esp-now] local group 1 display text='%s' modules=%d\n",
-        localText.c_str(), localModuleCount);
-    display.writeString(
-        localText, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS,
-        DEFAULT_SCROLL_REPEAT_COUNT, false
-    );
+    Serial.printf("[esp-now] local group 1 display text='%s' modules=%d\n", localText.c_str(), localModuleCount);
+    display.writeString(localText, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
 }
 
-void SplitFlapEspNow::splitIntoChunks(
-    const String &input, int width, String chunks[], int maxChunks,
-    int &outCount
-) {
+void SplitFlapEspNow::splitIntoChunks(const String &input, int width, String chunks[], int maxChunks, int &outCount) {
     outCount = 0;
 
     String s = "";
@@ -438,9 +433,17 @@ bool SplitFlapEspNow::sendToPeer(int groupIndex, const String &text, int moduleC
         peer.encrypt = false;
         peer.ifidx = (WiFi.getMode() == WIFI_AP) ? WIFI_IF_AP : WIFI_IF_STA;
 
-        Serial.printf("[esp-now] adding peer group %d mac %02X:%02X:%02X:%02X:%02X:%02X ifidx=%d\n",
+        Serial.printf(
+            "[esp-now] adding peer group %d mac %02X:%02X:%02X:%02X:%02X:%02X ifidx=%d\n",
             groupIndex + 1,
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], peer.ifidx);
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5],
+            peer.ifidx
+        );
 
         esp_err_t addResult = esp_now_add_peer(&peer);
         if (addResult != ESP_OK) {
@@ -461,8 +464,7 @@ bool SplitFlapEspNow::sendToPeer(int groupIndex, const String &text, int moduleC
     }
     packet.text[packet.moduleCount] = '\0';
 
-    Serial.printf("[esp-now] send group %d len=%d text='%s'\n",
-        groupIndex + 1, sizeof(packet), packet.text);
+    Serial.printf("[esp-now] send group %d len=%d text='%s'\n", groupIndex + 1, sizeof(packet), packet.text);
 
     esp_err_t result = esp_now_send(mac, (const uint8_t *) &packet, sizeof(packet));
     if (result != ESP_OK) {
@@ -517,7 +519,7 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
     }
 
     portENTER_CRITICAL(&packetMux);
-    if (!masterMacKnown) {
+    if (! masterMacKnown) {
         memcpy(masterMac, mac, 6);
         masterMacKnown = true;
     }
@@ -564,8 +566,7 @@ void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnn
     if (memcmp(mac, ownMac, 6) == 0) return;
 
     char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     portENTER_CRITICAL(&peerListMux);
     for (int i = 0; i < discoveredCount; i++) {
@@ -573,8 +574,7 @@ void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnn
             discoveredPeers[i].moduleCount = pkt->moduleCount;
             discoveredPeers[i].lastSeenMs = millis();
             portEXIT_CRITICAL(&peerListMux);
-            Serial.printf("[esp-now] updated discovery %s modules=%d\n",
-                macStr, pkt->moduleCount);
+            Serial.printf("[esp-now] updated discovery %s modules=%d\n", macStr, pkt->moduleCount);
             return;
         }
     }
@@ -585,8 +585,7 @@ void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnn
         discoveredPeers[discoveredCount].lastSeenMs = millis();
         discoveredCount++;
         portEXIT_CRITICAL(&peerListMux);
-        Serial.printf("[esp-now] new discovery %s modules=%d\n",
-            macStr, pkt->moduleCount);
+        Serial.printf("[esp-now] new discovery %s modules=%d\n", macStr, pkt->moduleCount);
     } else {
         portEXIT_CRITICAL(&peerListMux);
     }
@@ -594,18 +593,17 @@ void SplitFlapEspNow::processAnnouncement(const uint8_t *mac, const SplitFlapAnn
 
 String SplitFlapEspNow::macToString(const uint8_t mac[6]) {
     char buf[18];
-    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(buf);
 }
 
 void SplitFlapEspNow::pushOffsetsToGroup(int groupIndex) {
-    if (!ensureInitialized()) return;
+    if (! ensureInitialized()) return;
     if (groupIndex < 1 || groupIndex >= getGroupCount()) return;
 
     String macString = getGroupMac(groupIndex);
     uint8_t mac[6];
-    if (!parseMacAddress(macString, mac)) return;
+    if (! parseMacAddress(macString, mac)) return;
 
     ensurePeer(mac);
 
@@ -615,19 +613,18 @@ void SplitFlapEspNow::pushOffsetsToGroup(int groupIndex) {
     auto modOffs = settings.getIntMatrix("rModOffs");
     int dispOff = 0;
     auto dispOffs = settings.getIntVector("rDispOffs");
-    if (row < (int)dispOffs.size()) dispOff = dispOffs[row];
+    if (row < (int) dispOffs.size()) dispOff = dispOffs[row];
 
     SplitFlapOffsetsPushMessage pkt = {};
     pkt.version = ESP_NOW_OFFSETS_PUSH;
     pkt.groupIndex = groupIndex;
     pkt.moduleCount = moduleCount;
-    pkt.displayOffset = (int16_t)constrain(dispOff, -32768, 32767);
+    pkt.displayOffset = (int16_t) constrain(dispOff, -32768, 32767);
     for (int i = 0; i < 8; i++) {
-        int val = (row < (int)modOffs.size() && i < (int)modOffs[row].size())
-            ? modOffs[row][i] : 0;
-        pkt.moduleOffsets[i] = (int16_t)constrain(val, -32768, 32767);
+        int val = (row < (int) modOffs.size() && i < (int) modOffs[row].size()) ? modOffs[row][i] : 0;
+        pkt.moduleOffsets[i] = (int16_t) constrain(val, -32768, 32767);
     }
-    if (esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
+    if (esp_now_send(mac, (const uint8_t *) &pkt, sizeof(pkt)) != ESP_OK) {
         Serial.printf("[esp-now] push offsets send failed for group %d\n", groupIndex + 1);
     }
     delay(OFFSET_PACKET_SPACING_MS);
@@ -640,10 +637,10 @@ void SplitFlapEspNow::pushOffsetsToGroup(int groupIndex) {
         cpkt.groupIndex = groupIndex;
         cpkt.moduleIndex = m;
         for (int c = 0; c < 48; c++) {
-            int val = (m < (int)chrOffs.size() && c < (int)chrOffs[m].size()) ? chrOffs[m][c] : 0;
+            int val = (m < (int) chrOffs.size() && c < (int) chrOffs[m].size()) ? chrOffs[m][c] : 0;
             cpkt.charOffsets[c] = constrain(val, -32, 32);
         }
-        if (esp_now_send(mac, (const uint8_t *)&cpkt, sizeof(cpkt)) != ESP_OK) {
+        if (esp_now_send(mac, (const uint8_t *) &cpkt, sizeof(cpkt)) != ESP_OK) {
             Serial.printf("[esp-now] push char offsets send failed for group %d module %d\n", groupIndex + 1, m);
         }
         if (m < moduleCount - 1) delay(OFFSET_PACKET_SPACING_MS);
@@ -653,7 +650,7 @@ void SplitFlapEspNow::pushOffsetsToGroup(int groupIndex) {
 }
 
 void SplitFlapEspNow::reportOffsetsToMaster() {
-    if (!initialized || !masterMacKnown) return;
+    if (! initialized || ! masterMacKnown) return;
 
     ensurePeer(masterMac);
 
@@ -664,12 +661,12 @@ void SplitFlapEspNow::reportOffsetsToMaster() {
     SplitFlapOffsetsReportMessage pkt = {};
     pkt.version = ESP_NOW_OFFSETS_REPORT;
     pkt.moduleCount = moduleCount;
-    pkt.displayOffset = (int16_t)constrain(dispOff, -32768, 32767);
+    pkt.displayOffset = (int16_t) constrain(dispOff, -32768, 32767);
     for (int i = 0; i < 8; i++) {
-        int val = (i < (int)modOffs.size()) ? modOffs[i] : 0;
-        pkt.moduleOffsets[i] = (int16_t)constrain(val, -32768, 32767);
+        int val = (i < (int) modOffs.size()) ? modOffs[i] : 0;
+        pkt.moduleOffsets[i] = (int16_t) constrain(val, -32768, 32767);
     }
-    if (esp_now_send(masterMac, (const uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
+    if (esp_now_send(masterMac, (const uint8_t *) &pkt, sizeof(pkt)) != ESP_OK) {
         Serial.println("[esp-now] report offsets send failed");
     }
     delay(OFFSET_PACKET_SPACING_MS);
@@ -680,10 +677,10 @@ void SplitFlapEspNow::reportOffsetsToMaster() {
         cpkt.version = ESP_NOW_OFFSETS_REPORT;
         cpkt.moduleIndex = m;
         for (int c = 0; c < 48; c++) {
-            int val = (m < (int)chrOffs.size() && c < (int)chrOffs[m].size()) ? chrOffs[m][c] : 0;
+            int val = (m < (int) chrOffs.size() && c < (int) chrOffs[m].size()) ? chrOffs[m][c] : 0;
             cpkt.charOffsets[c] = constrain(val, -32, 32);
         }
-        if (esp_now_send(masterMac, (const uint8_t *)&cpkt, sizeof(cpkt)) != ESP_OK) {
+        if (esp_now_send(masterMac, (const uint8_t *) &cpkt, sizeof(cpkt)) != ESP_OK) {
             Serial.printf("[esp-now] report char offsets send failed for module %d\n", m);
         }
         if (m < moduleCount - 1) delay(OFFSET_PACKET_SPACING_MS);
@@ -718,24 +715,24 @@ void SplitFlapEspNow::applyCharOffsetsPush(const SplitFlapCharOffsetsPushMessage
 }
 
 void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOffsetsReportMessage *pkt) {
-    if (!initialized || !isMasterEnabled()) return;
+    if (! initialized || ! isMasterEnabled()) return;
 
     int groupIdx = groupIndexForMac(mac);
     if (groupIdx < 1) return;
     int row = groupIdx - 1;
 
-    int moduleCount = constrain((int)pkt->moduleCount, 1, MAX_MODULES);
+    int moduleCount = constrain((int) pkt->moduleCount, 1, MAX_MODULES);
 
     auto modOffs = settings.getIntMatrix("rModOffs");
-    while ((int)modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
-    if ((int)modOffs[row].size() < 8) modOffs[row].resize(8, 0);
+    while ((int) modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
+    if ((int) modOffs[row].size() < 8) modOffs[row].resize(8, 0);
     for (int i = 0; i < 8; i++) {
         modOffs[row][i] = (i < moduleCount) ? pkt->moduleOffsets[i] : 0;
     }
     settings.putIntMatrix("rModOffs", modOffs);
 
     auto dispOffs = settings.getIntVector("rDispOffs");
-    while ((int)dispOffs.size() <= row) dispOffs.push_back(0);
+    while ((int) dispOffs.size() <= row) dispOffs.push_back(0);
     dispOffs[row] = pkt->displayOffset;
     settings.putIntVector("rDispOffs", dispOffs);
 
@@ -743,7 +740,7 @@ void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOf
 }
 
 void SplitFlapEspNow::processCharOffsetsReport(const uint8_t *mac, const SplitFlapCharOffsetsReportMessage *pkt) {
-    if (!initialized || !isMasterEnabled()) return;
+    if (! initialized || ! isMasterEnabled()) return;
 
     int groupIdx = groupIndexForMac(mac);
     if (groupIdx < 1) return;
@@ -751,10 +748,10 @@ void SplitFlapEspNow::processCharOffsetsReport(const uint8_t *mac, const SplitFl
 
     String key = "rChrOff" + String(row);
     auto matrix = settings.getIntMatrix(key.c_str());
-    int modIdx = constrain((int)pkt->moduleIndex, 0, MAX_MODULES - 1);
+    int modIdx = constrain((int) pkt->moduleIndex, 0, MAX_MODULES - 1);
 
-    while ((int)matrix.size() <= modIdx) matrix.push_back(std::vector<int>(48, 0));
-    if ((int)matrix[modIdx].size() < 48) matrix[modIdx].resize(48, 0);
+    while ((int) matrix.size() <= modIdx) matrix.push_back(std::vector<int>(48, 0));
+    if ((int) matrix[modIdx].size() < 48) matrix[modIdx].resize(48, 0);
     for (int c = 0; c < 48; c++) {
         matrix[modIdx][c] = pkt->charOffsets[c];
     }
@@ -777,7 +774,7 @@ int SplitFlapEspNow::groupIndexForMac(const uint8_t mac[6]) {
 }
 
 void SplitFlapEspNow::ensurePeer(const uint8_t mac[6]) {
-    if (!esp_now_is_peer_exist(mac)) {
+    if (! esp_now_is_peer_exist(mac)) {
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, mac, 6);
         peer.channel = 0;
@@ -785,20 +782,34 @@ void SplitFlapEspNow::ensurePeer(const uint8_t mac[6]) {
         peer.ifidx = (WiFi.getMode() == WIFI_AP) ? WIFI_IF_AP : WIFI_IF_STA;
         esp_err_t result = esp_now_add_peer(&peer);
         if (result != ESP_OK) {
-            Serial.printf("[esp-now] failed to add peer %02X:%02X:%02X:%02X:%02X:%02X\n",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            Serial.printf(
+                "[esp-now] failed to add peer %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5]
+            );
         }
     }
 }
 
 void SplitFlapEspNow::learnMasterMac(const uint8_t mac[6]) {
-    if (!masterMacKnown) {
+    if (! masterMacKnown) {
         portENTER_CRITICAL(&packetMux);
-        if (!masterMacKnown) {
+        if (! masterMacKnown) {
             memcpy(masterMac, mac, 6);
             masterMacKnown = true;
-            Serial.printf("[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            Serial.printf(
+                "[esp-now] learned master MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5]
+            );
         }
         portEXIT_CRITICAL(&packetMux);
     }

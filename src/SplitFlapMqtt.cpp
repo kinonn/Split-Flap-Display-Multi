@@ -68,10 +68,7 @@ void SplitFlapMqtt::processPendingMessage() {
         int groupCount = settings.getInt("masterGroupCount");
         Serial.printf("[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount);
         espNow->distributeMessage(
-            message,
-            false,
-            settings.getInt("scrollDelayMs"),
-            settings.getInt("scrollRepeatCount")
+            message, false, settings.getInt("scrollDelayMs"), settings.getInt("scrollRepeatCount")
         );
         // Single-group mode publishes the full message via
         // display->writeString() (publishState defaults to true). In
@@ -163,13 +160,13 @@ void SplitFlapMqtt::setEspNow(SplitFlapEspNow *e) {
 
 void SplitFlapMqtt::publishState(const String &message) {
     Serial.println("[MQTT] Publishing state: " + message);
-    lastPublishedState = message;        // remember for reconnects
+    lastPublishedState = message; // remember for reconnects
     mqttClient.publish(topic_state.c_str(), message.c_str(), true);
     publishStatus();
 }
 
 void SplitFlapMqtt::publishStatus() {
-    if (!display || !mqttClient.connected()) {
+    if (! display || ! mqttClient.connected()) {
         return;
     }
     // Additive JSON status topic: current message + display size (module
@@ -180,11 +177,8 @@ void SplitFlapMqtt::publishStatus() {
     // masterGroupModuleCounts + local display), which is the physical display
     // width a message spans. getTotalModuleCount() degenerates to the local
     // count in single-group mode, so one call is correct in both modes.
-    int moduleCount = (espNow != nullptr) ? espNow->getTotalModuleCount()
-                                          : display->getNumModules();
-    std::string payload = buildStatusPayload(
-        lastPublishedState.c_str(), moduleCount
-    );
+    int moduleCount = (espNow != nullptr) ? espNow->getTotalModuleCount() : display->getNumModules();
+    std::string payload = buildStatusPayload(lastPublishedState.c_str(), moduleCount);
     mqttClient.publish(topic_status.c_str(), payload.c_str(), true);
 }
 

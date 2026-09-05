@@ -248,15 +248,9 @@ JsonDocument JsonSettings::toJson() {
         switch (setting.type) {
             case JsonSettingType::JST_STR:
             case JsonSettingType::JST_INT_VECTOR:
-            case JsonSettingType::JST_INT_MATRIX:
-                settings[key] = getPrefString(key.c_str(), setting.strDefault);
-                break;
-            case JsonSettingType::JST_INT:
-                settings[key] = getPrefInt(key.c_str(), setting.intDefault);
-                break;
-            case JsonSettingType::JST_FLOAT:
-                settings[key] = getPrefFloat(key.c_str(), setting.floatDefault);
-                break;
+            case JsonSettingType::JST_INT_MATRIX: settings[key] = getPrefString(key.c_str(), setting.strDefault); break;
+            case JsonSettingType::JST_INT: settings[key] = getPrefInt(key.c_str(), setting.intDefault); break;
+            case JsonSettingType::JST_FLOAT: settings[key] = getPrefFloat(key.c_str(), setting.floatDefault); break;
         }
     }
 
@@ -298,15 +292,9 @@ bool JsonSettings::fromJson(JsonDocument settings) {
         switch (it->second.type) {
             case JsonSettingType::JST_INT_VECTOR:
             case JsonSettingType::JST_INT_MATRIX:
-            case JsonSettingType::JST_STR:
-                putPrefString(key, kv.value().as<String>());
-                break;
-            case JsonSettingType::JST_INT:
-                putPrefInt(key, kv.value().as<int>());
-                break;
-            case JsonSettingType::JST_FLOAT:
-                putPrefFloat(key, kv.value().as<float>());
-                break;
+            case JsonSettingType::JST_STR: putPrefString(key, kv.value().as<String>()); break;
+            case JsonSettingType::JST_INT: putPrefInt(key, kv.value().as<int>()); break;
+            case JsonSettingType::JST_FLOAT: putPrefFloat(key, kv.value().as<float>()); break;
         }
     }
 
