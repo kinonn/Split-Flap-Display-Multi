@@ -136,6 +136,35 @@ int main() {
         CHECK(g_publishCalls >= 1);     // state topic still published
     }
 
+    // RED for issue #21 (audit): connect() must register a retained
+    // "offline" Last Will on the availability topic. Without it the broker
+    // keeps the retained "online" after a crash/power loss and Home
+    // Assistant shows the entities available forever.
+    {
+        // Anonymous branch (mqtt_user empty).
+        JsonSettings settings("mqttwilltest", testSchema());
+        WiFiClient wifiClient;
+        SplitFlapMqtt mqtt(settings, wifiClient);
+        mqtt.setup(); // real production code path; connect itself records will
+
+        CHECK(g_lastClient->willTopic() == "splitflap/splitflap/availability");
+        CHECK(g_lastClient->willMessage() == "offline");
+        CHECK(g_lastClient->willRetain() == true);
+    }
+    {
+        // Authenticated branch.
+        JsonSettings settings("mqttwilltest", testSchema());
+        settings.putString("mqtt_user", "user");
+        settings.putString("mqtt_pass", "pass");
+        WiFiClient wifiClient;
+        SplitFlapMqtt mqtt(settings, wifiClient);
+        mqtt.setup();
+
+        CHECK(g_lastClient->willTopic() == "splitflap/splitflap/availability");
+        CHECK(g_lastClient->willMessage() == "offline");
+        CHECK(g_lastClient->willRetain() == true);
+    }
+
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

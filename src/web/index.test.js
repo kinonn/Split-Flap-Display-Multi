@@ -584,7 +584,19 @@ const createPageData = (type = "Settings") => {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ mode: this.settings.mode }),
-            });
+            })
+                .then((res) => {
+                    if (!res.ok) {
+                        throw new Error("Failed to update mode.");
+                    }
+                    if (this.settings.mode !== 0) {
+                        this.showDialog(
+                            "Mode updated successfully.",
+                            "success",
+                        );
+                    }
+                })
+                .catch((err) => this.showDialog(err.message, "error"));
 
             if (this.settings.mode === 0) {
                 fetch("/text", {
@@ -602,8 +614,6 @@ const createPageData = (type = "Settings") => {
                     .then((res) => res.json())
                     .then((res) => this.showDialog(res.message, res.type))
                     .catch((err) => this.showDialog(err.message, "error"));
-            } else {
-                this.showDialog("Mode updated successfully.", "success");
             }
         },
 
@@ -1518,14 +1528,38 @@ describe("Page Component - Update Display", () => {
         expect(page.dialog.type).toBe("error");
     });
 
-    it("should post mode update for non-zero modes", () => {
+    it("should post mode update for non-zero modes", async () => {
         page.settings.mode = 1;
+        global.fetch.mockResolvedValueOnce({ ok: true });
         page.updateDisplay();
+        await new Promise((resolve) => setTimeout(resolve, 0));
         expect(global.fetch).toHaveBeenCalledWith("/settings", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ mode: 1 }),
         });
+        expect(page.dialog.show).toBe(true);
+        expect(page.dialog.type).toBe("success");
+    });
+
+    it("should show error dialog when mode update POST rejects", async () => {
+        page.settings.mode = 1;
+        global.fetch.mockRejectedValueOnce(new Error("Network error"));
+        page.updateDisplay();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(page.dialog.show).toBe(true);
+        expect(page.dialog.type).toBe("error");
+        expect(page.dialog.message).toBe("Network error");
+    });
+
+    it("should show error dialog when mode update responds non-ok", async () => {
+        page.settings.mode = 1;
+        global.fetch.mockResolvedValueOnce({ ok: false });
+        page.updateDisplay();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(page.dialog.show).toBe(true);
+        expect(page.dialog.type).toBe("error");
+        expect(page.dialog.message).toBe("Failed to update mode.");
     });
 });
 

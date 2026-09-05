@@ -6,7 +6,7 @@
 // Includes the REAL production header; no re-implementation.
 //
 // Build & run (no Arduino required):
-//   g++ -std=c++17 -Wall -Wextra -pthread test/pending_actions_test.cpp -o
+//   g++ -std=c++17 -Wall -Wextra -pthread -I src test/pending_actions_test.cpp -o
 //   /tmp/pending_test && /tmp/pending_test
 
 #include "PendingActions.h"

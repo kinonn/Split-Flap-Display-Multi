@@ -47,7 +47,7 @@ def gzip_webfiles(source, target, env):
         files_to_gzip_and_copy.extend(glob.glob(os.path.join(web_dir_path, '*.' + extension)))
 
     all_files = glob.glob(os.path.join(web_dir_path, '*.*'))
-    files_to_copy = list(set(all_files) - set(files_to_only_gzip))
+    files_to_copy = sorted(set(all_files) - set(files_to_only_gzip))
 
     for file in files_to_copy:
         print('GZIP: Copying file: ' + file + ' to the data directory')
@@ -56,7 +56,7 @@ def gzip_webfiles(source, target, env):
     # Compress and move the files
     was_error = False
     try:
-        for source_file_path in list(set(files_to_only_gzip) | set(files_to_gzip_and_copy)):
+        for source_file_path in sorted(set(files_to_only_gzip) | set(files_to_gzip_and_copy)):
             base_file_path = source_file_path
             target_file_path = os.path.join(data_dir_path, os.path.basename(base_file_path) + '.gz')
             print('GZIP: Compressed ' + target_file_path)

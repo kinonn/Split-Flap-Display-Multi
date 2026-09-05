@@ -575,7 +575,19 @@ document.addEventListener("alpine:init", () => {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ mode: this.settings.mode }),
-            });
+            })
+                .then((res) => {
+                    if (!res.ok) {
+                        throw new Error("Failed to update mode.");
+                    }
+                    if (this.settings.mode !== 0) {
+                        this.showDialog(
+                            "Mode updated successfully.",
+                            "success",
+                        );
+                    }
+                })
+                .catch((err) => this.showDialog(err.message, "error"));
 
             if (this.settings.mode === 0) {
                 fetch("/text", {
@@ -593,8 +605,6 @@ document.addEventListener("alpine:init", () => {
                     .then((res) => res.json())
                     .then((res) => this.showDialog(res.message, res.type))
                     .catch((err) => this.showDialog(err.message, "error"));
-            } else {
-                this.showDialog("Mode updated successfully.", "success");
             }
         },
 
