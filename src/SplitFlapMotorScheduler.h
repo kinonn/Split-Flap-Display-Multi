@@ -25,8 +25,7 @@ class SplitFlapMotorScheduler {
     static const int kMaxModules = 8; // must match MAX_MODULES in SplitFlapDisplay.h
 
     SplitFlapMotorScheduler(int numModules, int maxConcurrent)
-        : numModules_(numModules),
-          maxConcurrent_(maxConcurrent < 0 ? -1 : (maxConcurrent < 1 ? 1 : maxConcurrent)),
+        : numModules_(numModules), maxConcurrent_(maxConcurrent < 0 ? -1 : (maxConcurrent < 1 ? 1 : maxConcurrent)),
           activeCount_(0) {
         for (int i = 0; i < kMaxModules; i++) {
             running_[i] = false;
@@ -38,7 +37,7 @@ class SplitFlapMotorScheduler {
             return false;
         }
         if (running_[i]) {
-            return true; // already has a slot
+            return true;  // already has a slot
         }
         if (maxConcurrent_ >= 0 && activeCount_ >= maxConcurrent_) {
             return false; // cap reached — caller retries on a later tick
@@ -49,7 +48,7 @@ class SplitFlapMotorScheduler {
     }
 
     void finish(int i) {
-        if (i < 0 || i >= kMaxModules || i >= numModules_ || !running_[i]) {
+        if (i < 0 || i >= kMaxModules || i >= numModules_ || ! running_[i]) {
             return;
         }
         running_[i] = false;
@@ -58,9 +57,7 @@ class SplitFlapMotorScheduler {
         }
     }
 
-    bool isRunning(int i) const {
-        return i >= 0 && i < numModules_ && i < kMaxModules && running_[i];
-    }
+    bool isRunning(int i) const { return i >= 0 && i < numModules_ && i < kMaxModules && running_[i]; }
 
     int activeCount() const { return activeCount_; }
     int numModules() const { return numModules_; }

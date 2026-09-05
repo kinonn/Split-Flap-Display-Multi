@@ -8,7 +8,10 @@ class SplitFlapModule {
     // Constructor declarationS
     SplitFlapModule(); // default constructor required to allocate memory for
     // SplitFlapDisplay class
-    SplitFlapModule(uint8_t I2Caddress, int stepsPerFullRotation, int stepOffset, int magnetPos, int charSetSize, const int charOffsets[] = nullptr);
+    SplitFlapModule(
+        uint8_t I2Caddress, int stepsPerFullRotation, int stepOffset, int magnetPos, int charSetSize,
+        const int charOffsets[] = nullptr
+    );
 
     void init();
     void updateOffsets(const int newCharOffsets[], int newMagnetOffset);
