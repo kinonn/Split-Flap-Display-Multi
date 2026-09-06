@@ -45,6 +45,20 @@ class SplitFlapDisplay {
     int getCharsetSize() const { return charSetSize; }
     void setMqtt(SplitFlapMqtt *mqttHandler);
 
+    // Calibration support: volatile RAM-only nudge for Phase-2 dry runs (no
+    // NVS write). charIndex < 0 nudges the coarse module offset, otherwise
+    // the per-character offset at that drum index. Applies to the live
+    // modules immediately and re-homes only the touched module. A later
+    // reloadOffsets() (which re-reads NVS) reverts the preview.
+    // Returns false when module/charIndex are out of range.
+    bool previewNudgeLocal(int module, int charIndex, int delta);
+
+    // Live calibration values (including uncommitted previews) for the
+    // calibration status API.
+    int getLiveDisplayOffset() const { return displayOffset; }
+    int getLiveModuleOffset(int module) const;
+    int getLiveCharOffset(int module, int charIndex) const;
+
   private:
     JsonSettings &settings;
 

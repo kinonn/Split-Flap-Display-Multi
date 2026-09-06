@@ -4,4 +4,7 @@
 .vscode
 node_modules/
 build/web/*
+tools/calib/.venv/
+tools/calib-agent/app/.venv/
+__pycache__/
 .idea
