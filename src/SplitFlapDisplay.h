@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CalibrationTriggers.h"
 #include "JsonSettings.h"
 #include "SplitFlapModule.h"
 
@@ -49,6 +50,10 @@ class SplitFlapDisplay {
 
     bool allStepsDone(const int stepsRemaining[], int size);
     void stopMotors();
+
+    // Current live calibration values as a snapshot for change detection in
+    // reloadOffsets().
+    CalibrationSnapshot liveCalibration() const;
 
     // Split a string into chunks of <= numModules chars, breaking only at word
     // boundaries. A word longer than numModules is split mid-word (no other

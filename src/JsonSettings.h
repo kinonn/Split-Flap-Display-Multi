@@ -25,6 +25,12 @@ class JsonSettings {
     std::vector<int> getIntVector(const char *key);
     std::vector<std::vector<int>> getIntMatrix(const char *key);
 
+    // Pure CSV parsing shared with the web handler's change detection, so the
+    // trigger comparison uses the exact grammar the getters do (whitespace
+    // skipped, junk skipped, trailing separators ignored — see JsonSettings.cpp).
+    static std::vector<int> parseIntVector(const String &csv);
+    static std::vector<std::vector<int>> parseIntMatrix(const String &csv);
+
     void putString(const char *key, String value);
     void putInt(const char *key, int value);
     void putFloat(const char *key, float value);
