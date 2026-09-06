@@ -348,7 +348,7 @@ void SplitFlapWebServer::startWebServer() {
                 settings.getIntVector("moduleAddresses")) {
             hardwareChanged = true;
         }
-        if ((json["maxVel"].is<float>() || json["maxVel"].is<int>()) &&
+        if ((json["maxVel"].is<float>() || json["maxVel"].is<int>() || json["maxVel"].is<String>()) &&
             json["maxVel"].as<float>() != settings.getFloat("maxVel")) {
             hardwareChanged = true;
         }
