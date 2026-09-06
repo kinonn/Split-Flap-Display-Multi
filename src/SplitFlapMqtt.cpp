@@ -1,5 +1,6 @@
 #include "SplitFlapMqtt.h"
 
+#include "CalibApi.h"
 #include "StatusPayload.h"
 
 #include <WiFi.h>
@@ -59,6 +60,13 @@ void SplitFlapMqtt::processPendingMessage() {
     // trigger one additional pass, never re-enter this one.
     pendingMessage = false;
     if (! display) {
+        return;
+    }
+
+    // Calibration hold owns the display: drop staged MQTT text instead of
+    // fighting the agent's show frames.
+    if (settings.getInt("mode") == CALIB_HOLD_MODE) {
+        pendingText = "";
         return;
     }
 

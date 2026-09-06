@@ -614,3 +614,43 @@ void SplitFlapDisplay::stopMotors() {
 void SplitFlapDisplay::setMqtt(SplitFlapMqtt *mqttHandler) {
     mqtt = mqttHandler;
 }
+
+int SplitFlapDisplay::getLiveModuleOffset(int module) const {
+    if (module < 0 || module >= numModules) {
+        return 0;
+    }
+    return moduleOffsets[module];
+}
+
+int SplitFlapDisplay::getLiveCharOffset(int module, int charIndex) const {
+    if (module < 0 || module >= numModules || charIndex < 0 || charIndex >= 48) {
+        return 0;
+    }
+    return charOffsets[module][charIndex];
+}
+
+bool SplitFlapDisplay::previewNudgeLocal(int module, int charIndex, int delta) {
+    if (module < 0 || module >= numModules || delta == 0) {
+        return false;
+    }
+    if (charIndex >= charSetSize) {
+        return false;
+    }
+    if (charIndex < 0) {
+        moduleOffsets[module] += delta;
+    } else {
+        charOffsets[module][charIndex] = constrain(charOffsets[module][charIndex] + delta, -32, 32);
+    }
+
+    int newMagnetOffset = magnetPosition + moduleOffsets[module] + displayOffset;
+    int rowCopy[48];
+    for (int c = 0; c < 48; c++) {
+        rowCopy[c] = charOffsets[module][c];
+    }
+    modules[module].updateOffsets(rowCopy, newMagnetOffset);
+
+    bool affectedFlags[MAX_MODULES] = {};
+    affectedFlags[module] = true;
+    homeAffectedModules(affectedFlags);
+    return true;
+}

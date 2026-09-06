@@ -1,5 +1,6 @@
 #include "SplitFlapEspNow.h"
 
+#include "CalibApi.h"
 #include "CsvUtils.h"
 
 #include <WiFi.h>
@@ -101,6 +102,12 @@ void SplitFlapEspNow::loop() {
     int moduleCount = constrain((int) packet.moduleCount, 1, MAX_MODULES);
     packet.text[moduleCount] = '\0';
     String text = String(packet.text);
+
+    // Calibration hold owns the display: drop remote text instead of
+    // fighting the agent's show frames.
+    if (settings.getInt("mode") == CALIB_HOLD_MODE) {
+        return;
+    }
 
     if (text == lastRemoteText) {
         return;
