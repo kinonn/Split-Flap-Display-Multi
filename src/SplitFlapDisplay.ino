@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <WiFiClient.h>
+#include <string>
 
 // clang-format off
 JsonSettings settings = JsonSettings("config", {
@@ -194,6 +195,32 @@ void loop() {
         }
     }
 
+    // Calibration mailbox (fleet day one): exact-width shows and volatile
+    // previews run here in the loop task — the single owner of the display.
+    // Show frames at fleet width distribute across ESP-NOW groups via the
+    // master; local-width frames show on the local group only.
+    std::string calibFrame;
+    int calibFrameId = 0;
+    if (webServer.getPendingActions().takeCalibShow(calibFrame, calibFrameId)) {
+        webServer.setCalibBusy(true);
+        String frame = String(calibFrame.c_str());
+        if (splitflapEspNow && isMultiDisplayMasterEnabled() &&
+            frame.length() == (unsigned int) splitflapEspNow->getTotalModuleCount()) {
+            splitflapEspNow->distributeMessage(frame, false);
+        } else {
+            display.writeString(frame, MAX_RPM, false);
+        }
+        webServer.setWrittenString(frame);
+        webServer.setCalibLastFrame(frame, calibFrameId);
+        webServer.setCalibBusy(false);
+    }
+    PendingActions::CalibPreview preview;
+    if (webServer.getPendingActions().takeCalibPreview(preview)) {
+        webServer.setCalibBusy(true);
+        display.previewNudgeLocal(preview.module, preview.charIndex, preview.delta);
+        webServer.setCalibBusy(false);
+    }
+
     if (splitflapEspNow) {
         splitflapEspNow->loop();
     }
@@ -205,7 +232,7 @@ void loop() {
         case 1: multiInputMode(); break;
         case 2: dateMode(); break;
         case 3: timeMode(); break;
-        case 4: break;
+        case 4: break; // calibration hold: agent owns the display via /api/calib/*
         case 5: randomTest(); break;
         case ESP_NOW_REMOTE_MODE: break;
         default: break;

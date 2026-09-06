@@ -1,0 +1,48 @@
+{
+    "format": "splitflap-calib-contract",
+    "contractVersion": 1,
+    "firmware": ">= ai-calibration-apis",
+    "settingsSchemaVersion": 1,
+    "transport": "LAN HTTP, fixed camera framing whole display",
+    "staticPath": "/calib-contract.json",
+    "holdMode": 4,
+    "limits": {
+        "maxModulesPerGroup": 8,
+        "maxGroups": 6,
+        "maxTotalModules": 48,
+        "charOffsetMin": -32,
+        "charOffsetMax": 32,
+        "dwellMsMin": 0,
+        "dwellMsMax": 10000
+    },
+    "charsets": {
+        "37": " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "48": " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789':?!.-/$@#%"
+    },
+    "patterns": {
+        "P0_registration": [
+            "blank (all spaces)",
+            "all H (exposure/ROI)",
+            "index strip ABCDEFGH.../01234567 (camera X to module map, mirror/reorder check, spans all groups left to right)"
+        ],
+        "P1_coarse": [" ", "E", "H", "O", "0", "-"],
+        "P2_fine": "staggered drum-order sweep: module i shows drumOrder[(k+i) % N], k steps in drum order; one photo covers N distinct flaps",
+        "P3_boundaries": "adjacent drum neighbors (A/B, M/N) for double-flap/binding",
+        "P4_repeatability": "home, then same char 3x for lost-step/hall drift"
+    },
+    "notes": [
+        "Drums move forward-only: always step patterns in drum order, never random.",
+        "Show frames are exact-width: length must equal numModules (local) or totalModules (fleet-wide distribute via master). Centering and scroll are forced off.",
+        "Poll GET /api/calib/status until busy==false, wait dwellMs, then shoot. GET /api/calib/frame?frameId=N is ground truth.",
+        "Preview is volatile RAM-only on the controller called (call each group directly for fleets); reload reverts. Persist via POST /api/calib/offsets (scope local or group 2..6 on master).",
+        "Calibration hold (mode 4) suspends date/time/random/scroll/MQTT/ESP-NOW writes; engage on every controller before starting, release when done."
+    ],
+    "endpoints": {
+        "status": "GET /api/calib/status",
+        "hold": "POST /api/calib/hold {active:bool}",
+        "show": "POST /api/calib/show {frame:string, dwellMs?:int}",
+        "frame": "GET /api/calib/frame?frameId=N",
+        "preview": "POST /api/calib/preview {module:int, charIndex:int(-1=coarse), delta:int}",
+        "offsets": "POST /api/calib/offsets {scope:\"local\"|1..6, kind:\"char\"|\"module\"|\"display\", module?, charIndex?, value:int}"
+    }
+}

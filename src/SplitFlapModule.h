@@ -37,6 +37,12 @@ class SplitFlapModule {
     // modes so the two can never drift apart.
     static const char StandardChars[37];
 
+    // Drum order for a charset size (37 or 48; anything else selects 37).
+    // Returns a pointer to the canonical table and writes its length to
+    // outLen. Used by the calibration status API so the AI agent never
+    // hardcodes glyph order.
+    static const char *drumOrder(int charsetSize, int &outLen);
+
   private:
     uint8_t address;             // i2c address of module
     int position;                // character drum position

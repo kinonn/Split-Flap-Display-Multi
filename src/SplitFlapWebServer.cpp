@@ -1,8 +1,10 @@
 #include "SplitFlapWebServer.h"
 
+#include "CalibApi.h"
 #include "CalibrationTriggers.h"
 #include "CsvUtils.h"
 #include "SplitFlapEspNow.h"
+#include "SplitFlapModule.h"
 
 #include <ArduinoJson.h>
 #include <AsyncJson.h>
@@ -238,6 +240,354 @@ void SplitFlapWebServer::startMDNS() {
     }
 
     Serial.println("mDNS: http://" + settings.getString("mdns") + ".local");
+}
+
+String SplitFlapWebServer::getCalibLastFrame() {
+    std::lock_guard<std::mutex> lock(calibMutex_);
+    return calibLastFrame_;
+}
+
+void SplitFlapWebServer::setCalibLastFrame(const String &frame, int frameId) {
+    std::lock_guard<std::mutex> lock(calibMutex_);
+    calibLastFrame_ = frame;
+    calibLastFrameId_ = frameId;
+}
+
+int SplitFlapWebServer::getCalibLastFrameId() {
+    std::lock_guard<std::mutex> lock(calibMutex_);
+    return calibLastFrameId_;
+}
+
+int SplitFlapWebServer::getCalibTotalModules() {
+    if (espNow && isMultiDisplayMasterEnabled()) {
+        return espNow->getTotalModuleCount();
+    }
+    return display.getNumModules();
+}
+
+void SplitFlapWebServer::registerCalibRoutes() {
+    // Read-only status for the vision agent: fleet geometry, drum order,
+    // live offsets (including uncommitted previews) and show progress.
+    server.on("/api/calib/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        JsonDocument response;
+        int charset = display.getCharsetSize();
+        int drumLen = 0;
+        const char *drum = SplitFlapModule::drumOrder(charset, drumLen);
+        String drumStr = "";
+        for (int i = 0; i < drumLen; i++) {
+            drumStr += drum[i];
+        }
+
+        int localModules = display.getNumModules();
+        response["contractVersion"] = CALIB_CONTRACT_VERSION;
+        response["schemaVersion"] = SETTINGS_SCHEMA_VERSION;
+        response["mode"] = settings.getInt("mode");
+        response["holdActive"] = settings.getInt("mode") == CALIB_HOLD_MODE;
+        response["busy"] = getCalibBusy();
+        response["frameId"] = getCalibFrameId();
+        {
+            std::lock_guard<std::mutex> lock(calibMutex_);
+            response["lastFrameId"] = calibLastFrameId_;
+            response["lastFrame"] = calibLastFrame_;
+        }
+        response["numModules"] = localModules;
+        response["totalModules"] = getCalibTotalModules();
+        response["groupCount"] = espNow ? espNow->getTotalModuleCount() / localModules : 1;
+        response["charset"] = charset;
+        response["drumOrder"] = drumStr;
+        response["displayOffset"] = display.getLiveDisplayOffset();
+        JsonArray modOffs = response["moduleOffsets"].to<JsonArray>();
+        for (int i = 0; i < localModules; i++) {
+            modOffs.add(display.getLiveModuleOffset(i));
+        }
+        response["previewNote"] = "live offsets include uncommitted previews; reload reverts";
+        request->send(200, "application/json", response.as<String>());
+    });
+
+    // Enter/leave calibration hold (mode 4): suspends date/time/random/scroll
+    // writes so the agent owns the display. Fleet: call on each controller.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/hold",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        if (! json["active"].is<bool>()) {
+            JsonDocument response;
+            response["message"] = "Invalid active flag (expected boolean)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int previousMode = settings.getInt("mode");
+        bool active = json["active"].as<bool>();
+        settings.putInt("mode", active ? CALIB_HOLD_MODE : 0);
+        JsonDocument response;
+        response["message"] = active ? "Calibration hold engaged" : "Calibration hold released";
+        response["type"] = "success";
+        response["holdActive"] = active;
+        response["previousMode"] = previousMode;
+        request->send(200, "application/json", response.as<String>());
+    }
+    ));
+
+    // Deterministic exact-width show: no centering, no scroll. On the master,
+    // a fleet-width frame (length == total modules) is distributed across all
+    // ESP-NOW groups left-to-right; a local-width frame shows locally only.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/show",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        if (! json["frame"].is<String>()) {
+            response["message"] = "Invalid frame (expected string)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        String frame = json["frame"].as<String>();
+        int dwellMs = json["dwellMs"].is<int>() ? json["dwellMs"].as<int>() : 800;
+        if (dwellMs < 0 || dwellMs > 10000) {
+            response["message"] = "Invalid dwellMs (expected 0..10000)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int localModules = display.getNumModules();
+        int totalModules = getCalibTotalModules();
+        bool fleetFrame = (totalModules != localModules && frame.length() == (unsigned int) totalModules);
+        if (! fleetFrame && frame.length() != (unsigned int) localModules) {
+            response["message"] = "Frame width must equal numModules (" + String(localModules) + ")" +
+                (totalModules != localModules ? " or totalModules (" + String(totalModules) + ")" : "");
+            response["type"] = "error";
+            response["numModules"] = localModules;
+            response["totalModules"] = totalModules;
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (getCalibBusy() || pendingActions_.hasCalibShowPending()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        int frameId = nextCalibFrameId();
+        pendingActions_.requestCalibShow(frame.c_str(), frameId);
+        response["message"] = "Show queued";
+        response["type"] = "success";
+        response["frameId"] = frameId;
+        response["fleetFrame"] = fleetFrame;
+        response["dwellMs"] = dwellMs;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Ground truth for a shown frame so the camera has expected glyphs.
+    server.on("/api/calib/frame", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        JsonDocument response;
+        if (! request->hasParam("frameId")) {
+            response["message"] = "Missing frameId query parameter";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int wanted = request->getParam("frameId")->value().toInt();
+        std::lock_guard<std::mutex> lock(calibMutex_);
+        if (wanted != calibLastFrameId_ && wanted != calibFrameId_.load()) {
+            response["message"] = "Unknown frameId";
+            response["type"] = "error";
+            return request->send(404, "application/json", response.as<String>());
+        }
+        response["frameId"] = wanted;
+        response["frame"] = (wanted == calibLastFrameId_) ? calibLastFrame_ : "";
+        response["busy"] = calibBusy_.load();
+        response["settled"] = (wanted == calibLastFrameId_) && ! calibBusy_.load();
+        request->send(200, "application/json", response.as<String>());
+    });
+
+    // Volatile preview nudge (Phase 2 dry run): RAM-only, single local
+    // module, no NVS write. For fleets, call each controller directly.
+    // charIndex -1 = coarse module offset, else drum index 0..charset-1.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/preview",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        int module = json["module"].is<int>() ? json["module"].as<int>() : -1;
+        int charIndex = json["charIndex"].is<int>() ? json["charIndex"].as<int>() : -1;
+        int delta = json["delta"].is<int>() ? json["delta"].as<int>() : 0;
+        int localModules = display.getNumModules();
+        int charset = display.getCharsetSize();
+        if (module < 0 || module >= localModules) {
+            response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (charIndex < -1 || charIndex >= charset) {
+            response["message"] = "Invalid charIndex (expected -1.." + String(charset - 1) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (delta == 0 || delta < -32 || delta > 32) {
+            response["message"] = "Invalid delta (expected -32..32, non-zero)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (getCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        PendingActions::CalibPreview preview;
+        preview.module = module;
+        preview.charIndex = charIndex;
+        preview.delta = delta;
+        pendingActions_.requestCalibPreview(preview);
+        response["message"] = "Preview queued (volatile, reload reverts)";
+        response["type"] = "success";
+        response["module"] = module;
+        response["charIndex"] = charIndex;
+        response["delta"] = delta;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Scoped persist (Phase 3): writes ONE offset cell to NVS, then queues
+    // the existing reload/push paths. scope 1 (or "local") = local group,
+    // 2..6 = remote group on the master.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/offsets",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        int group = 1;
+        if (json["scope"].is<int>()) {
+            group = json["scope"].as<int>();
+        } else if (json["scope"].is<String>()) {
+            String scope = json["scope"].as<String>();
+            scope.toLowerCase();
+            group = (scope == "local" || scope == "1") ? 1 : scope.toInt();
+        } else if (! json["scope"].isNull()) {
+            response["message"] = "Invalid scope (expected \"local\" or group 1..6)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int groupCount = isMultiDisplayMasterEnabled() ? settings.getInt("masterGroupCount") : 1;
+        groupCount = constrain(groupCount, 1, CALIB_MAX_GROUPS);
+        if (group < 1 || group > groupCount) {
+            response["message"] = "Invalid scope (expected \"local\" or group 1.." + String(groupCount) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (! json["kind"].is<String>()) {
+            response["message"] = "Invalid kind (expected char, module or display)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        String kind = json["kind"].as<String>();
+        kind.toLowerCase();
+        bool isLocal = (group == 1);
+        int localModules = display.getNumModules();
+        int charset = display.getCharsetSize();
+
+        if (kind == "display") {
+            if (! json["value"].is<int>()) {
+                response["message"] = "Invalid value for display offset";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int value = json["value"].as<int>();
+            if (isLocal) {
+                settings.putInt("displayOffset", value);
+                pendingActions_.requestReloadOffsets();
+                if (! isMultiDisplayMasterEnabled() && espNow) {
+                    pendingActions_.requestReportOffsets();
+                }
+            } else {
+                auto dispOffs = settings.getIntVector("rDispOffs");
+                while ((int) dispOffs.size() < group - 1) dispOffs.push_back(0);
+                dispOffs[group - 2] = value;
+                settings.putIntVector("rDispOffs", dispOffs);
+                pendingActions_.requestPushOffsets();
+            }
+        } else if (kind == "module") {
+            int module = json["module"].is<int>() ? json["module"].as<int>() : -1;
+            if (! json["value"].is<int>() || module < 0 || module >= CALIB_MAX_MODULES) {
+                response["message"] = "Invalid module/value for module offset";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int value = json["value"].as<int>();
+            if (isLocal) {
+                if (module >= localModules) {
+                    response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
+                    response["type"] = "error";
+                    return request->send(400, "application/json", response.as<String>());
+                }
+                auto modOffs = settings.getIntVector("moduleOffsets");
+                while ((int) modOffs.size() < localModules) modOffs.push_back(0);
+                modOffs[module] = value;
+                settings.putIntVector("moduleOffsets", modOffs);
+                pendingActions_.requestReloadOffsets();
+                if (! isMultiDisplayMasterEnabled() && espNow) {
+                    pendingActions_.requestReportOffsets();
+                }
+            } else {
+                auto modOffs = settings.getIntMatrix("rModOffs");
+                int row = group - 2;
+                while ((int) modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
+                if ((int) modOffs[row].size() < 8) modOffs[row].resize(8, 0);
+                modOffs[row][module] = value;
+                settings.putIntMatrix("rModOffs", modOffs);
+                pendingActions_.requestPushOffsets();
+            }
+        } else if (kind == "char") {
+            int module = json["module"].is<int>() ? json["module"].as<int>() : -1;
+            int charIndex = json["charIndex"].is<int>() ? json["charIndex"].as<int>() : -1;
+            if (! json["value"].is<int>() || module < 0 || module >= CALIB_MAX_MODULES || charIndex < 0 ||
+                charIndex >= charset) {
+                response["message"] = "Invalid module/charIndex/value for char offset";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int value = constrain(json["value"].as<int>(), CALIB_CHAR_OFFSET_MIN, CALIB_CHAR_OFFSET_MAX);
+            if (isLocal) {
+                if (module >= localModules) {
+                    response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
+                    response["type"] = "error";
+                    return request->send(400, "application/json", response.as<String>());
+                }
+                auto chrOffs = settings.getIntMatrix("charOffsets");
+                while ((int) chrOffs.size() < localModules) chrOffs.push_back(std::vector<int>(48, 0));
+                if ((int) chrOffs[module].size() < 48) chrOffs[module].resize(48, 0);
+                chrOffs[module][charIndex] = value;
+                settings.putIntMatrix("charOffsets", chrOffs);
+                pendingActions_.requestReloadOffsets();
+                if (! isMultiDisplayMasterEnabled() && espNow) {
+                    pendingActions_.requestReportOffsets();
+                }
+            } else {
+                String key = "rChrOff" + String(group - 2);
+                auto chrOffs = settings.getIntMatrix(key.c_str());
+                while ((int) chrOffs.size() <= module) chrOffs.push_back(std::vector<int>(48, 0));
+                if ((int) chrOffs[module].size() < 48) chrOffs[module].resize(48, 0);
+                chrOffs[module][charIndex] = value;
+                settings.putIntMatrix(key.c_str(), chrOffs);
+                pendingActions_.requestPushOffsets();
+            }
+        } else {
+            response["message"] = "Invalid kind (expected char, module or display)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+
+        response["message"] = "Offset saved, applying to display";
+        response["type"] = "success";
+        response["scope"] = group;
+        response["kind"] = kind;
+        request->send(200, "application/json", response.as<String>());
+    }
+    ));
 }
 
 void SplitFlapWebServer::startWebServer() {
@@ -538,6 +888,8 @@ void SplitFlapWebServer::startWebServer() {
     }));
 
     server.onNotFound(fourOhFour);
+
+    registerCalibRoutes();
 
     server.begin();
 }
