@@ -220,7 +220,7 @@ def save_template_bank(bank: dict[str, np.ndarray], manifest: dict, directory: s
         files[glyph] = filename
     manifest = dict(manifest)
     manifest["glyphs"] = files
-    with open(os.path.join(directory, "manifest.json"), "w") as fh:
+    with open(os.path.join(directory, "manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
 
 
@@ -229,7 +229,7 @@ def load_template_bank(directory: str) -> tuple[dict[str, np.ndarray], dict]:
     import json
     import os
 
-    with open(os.path.join(directory, "manifest.json")) as fh:
+    with open(os.path.join(directory, "manifest.json"), encoding="utf-8") as fh:
         manifest = json.load(fh)
     bank = {}
     for glyph, filename in manifest.get("glyphs", {}).items():
