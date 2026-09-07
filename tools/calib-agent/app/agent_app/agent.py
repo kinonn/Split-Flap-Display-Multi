@@ -4,9 +4,14 @@ The VLM proposes; the harness disposes. Every display-mutating tool runs
 through checks the model cannot talk its way around:
 
 - P0 registration (index strip shown + captured) before any tuning.
-- persist needs a prior preview+photo cycle for the same local cell
-  (remote groups use persist-verify-revert; the harness auto-captures the
-  verify photo and scores after every persist).
+  The tag alone proves nothing: P0 completes only on a verified capture
+  of the shown index frame whose crops pass the deterministic P0 guards.
+- persist needs a prior preview+photo cycle for the same local cell;
+  remote/display persists need a prior photo cycle too. Captures only
+  feed the template bank when the claimed frame exactly matches the
+  shown frame. The harness auto-captures the verify photo and scores
+  after every persist.
+- Hold is harness-owned: the model may engage it, never release it.
 - Budgets: steps, previews, persists, full sweeps.
 - finish(converged) is validated by the classical acceptance gate
   (seam scores + identity on E/H); failure sends the VLM back to work.
@@ -44,7 +49,9 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "hold",
-        "description": "Engage (true) or release (false) calibration hold on the display.",
+        "description": "Engage calibration hold (true) on the display. "
+                       "Release is harness-owned and automatic at run end; "
+                       "passing false is rejected.",
         "parameters": {"type": "object", "properties": {
             "active": {"type": "boolean"}},
             "required": ["active"]}}},
@@ -60,7 +67,8 @@ TOOL_SCHEMAS = [
         "name": "capture",
         "description": "Photograph the display now. Returns per-module seam scores, "
                        "identity outliers vs expected frame, and the photo. "
-                       "Pass the frame string currently shown.",
+                       "Pass the frame string currently shown — it must match "
+                       "exactly, or the capture is unverified (no identity/bank use).",
         "parameters": {"type": "object", "properties": {
             "expected": {"type": "string", "description": "frame assumed on display"},
             "tag": {"type": "string"}},
@@ -78,7 +86,8 @@ TOOL_SCHEMAS = [
         "name": "persist",
         "description": "Save ONE offset cell (scope local or group 2..6 on master; "
                        "kind char|module|display; value absolute). Local cells need "
-                       "a prior preview cycle. Auto re-photographs and scores.",
+                       "a prior preview cycle; remote/display cells need a prior "
+                       "capture. Auto re-photographs and scores.",
         "parameters": {"type": "object", "properties": {
             "scope": {}, "kind": {"type": "string"}, "value": {"type": "integer"},
             "module": {"type": "integer"}, "charIndex": {"type": "integer"}},
@@ -166,6 +175,10 @@ class Agent:
         self.previewed: set[tuple] = set()
         self.aborted = False
         self.report: dict | None = None
+        # P0 evidence (issue kinonn-bot#29): the tag-marked index show only
+        # *arms* registration; the verified capture below completes it.
+        self._p0_index_frame = ""
+        self.captures = 0
 
     def event(self, kind: str, text: str, photo: str | None = None,
               detail: dict | None = None):
@@ -194,7 +207,14 @@ class Agent:
                 "moduleOffsets": st.get("moduleOffsets")}
 
     def tool_hold(self, args: dict) -> dict:
-        return self.calib.display.hold(bool(args["active"]))
+        """Hold is harness-owned (issue kinonn-bot#31): the run engages it
+        at start and _done() releases it. The model may (re-)engage, but a
+        mid-run release would let MQTT/text/date writers fight the agent's
+        show frames, so active=false is refused."""
+        if not bool(args["active"]):
+            raise CalibError("hold is harness-owned during a run; "
+                             "it releases automatically at run end")
+        return self.calib.display.hold(True)
 
     # -- abort-responsive display helpers (issue kinonn-bot#26) -------------------
     def _wait_settled(self, timeout_s: float):
@@ -232,13 +252,33 @@ class Agent:
                    detail={"frame": frame, "frameId": info["frameId"],
                            "fleetFrame": info.get("fleetFrame", False)})
         if "index" in tag:
-            self.p0_done = True
+            # Arm P0 only (issue kinonn-bot#29): the tag marks which show
+            # is the index strip, but p0_done flips solely on a verified
+            # capture of this exact frame in tool_capture.
+            self._p0_index_frame = frame
         return info
+
+    @staticmethod
+    def _p0_crops_ok(crops, total: int) -> bool:
+        """Deterministic P0 guards (mirror Calibrator._p0_register): the
+        right crop count with distinguishable modules."""
+        if len(crops) != total or any(c.size == 0 for c in crops):
+            return False
+        try:
+            means = [float(c.mean()) for c in crops]
+        except Exception:
+            return False
+        return max(means) - min(means) >= 1.0
 
     def tool_capture(self, args: dict) -> dict:
         expected, tag = args["expected"], args.get("tag", f"cap{self.steps}")
         rec = self._photo_record(expected, f"{tag}")
-        matched = len(expected) == len(rec["crops"])
+        self.captures += 1
+        # Verified only when the claimed frame is the shown frame (issue
+        # kinonn-bot#33). Unverified captures still return photo + scores
+        # for transparency, but feed neither identity nor the bank.
+        verified = expected == self.last_frame
+        matched = verified and len(expected) == len(rec["crops"])
         outliers = self._identity_on_crops(rec["crops"], expected, tag) if matched else []
         if matched:
             # Feed the template bank with trusted crops (clean + agreeing),
@@ -250,13 +290,25 @@ class Agent:
                     self.calib.bank_samples.setdefault(expected[i], []).append(crop)
             if self.calib._bootstrap_missing():
                 self.calib._save_bank("bootstrapped")
+        if (not self.p0_done and verified and self._p0_index_frame
+                and expected == self._p0_index_frame
+                and self._p0_crops_ok(rec["crops"],
+                                      getattr(self.calib, "total", len(rec["crops"])))):
+            self.p0_done = True
+            self.event("p0", f"registration verified on {tag!r} "
+                             f"({len(rec['crops'])} modules)")
         self.event("photo", f"{tag}: " + ", ".join(
             f"m{s['module']}={s['verdict']}" for s in rec["scores"]), rec["photo"],
             detail={"frame": expected, "scores": rec["scores"],
-                    "identity_outliers": outliers})
+                    "identity_outliers": outliers, "verified": verified})
         out = {"photo": rec["photo"], "scores": rec["scores"], "_image": rec["image"]}
         if len(expected) == len(rec["crops"]):
             out["identity_outliers"] = outliers
+        out["verified"] = verified
+        if not verified:
+            out["warning"] = (f"expected {expected!r} != shown frame "
+                              f"{self.last_frame!r}; identity/bank skipped — "
+                              "re-capture with the shown frame")
         return out
 
     def _identity_on_crops(self, crops, expected: str, tag: str = "") -> list[int]:
@@ -315,6 +367,12 @@ class Agent:
             ci = -1  # coarse cell: charIndex is meaningless, normalize it
         if group == 1 and kind in ("char", "module") and (group, module, ci) not in self.previewed:
             raise CalibError(f"preview module {module} charIndex {ci} first (with photo)")
+        if (kind == "display" or group != 1) and self.captures == 0:
+            # Remote groups have no preview path and display offsets hit
+            # every module (issue kinonn-bot#30): at minimum demand a prior
+            # photo cycle so the value is grounded in evidence, not blind.
+            raise CalibError("capture the display first: remote/display "
+                             "persists need a prior photo cycle")
         if self.calib.persists >= MAX_PERSISTS:
             raise CalibError("persist budget exhausted")
         if kind == "char":
@@ -331,6 +389,29 @@ class Agent:
         return {"saved": resp, "scores": rec["scores"],
                 "photo": rec["photo"], "_image": rec["image"]}
 
+    def _acceptance_image_sanity(self) -> tuple[bool, str]:
+        """Backstop for issue kinonn-bot#32: the display should currently
+        show the H acceptance frame. Flat/defocused camera frames score
+        `ok` by omission (no seams, consensus abstains, empty bank
+        abstains), so require real glyph signal on every module crop."""
+        try:
+            img = self.calib.camera.capture()
+        except Exception as exc:
+            return False, f"camera capture failed: {exc}"
+        try:
+            gray = vision.to_gray(img)
+            crops = vision.split_crops(gray, self.calib.total)
+        except Exception as exc:
+            return False, f"crop split failed: {exc}"
+        if len(crops) != self.calib.total:
+            return False, (f"got {len(crops)} crops for "
+                           f"{self.calib.total} modules")
+        flat = [i for i, c in enumerate(crops)
+                if float(vision.to_gray(c).std()) < vision.IDENTITY_MIN_STD]
+        if flat:
+            return False, f"modules {flat} look flat/blank"
+        return True, "signal on all modules"
+
     def tool_finish(self, args: dict) -> dict:
         verdict = args["verdict"]
         if verdict == "converged" and self.mode != "full":
@@ -338,10 +419,26 @@ class Agent:
                     "reason": f"{self.mode} mode cannot converge: end with "
                               "finish(needs-human) and your proposal summary."}
         if verdict == "converged":
+            if not self.p0_done:
+                return {"accepted": False,
+                        "reason": "P0 registration incomplete: show + capture "
+                                  "the index strip first. Keep working."}
+            if not self.calib.templates:
+                # An empty bank makes the absolute check abstain (issue
+                # kinonn-bot#32): `converged` by omission, not evidence.
+                return {"accepted": False,
+                        "reason": "no template bank yet (no verified captures "
+                                  "to bootstrap from); converged needs identity "
+                                  "evidence. Keep working."}
             ok, reason = self.calib._acceptance()
             if not ok:
                 return {"accepted": False,
                         "reason": f"harness acceptance failed: {reason}. Keep working."}
+            sane, why = self._acceptance_image_sanity()
+            if not sane:
+                return {"accepted": False,
+                        "reason": f"acceptance photos show no display signal "
+                                  f"({why}). Check camera framing/focus, then continue."}
             return {"accepted": True, "reason": reason}
         return {"accepted": True, "reason": "needs-human accepted"}
 
@@ -366,6 +463,14 @@ class Agent:
         snapshot = calib.display.snapshot()
         with open(os.path.join(calib.photo_dir, "snapshot.json"), "w") as fh:
             json.dump(snapshot, fh)
+        try:
+            # Harness-owned hold (issue kinonn-bot#31): engaged here, only
+            # released in _done(). The VLM may re-engage via the hold tool
+            # but can no longer release it mid-run.
+            calib.display.hold(True)
+        except CalibError as exc:
+            self.event("error", f"hold engage failed: {exc} — "
+                                "ask the model to engage hold before shows")
         messages = [{"role": "system", "content": self.system_prompt},
                     {"role": "user", "content":
                      f"Begin calibration in {self.mode!r} mode. Fleet: {calib.total} modules, "
