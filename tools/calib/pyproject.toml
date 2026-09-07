@@ -8,14 +8,18 @@ dependencies = [
     "requests>=2.31",
     "opencv-python>=4.8",
     "numpy>=1.26",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
 ]
 
 [project.scripts]
 splitflap-calib = "calib.cli:main"
+splitflap-calib-ui = "calib.server:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]

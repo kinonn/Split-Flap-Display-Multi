@@ -28,6 +28,21 @@ uv run splitflap-calib --host splitflap.local --phase 1 --photo-dir ./photos
 uv run splitflap-calib --host splitflap.local --photo-dir ./photos
 ```
 
+## Web UI (same deterministic runner, no LLM)
+
+```sh
+uv run splitflap-calib-ui   # http://127.0.0.1:8001
+```
+
+Configure (display host, camera, phase 1–4, dwell, identity threshold),
+then Start. The UI streams the run log, every camera photo with
+per-module verdict chips (click to inspect vs the expected frame), the
+template bank, and the final `report.json`. Abort and pre-run snapshot
+restore included. State lives in `./calib-ui-data` (`CALIB_DATA`
+overrides it); `CALIB_HOST`/`CALIB_PORT` override the listen address.
+The VLM harness in `../calib-agent/app` is the same idea with an LLM
+driver — the API shape here mirrors it where sensible.
+
 Useful flags: `--camera-index 0`, `--phase {1,2,3,4}` (default `4`),
 `--dwell-ms 800`, `--contract PATH` (override bundled
 `calib/contract.json`), `--timeout-s 60`.

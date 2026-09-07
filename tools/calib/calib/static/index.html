@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Split-Flap Calibration (deterministic)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #141414; color: #eee;
+         margin: 0 auto; max-width: 960px; padding: 16px; }
+  h1 { font-size: 1.4rem; }
+  .card { background: #1f1f1f; border-radius: 10px; padding: 14px; margin: 12px 0; }
+  label { display: block; margin: 8px 0 2px; font-size: .9rem; color: #bbb; }
+  input, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444;
+                  background: #111; color: #eee; box-sizing: border-box; }
+  input[type="checkbox"] { width: auto; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button { padding: 9px 14px; border: 0; border-radius: 6px; margin: 6px 6px 0 0;
+           cursor: pointer; font-weight: 600; }
+  .go { background: #2e7d32; color: #fff; } .stop { background: #b3261e; color: #fff; }
+  .mid { background: #455a64; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  #log { height: 260px; overflow-y: auto; background: #0d0d0d; border-radius: 6px;
+         padding: 8px; font-family: monospace; font-size: .8rem; }
+  #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
+  #log .phase { color: #82b1ff; }
+  #gallery img { max-width: 220px; margin: 4px; border-radius: 6px; border: 1px solid #444;
+                cursor: pointer; }
+  #gallery img:hover { border-color: #888; }
+  .chip { display: inline-block; padding: 3px 9px; margin: 2px; border-radius: 12px;
+          font-size: .8rem; font-family: monospace; }
+  .ok { background: #1b5e20; } .half { background: #e65100; } .double { background: #b71c1c; }
+  .idout { outline: 2px solid #ce93d8; }
+  #detailTemplates img { max-width: 64px; margin: 2px; border-radius: 4px;
+                         border: 1px solid #444; background: #000; }
+  #report { white-space: pre-wrap; font-family: monospace; font-size: .8rem;
+            background: #0d0d0d; border-radius: 6px; padding: 8px; }
+  .hint { color: #999; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Split-Flap Calibration <span class="hint">(deterministic, no LLM)</span></h1>
+
+<div class="card">
+  <h2>1. Configure</h2>
+  <div class="row">
+    <div><label>Display host / IP (master)</label><input id="display_host" /></div>
+    <div><label>Camera index</label><input id="camera_index" type="number" min="0" /></div>
+  </div>
+  <div class="row">
+    <div><label>Phase</label>
+      <select id="phase">
+        <option value="1">1 — read-only proposals (touches nothing)</option>
+        <option value="2">2 — + volatile preview nudges (nothing saved)</option>
+        <option value="3">3 — + persist offsets (no acceptance gate)</option>
+        <option value="4">4 — full run incl. acceptance (default)</option>
+      </select></div>
+    <div><label>Dwell ms (settle wait per frame)</label><input id="dwell_ms" type="number" min="0" max="10000" /></div>
+  </div>
+  <div class="row">
+    <div><label>Settle timeout s</label><input id="timeout_s" type="number" min="1" step="1" /></div>
+    <div><label>Identity threshold (0..1)</label><input id="identity_thresh" type="number" min="0" max="1" step="0.01" /></div>
+  </div>
+  <label><input id="relearn_templates" type="checkbox" /> Relearn template bank from this run (discard golden bank)</label>
+  <div>
+    <button class="mid" onclick="save()">Save</button>
+    <button class="mid" onclick="checkDisplay()">Check display</button>
+    <button class="mid" onclick="checkCamera()">Check camera</button>
+  </div>
+  <p class="hint" id="cfgmsg"></p>
+</div>
+
+<div class="card">
+  <h2>2. Run</h2>
+  <p class="hint">Same state machine as the CLI: P0 register → P1 coarse → P2 fine → P3 boundaries → P4 repeatability → acceptance. Photos land in the run dir with <code>report.json</code>.</p>
+  <div>
+  <button class="go" id="startBtn" onclick="start()">Start calibration</button>
+  <button class="stop" onclick="abort()">Abort</button>
+  <button class="mid" onclick="restore()">Restore pre-run snapshot</button>
+  </div>
+  <p class="hint" id="runmsg"></p>
+</div>
+
+<div class="card"><h2>Log</h2><div id="log"></div></div>
+<div class="card"><h2>Photos (click to inspect vs expected)</h2><div id="gallery"></div></div>
+<div class="card" id="detailCard" style="display:none">
+  <h2>Inspect: <span id="detailTitle"></span></h2>
+  <img id="detailImg" style="max-width:100%; border-radius:6px; border:1px solid #444;" />
+  <p>Expected frame: <code id="detailFrame" style="font-size:1.1rem;"></code></p>
+  <div id="detailChips"></div>
+  <p class="hint">Reference templates for the expected glyphs (golden/bootstrapped bank):</p>
+  <div id="detailTemplates"></div>
+</div>
+<div class="card"><h2>Report</h2><div id="report">–</div></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+async function load() {
+  const c = await api("/api/config");
+  $("display_host").value = c.display_host || "";
+  $("camera_index").value = c.camera_index ?? 0;
+  $("phase").value = String(c.phase ?? 4);
+  $("dwell_ms").value = c.dwell_ms ?? 800;
+  $("timeout_s").value = c.timeout_s ?? 60;
+  $("identity_thresh").value = c.identity_thresh ?? 0.85;
+  $("relearn_templates").checked = !!c.relearn_templates;
+}
+function cfg() {
+  return {
+    display_host: $("display_host").value.trim(),
+    camera_index: Number($("camera_index").value || 0),
+    phase: Number($("phase").value || 4),
+    dwell_ms: Number($("dwell_ms").value || 800),
+    timeout_s: Number($("timeout_s").value || 60),
+    identity_thresh: Number($("identity_thresh").value || 0.85),
+    relearn_templates: $("relearn_templates").checked,
+  };
+}
+async function save() {
+  try {
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfg())});
+    $("cfgmsg").textContent = "Saved.";
+  } catch (e) { $("cfgmsg").textContent = "Save failed: " + e.message; }
+}
+async function checkDisplay() {
+  try {
+    const s = await api("/api/display");
+    $("cfgmsg").textContent = s.reachable
+      ? `Display OK: ${s.totalModules} modules, charset ${s.charset}.`
+      : "Display unreachable: " + s.error;
+  } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
+}
+async function checkCamera() {
+  try {
+    const s = await api("/api/check-camera", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({camera_index: Number($("camera_index").value || 0)})});
+    $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
+                                   : "Camera problem: " + s.error;
+  } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
+}
+async function start() {
+  try {
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfg())});
+    await api("/api/run/start", {method: "POST"}); $("runmsg").textContent = "Running…";
+  }
+  catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
+}
+async function abort() { await api("/api/run/abort", {method: "POST"}); }
+async function restore() {
+  try { await api("/api/run/restore-snapshot", {method: "POST"});
+        $("runmsg").textContent = "Snapshot restored."; }
+  catch (e) { $("runmsg").textContent = "Restore failed: " + e.message; }
+}
+let seenEvents = 0;
+let lastEvents = [];
+function detailFor(photo) {
+  for (let i = lastEvents.length - 1; i >= 0; i--) {
+    const e = lastEvents[i];
+    if (e.photo === photo && e.detail && (e.detail.scores || e.detail.frame)) return e.detail;
+  }
+  return null;
+}
+function inspect(photo) {
+  const d = detailFor(photo);
+  $("detailCard").style.display = "block";
+  $("detailTitle").textContent = photo;
+  $("detailImg").src = "/api/photos/" + encodeURIComponent(photo);
+  const chips = $("detailChips"); chips.innerHTML = "";
+  const tpl = $("detailTemplates"); tpl.innerHTML = "";
+  if (!d || !d.frame) {
+    $("detailFrame").textContent = "(no expected frame recorded)";
+    return;
+  }
+  $("detailFrame").textContent = d.frame;
+  const outliers = new Set(d.identity_outliers || []);
+  for (const s of (d.scores || [])) {
+    const el = document.createElement("span");
+    el.className = "chip " + s.verdict + (outliers.has(s.module) ? " idout" : "");
+    el.textContent = `m${s.module} '${d.frame[s.module] || "?"}' ${s.verdict}` +
+      (outliers.has(s.module) ? " WRONG-GLYPH?" : "");
+    chips.appendChild(el);
+  }
+  for (const g of [...new Set(d.frame)]) {
+    const wrap = document.createElement("span");
+    wrap.title = "template for '" + g + "'";
+    const img = document.createElement("img");
+    img.src = "/api/run/templates/" + encodeURIComponent(g);
+    img.alt = g;
+    img.onerror = () => wrap.remove();
+    const lab = document.createElement("div");
+    lab.textContent = g === " " ? "␣" : g;
+    lab.style.cssText = "font-size:.7rem;color:#999;text-align:center;";
+    wrap.appendChild(img); wrap.appendChild(lab);
+    tpl.appendChild(wrap);
+  }
+}
+async function poll() {
+  try {
+    const s = await api("/api/run/state");
+    lastEvents = s.events;
+    const log = $("log");
+    for (const e of s.events.slice(seenEvents)) {
+      const div = document.createElement("div");
+      if (e.kind === "error") div.className = "err";
+      else if (e.kind === "ok" || e.kind === "tune") div.className = "ok";
+      else if (e.kind === "phase" || e.kind === "run") div.className = "phase";
+      div.textContent = `[${e.t}] ${e.kind}: ${e.text}`;
+      log.appendChild(div);
+    }
+    seenEvents = s.events.length;
+    log.scrollTop = log.scrollHeight;
+    const g = $("gallery"); g.innerHTML = "";
+    for (const p of s.photos.slice(-8)) {
+      const img = document.createElement("img");
+      img.src = "/api/photos/" + encodeURIComponent(p); img.loading = "lazy";
+      img.onclick = () => inspect(p);
+      g.appendChild(img);
+    }
+    if (s.report) $("report").textContent = JSON.stringify(s.report, null, 2);
+    $("runmsg").textContent = `status: ${s.status} · phase ${s.phase ?? "?"} ` +
+      `(previews ${s.previews ?? 0}, persists ${s.persists ?? 0}, sweeps ${s.sweeps ?? 0})`;
+    $("startBtn").disabled = s.status === "running" || s.status === "aborting";
+  } catch (e) { /* server restarting? keep polling */ }
+  setTimeout(poll, 1500);
+}
+load(); poll();
+</script>
+</body>
+</html>
