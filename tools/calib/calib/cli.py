@@ -54,6 +54,23 @@ def load_contract(args) -> dict:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    # The --contract flag used to be dead wiring (return value ignored,
+    # issue kinonn-bot#28). It now selects the local compatibility baseline:
+    # bundled calib/contract.json or the override path. Fail fast when it
+    # disagrees with this tool build; the firmware-served contract is still
+    # validated at calibration time in loop.run().
+    try:
+        local_contract = load_contract(args)
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot load contract {args.contract or '<bundled>'}: {exc}",
+              file=sys.stderr)
+        return 2
+    local_ver = local_contract.get("contractVersion")
+    if local_ver != SUPPORTED_CONTRACT:
+        print(f"error: local contract version {local_ver} != supported "
+              f"{SUPPORTED_CONTRACT} ({args.contract or '<bundled>'})",
+              file=sys.stderr)
+        return 2
     display = Display(args.host, settle_timeout_s=args.timeout_s)
     try:
         status = display.status()

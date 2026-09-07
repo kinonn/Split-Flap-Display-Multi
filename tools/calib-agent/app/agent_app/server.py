@@ -28,6 +28,19 @@ def data_dir() -> str:
     return os.environ.get("CALIB_AGENT_DATA", os.path.join(os.getcwd(), "data"))
 
 
+def alloc_run_dir(runs_dir: str) -> str:
+    """Allocate the first unused run-NNN dir (collision-proof, see calib UI)."""
+    os.makedirs(runs_dir, exist_ok=True)
+    n = 1
+    while True:
+        run_dir = os.path.join(runs_dir, f"run-{n:03d}")
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            n += 1
+
+
 def config_path() -> str:
     return os.path.join(data_dir(), "config.json")
 
@@ -128,9 +141,7 @@ class Harness:
             self.photos = []
             self.report = None
         runs_dir = os.path.join(data_dir(), "runs")
-        os.makedirs(runs_dir, exist_ok=True)
-        run_dir = os.path.join(runs_dir, f"run-{len(os.listdir(runs_dir)) + 1:03d}")
-        os.makedirs(run_dir, exist_ok=True)
+        run_dir = alloc_run_dir(runs_dir)
         with self.lock:
             self.run_dir = run_dir
 

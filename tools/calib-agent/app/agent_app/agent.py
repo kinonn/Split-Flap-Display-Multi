@@ -196,10 +196,37 @@ class Agent:
     def tool_hold(self, args: dict) -> dict:
         return self.calib.display.hold(bool(args["active"]))
 
+    # -- abort-responsive display helpers (issue kinonn-bot#26) -------------------
+    def _wait_settled(self, timeout_s: float):
+        """wait_settled with abort flag; tolerates legacy duck-typed displays."""
+        try:
+            return self.calib.display.wait_settled(timeout_s,
+                                                   abort_flag=lambda: self.aborted)
+        except TypeError:
+            if self.aborted:
+                raise CalibError("aborted by user")
+            out = self.calib.display.wait_settled(timeout_s)
+            if self.aborted:
+                raise CalibError("aborted by user")
+            return out
+
+    def _show_and_settle(self, frame: str):
+        try:
+            return self.calib.display.show_and_settle(frame, self.calib.dwell_ms,
+                                                      self.calib.timeout_s,
+                                                      abort_flag=lambda: self.aborted)
+        except TypeError:
+            if self.aborted:
+                raise CalibError("aborted by user")
+            out = self.calib.display.show_and_settle(frame, self.calib.dwell_ms,
+                                                     self.calib.timeout_s)
+            if self.aborted:
+                raise CalibError("aborted by user")
+            return out
+
     def tool_show(self, args: dict) -> dict:
         frame, tag = args["frame"], args.get("tag", f"step{self.steps}")
-        info = self.calib.display.show_and_settle(frame, self.calib.dwell_ms,
-                                                  self.calib.timeout_s)
+        info = self._show_and_settle(frame)
         self.last_frame = frame
         self.event("show", f"show {tag!r} frameId={info['frameId']}",
                    detail={"frame": frame, "frameId": info["frameId"],
@@ -264,7 +291,7 @@ class Agent:
             raise CalibError("preview budget exhausted")
         self.calib.display.preview(module, ci, delta)
         self.calib.previews += 1
-        self.calib.display.wait_settled(self.calib.timeout_s)
+        self._wait_settled(self.calib.timeout_s)
         group = 1
         self.previewed.add((group, module, ci))
         # Structural verify-after: photo + scores are part of the result.
@@ -294,7 +321,7 @@ class Agent:
             self.calib.overlay[(group, module, ci)] = int(args["value"])
         resp = self.calib.display.persist(scope, kind, int(args["value"]), module, ci)
         self.calib.persists += 1
-        self.calib.display.wait_settled(self.calib.timeout_s)
+        self._wait_settled(self.calib.timeout_s)
         frame = self.last_frame or " " * self.calib.total
         rec = self._photo_record(frame, f"ps_g{group}m{module}")
         self.event("persist", f"persist g{group} {kind}={args['value']}", rec["photo"],

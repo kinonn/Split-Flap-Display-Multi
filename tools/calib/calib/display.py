@@ -98,23 +98,34 @@ class Display:
         return resp.json()
 
     # -- helpers ----------------------------------------------------------------
-    def wait_settled(self, timeout_s: float | None = None, poll_s: float = 0.5) -> dict:
-        """Poll status until busy==false; returns the final status."""
+    def wait_settled(self, timeout_s: float | None = None, poll_s: float = 0.5,
+                     abort_flag=None) -> dict:
+        """Poll status until busy==false; returns the final status.
+
+        `abort_flag` is an optional zero-arg callable (UI abort button).
+        It is checked every poll so an abort takes effect within ~poll_s
+        instead of after the full settle timeout (issue kinonn-bot#26).
+        """
         deadline = time.monotonic() + (self.settle_timeout_s if timeout_s is None else timeout_s)
         last: dict = {}
         while True:
+            if abort_flag is not None and abort_flag():
+                raise CalibError("aborted by user")
             last = self.status()
             if not last.get("busy", False):
                 return last
             if time.monotonic() > deadline:
                 raise CalibError("display stayed busy past timeout")
             time.sleep(poll_s)
+            if abort_flag is not None and abort_flag():
+                raise CalibError("aborted by user")
 
-    def show_and_settle(self, frame: str, dwell_ms: int = 800, timeout_s: float | None = None) -> dict:
+    def show_and_settle(self, frame: str, dwell_ms: int = 800, timeout_s: float | None = None,
+                        abort_flag=None) -> dict:
         """Show a frame and wait until the display reports settled."""
         show_resp = self.show(frame, dwell_ms)
         frame_id = show_resp["frameId"]
-        self.wait_settled(timeout_s=timeout_s)
+        self.wait_settled(timeout_s=timeout_s, abort_flag=abort_flag)
         info = self.frame_info(frame_id)
         if not info.get("settled", False):
             raise CalibError(f"frame {frame_id} never reported settled")

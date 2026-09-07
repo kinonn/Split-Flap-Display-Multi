@@ -31,6 +31,24 @@ def data_dir() -> str:
     return os.environ.get("CALIB_DATA", os.path.join(os.getcwd(), "calib-ui-data"))
 
 
+def alloc_run_dir(runs_dir: str) -> str:
+    """Allocate the first unused run-NNN dir (collision-proof).
+
+    The old listdir-count scheme reused numbers after a deletion (and
+    counted stray files), silently merging two runs. Probing with
+    exist_ok=False also closes the create race.
+    """
+    os.makedirs(runs_dir, exist_ok=True)
+    n = 1
+    while True:
+        run_dir = os.path.join(runs_dir, f"run-{n:03d}")
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            n += 1
+
+
 def config_path() -> str:
     return os.path.join(data_dir(), "config.json")
 
@@ -79,14 +97,21 @@ class UICalibrator(Calibrator):
 
     No calibration logic lives here — every override only logs around
     the ``super()`` call. Abort is cooperative: the harness flips the
-    flag and the next ``shoot()`` raises, which ``Calibrator.run()``
-    already turns into a ``needs-human`` report with rollback.
+    flag and the next ``shoot()``/settle poll raises, which
+    ``Calibrator.run()`` already turns into a ``needs-human`` report
+    with rollback.
     """
 
     def __init__(self, *args, on_event=None, abort_flag=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.on_event = on_event or (lambda e: None)
         self.abort_flag = abort_flag or (lambda: False)
+
+    def _abort_requested(self) -> bool:
+        try:
+            return bool(self.abort_flag())
+        except Exception:
+            return False
 
     def event(self, kind: str, text: str, photo: str | None = None,
               detail: dict | None = None):
@@ -197,9 +222,7 @@ class Harness:
             self.calib = None
             self.abort_requested = False
         runs_dir = os.path.join(data_dir(), "runs")
-        os.makedirs(runs_dir, exist_ok=True)
-        run_dir = os.path.join(runs_dir, f"run-{len(os.listdir(runs_dir)) + 1:03d}")
-        os.makedirs(run_dir, exist_ok=True)
+        run_dir = alloc_run_dir(runs_dir)
         with self.lock:
             self.run_dir = run_dir
 
