@@ -63,9 +63,39 @@ class Calibrator:
         os.makedirs(photo_dir, exist_ok=True)
 
     # -- primitives ---------------------------------------------------------
+    def _abort_requested(self) -> bool:
+        """Cooperative abort hook (issue kinonn-bot#26). Base runner never
+        aborts; UICalibrator overrides to consult the UI flag."""
+        return False
+
+    def _wait_settled(self, timeout_s: float) -> dict:
+        """Abort-responsive wait; tolerates legacy duck-typed displays
+        whose wait_settled() takes no abort_flag kwarg."""
+        try:
+            return self.display.wait_settled(timeout_s, abort_flag=self._abort_requested)
+        except TypeError:
+            if self._abort_requested():
+                raise CalibError("aborted by user")
+            out = self.display.wait_settled(timeout_s)
+            if self._abort_requested():
+                raise CalibError("aborted by user")
+            return out
+
+    def _show_and_settle(self, frame: str) -> dict:
+        try:
+            return self.display.show_and_settle(frame, self.dwell_ms, self.timeout_s,
+                                                abort_flag=self._abort_requested)
+        except TypeError:
+            if self._abort_requested():
+                raise CalibError("aborted by user")
+            out = self.display.show_and_settle(frame, self.dwell_ms, self.timeout_s)
+            if self._abort_requested():
+                raise CalibError("aborted by user")
+            return out
+
     def shoot(self, frame: str, tag: str) -> dict:
         """Show a frame, settle, photograph, split into crops. Returns record."""
-        info = self.display.show_and_settle(frame, self.dwell_ms, self.timeout_s)
+        info = self._show_and_settle(frame)
         time.sleep(self.dwell_ms / 1000.0)
         img = self.camera.capture()
         path = os.path.join(self.photo_dir, f"{tag}_f{info['frameId']}.png")
@@ -194,8 +224,8 @@ class Calibrator:
         """Tune one cell; returns {kept, after}.
 
         Tracks assumed live values locally: `overlay` holds persisted
-        values (module/display offsets readable from status, char cells
-        start at 0), `residue` sums volatile preview deltas on top.
+        values (module/display offsets plus per-char cells, all readable
+        from status), `residue` sums volatile preview deltas on top.
         Persists write absolute values, which also discards residues.
         """
         group = self._group_of(module)
@@ -229,7 +259,7 @@ class Calibrator:
                 self.display.preview(local, char_index, d)
                 self.residue[key] += d
                 self.previews += 1
-                self.display.wait_settled(self.timeout_s)
+                self._wait_settled(self.timeout_s)
                 got = self.scores(self.shoot(show_frame, f"pv_g{group}m{local}"))[module]
                 if _cost(got) < best_cost:
                     best_live, best_cost = live(), _cost(got)
@@ -248,7 +278,7 @@ class Calibrator:
                 self.display.persist(group, kind, base + d, local, max(char_index, 0))
                 self.overlay[key] = base + d
                 self.persists += 1
-                self.display.wait_settled(self.timeout_s)
+                self._wait_settled(self.timeout_s)
                 got = self.scores(self.shoot(show_frame, f"ps_g{group}m{local}"))[module]
                 if _cost(got) < best_cost:
                     best_live, best_cost = base + d, _cost(got)
@@ -256,7 +286,7 @@ class Calibrator:
                     self.display.persist(group, kind, base, local, max(char_index, 0))
                     self.overlay[key] = base
                     self.persists += 1
-                    self.display.wait_settled(self.timeout_s)
+                    self._wait_settled(self.timeout_s)
 
         new = best_live
         proposal = group == 1 and new != old and not can_persist
@@ -266,7 +296,7 @@ class Calibrator:
             self._guard_budgets()
             self.display.persist(1, kind, new, local, max(char_index, 0))
             self.persists += 1
-            self.display.wait_settled(self.timeout_s)
+            self._wait_settled(self.timeout_s)
             self.overlay[key] = new
             self.residue[key] = 0
         elif group != 1:
@@ -296,7 +326,17 @@ class Calibrator:
             if char_index < 0:
                 mods = st.get("moduleOffsets", [])
                 return int(mods[local]) if local < len(mods) else 0
-            return 0  # live per-char offsets are not exposed; treat as 0 base
+            # Live per-char offsets are exposed by firmware status
+            # (charOffsets[row][col]); older firmware omits them -> 0 base.
+            rows = st.get("charOffsets", [])
+            if local < len(rows):
+                try:
+                    row = rows[local]
+                    if char_index < len(row):
+                        return int(row[char_index])
+                except (TypeError, ValueError):
+                    pass
+            return 0
         return 0  # remote live offsets not exposed; persist ratchets relatively
 
     # -- main ------------------------------------------------------------------
@@ -410,11 +450,27 @@ class Calibrator:
         # Per-glyph appearance samples: glyph -> [(module, crop)] gathered
         # across staggered frames (each glyph visits many modules).
         samples: dict[str, list[tuple[int, object]]] = {}
+        # Jammed-module detection (issue kinonn-bot#27): each staggered
+        # frame commands a DIFFERENT glyph on every module, so a crop that
+        # is near-identical across consecutive frames is stuck by
+        # definition. vision.stuck() was defined + tested but never called.
+        prev_crops: list | None = None
+        stuck_votes: dict[int, int] = {}
+        sweep_comparisons = 0
         for k in range(0, n, stride):
             self._guard_budgets()
             frame = "".join(self.drum[(k + i) % n] for i in range(self.total))
             rec = self.shoot(frame, f"p2_stride{k}")
             self.sweeps += stride / n
+            if prev_crops is not None:
+                sweep_comparisons += 1
+                for i, (a, b) in enumerate(zip(prev_crops, rec["crops"])):
+                    try:
+                        if vision.stuck(a, b):
+                            stuck_votes[i] = stuck_votes.get(i, 0) + 1
+                    except Exception:
+                        pass
+            prev_crops = rec["crops"]
             for i, s in enumerate(self.scores(rec)):
                 if s["verdict"] != "ok":
                     suspects[(i, (k + i) % n)] = frame
@@ -422,6 +478,15 @@ class Calibrator:
                     samples.setdefault(frame[i], []).append((i, rec["crops"][i]))
                     if float(vision.to_gray(rec["crops"][i]).std()) >= vision.IDENTITY_MIN_STD:
                         self.bank_samples.setdefault(frame[i], []).append(rec["crops"][i])
+        # A module stuck across EVERY staggered comparison never moved
+        # despite different commanded glyphs: escalate so acceptance can
+        # never declare converged on a frozen display.
+        for module in sorted(stuck_votes):
+            if sweep_comparisons > 0 and stuck_votes[module] == sweep_comparisons:
+                self.identity_persistent.append(
+                    {"module": module, "glyph": "?",
+                     "stage": "P2",
+                     "note": "crop unchanged across different commanded glyphs (stuck?)"})
         for (module, ci), frame in suspects.items():
             self._tune_cell(module, ci, frame)
         self.sweeps = min(MAX_FULL_SWEEPS, self.sweeps + 1)
