@@ -177,3 +177,51 @@ def test_config_roundtrip(tmp_path, monkeypatch):
     assert cfg["camera_index"] == 0  # default backfilled
     with open(os.path.join(str(tmp_path), "config.json"), encoding="utf-8") as fh:
         assert json.load(fh)["phase"] == 2
+
+
+def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+
+    class FakeCam:
+        def __init__(self, index=0):
+            self.index = index
+
+        def open(self, quick=False):
+            assert quick  # live view must skip the settle wait
+            return self
+
+        def capture(self):
+            return np.zeros((48, 64, 3), dtype=np.uint8)
+
+        def close(self):
+            pass
+
+    class IdleHarness:
+        def state(self):
+            return {"status": "idle"}
+
+    monkeypatch.setattr(srv, "Camera", FakeCam)
+    monkeypatch.setattr(srv, "harness", IdleHarness())
+    r = TestClient(srv.app).get("/api/camera/frame?camera_index=0")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content[:2] == b"\xff\xd8"
+
+
+def test_camera_frame_busy_during_run(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+
+    class BusyHarness:
+        def state(self):
+            return {"status": "running"}
+
+    monkeypatch.setattr(srv, "harness", BusyHarness())
+    assert TestClient(srv.app).get("/api/camera/frame").status_code == 409
