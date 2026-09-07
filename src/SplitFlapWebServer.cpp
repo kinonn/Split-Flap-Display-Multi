@@ -300,6 +300,17 @@ void SplitFlapWebServer::registerCalibRoutes() {
         for (int i = 0; i < localModules; i++) {
             modOffs.add(display.getLiveModuleOffset(i));
         }
+        // Live per-char offsets (including uncommitted previews) so the
+        // calibration tool can seed its absolute persist base instead of
+        // assuming 0 (issue kinonn-bot#24). One row per local module,
+        // `charset` entries each; absent on older firmware (tool falls back).
+        JsonArray charOffs = response["charOffsets"].to<JsonArray>();
+        for (int i = 0; i < localModules; i++) {
+            JsonArray row = charOffs.add<JsonArray>();
+            for (int c = 0; c < charset; c++) {
+                row.add(display.getLiveCharOffset(i, c));
+            }
+        }
         response["previewNote"] = "live offsets include uncommitted previews; reload reverts";
         request->send(200, "application/json", response.as<String>());
     });
