@@ -245,3 +245,130 @@ def test_safe_tag_never_carries_path_parts():
     assert safe_tag("sub/dir/cap") == "sub_dir_cap"
     assert safe_tag("..", "fb") == "fb"
     assert len(safe_tag("x" * 300)) == 80
+
+
+def _direct_agent(tmp_path):
+    """Agent without running the loop (direct tool calls)."""
+    display, camera = FakeDisplay(), FakeCamera()
+    calib = Calibrator(display, camera, photo_dir=str(tmp_path),
+                       dwell_ms=0, timeout_s=5)
+    calib.total = 4
+    agent = Agent(ScriptVLM([]), calib, "system", on_event=lambda e: None)
+    return agent, display, calib
+
+
+def test_p0_show_without_capture_blocks_preview(tmp_path):
+    # Issue kinonn-bot#29: the tag alone must not complete P0.
+    script = [
+        (None, [("hold", {"active": True})]),
+        (None, [("show", {"frame": "ABCD", "tag": "p0_index"})]),
+        (None, [("preview", {"module": 0, "charIndex": -1, "delta": 2})]),
+        (None, [("finish", {"verdict": "needs-human", "summary": "no p0"})]),
+    ]
+    agent, display = _agent(script, tmp_path)
+    report = agent.run()
+    assert agent.p0_done is False
+    assert display.previews == []
+    assert report["result"] == "needs-human"
+
+
+def test_p0_mismatched_capture_verifies_nothing(tmp_path):
+    # Issue kinonn-bot#29/#33: wrong expected frame proves nothing.
+    script = [
+        (None, [("hold", {"active": True})]),
+        (None, [("show", {"frame": "ABCD", "tag": "p0_index"})]),
+        (None, [("capture", {"expected": "WXYZ", "tag": "c"})]),
+        (None, [("finish", {"verdict": "needs-human", "summary": "mismatch"})]),
+    ]
+    agent, display = _agent(script, tmp_path)
+    report = agent.run()
+    assert agent.p0_done is False
+    assert agent.calib.templates == {}
+    assert report["result"] == "needs-human"
+
+
+def test_hold_release_rejected_mid_run(tmp_path):
+    # Issue kinonn-bot#31: hold is harness-owned.
+    import pytest
+
+    from calib.display import CalibError
+
+    agent, display, _ = _direct_agent(tmp_path)
+    assert agent.tool_hold({"active": True})["holdActive"] is True
+    with pytest.raises(CalibError, match="harness-owned"):
+        agent.tool_hold({"active": False})
+
+
+def test_remote_and_display_persist_need_prior_capture(tmp_path):
+    # Issue kinonn-bot#30: no blind writes off the local preview path.
+    import pytest
+
+    from calib.display import CalibError
+
+    agent, display, _ = _direct_agent(tmp_path)
+    agent.p0_done = True
+    with pytest.raises(CalibError, match="capture the display first"):
+        agent.tool_persist({"scope": 2, "kind": "module",
+                            "module": 0, "value": 7})
+    with pytest.raises(CalibError, match="capture the display first"):
+        agent.tool_persist({"scope": "local", "kind": "display",
+                            "value": 3})
+    assert display.persists == []
+
+
+def test_remote_persist_allowed_after_p0_capture(tmp_path):
+    script = [
+        (None, [("hold", {"active": True})]),
+        (None, [("show", {"frame": "ABCD", "tag": "p0_index"})]),
+        (None, [("capture", {"expected": "ABCD", "tag": "c"})]),
+        (None, [("persist", {"scope": 2, "kind": "module",
+                             "module": 0, "value": 7})]),
+        (None, [("finish", {"verdict": "needs-human", "summary": "remote ok"})]),
+    ]
+    agent, display = _agent(script, tmp_path)
+    report = agent.run()
+    assert agent.p0_done is True
+    assert len(display.persists) == 1
+    assert report["result"] == "needs-human"
+
+
+def test_finish_converged_needs_p0_and_bank(tmp_path):
+    # Issue kinonn-bot#32: converged by omission is not converged.
+    agent, _, _ = _direct_agent(tmp_path)
+    out = agent.tool_finish({"verdict": "converged", "summary": "x"})
+    assert out["accepted"] is False
+    assert "P0" in out["reason"]
+    agent.p0_done = True
+    out = agent.tool_finish({"verdict": "converged", "summary": "x"})
+    assert out["accepted"] is False
+    assert "template bank" in out["reason"]
+
+
+def test_blind_camera_fails_image_sanity(tmp_path):
+    # Issue kinonn-bot#32: flat frames carry no glyph signal.
+    agent, _, _ = _direct_agent(tmp_path)
+    sane, _ = agent._acceptance_image_sanity()
+    assert sane is False
+
+
+def test_mismatched_capture_warns_and_skips_bank(tmp_path, monkeypatch):
+    # Issue kinonn-bot#33: only verified captures feed P0/bank/identity.
+    def distinct_crops(gray, n):
+        crops = []
+        for i in range(n):
+            c = np.zeros((96, 68), dtype=np.uint8)
+            c[:, 34:] = 255
+            crops.append(np.clip(c.astype(int) + i * 10, 0, 255).astype(np.uint8))
+        return crops
+
+    monkeypatch.setattr(vision, "split_crops", distinct_crops)
+    agent, _, calib = _direct_agent(tmp_path)
+    agent.tool_show({"frame": "ABCD", "tag": "p0_index"})
+    out = agent.tool_capture({"expected": "WXYZ", "tag": "c"})
+    assert out["verified"] is False
+    assert "warning" in out
+    assert agent.p0_done is False
+    assert calib.bank_samples == {}
+    out = agent.tool_capture({"expected": "ABCD", "tag": "c2"})
+    assert out["verified"] is True
+    assert agent.p0_done is True
