@@ -175,5 +175,5 @@ def test_config_roundtrip(tmp_path, monkeypatch):
     assert cfg["phase"] == 2
     assert cfg["dwell_ms"] == 500
     assert cfg["camera_index"] == 0  # default backfilled
-    with open(os.path.join(str(tmp_path), "config.json")) as fh:
+    with open(os.path.join(str(tmp_path), "config.json"), encoding="utf-8") as fh:
         assert json.load(fh)["phase"] == 2

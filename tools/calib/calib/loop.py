@@ -387,7 +387,7 @@ class Calibrator:
                                   "persistent": self.identity_persistent,
                                   "bank": {"source": self.template_source,
                                            "glyphs": sorted(self.templates)}}
-            with open(os.path.join(self.photo_dir, "report.json"), "w") as fh:
+            with open(os.path.join(self.photo_dir, "report.json"), "w", encoding="utf-8") as fh:
                 json.dump(report, fh, indent=2)
         return report
 
@@ -548,5 +548,5 @@ class Calibrator:
 
 def load_bundled_contract() -> dict:
     here = os.path.dirname(os.path.abspath(__file__))
-    with open(os.path.join(here, "contract.json")) as fh:
+    with open(os.path.join(here, "contract.json"), encoding="utf-8") as fh:
         return json.load(fh)
