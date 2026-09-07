@@ -17,8 +17,9 @@ import os
 import threading
 import time
 
+import cv2
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from .camera import Camera, CameraError
 from .display import CalibError, Display
@@ -365,6 +366,35 @@ def check_camera(body: dict | None = None):
         return {"ok": False, "error": str(exc)}
     finally:
         cam.close()
+
+
+@app.get("/api/camera/frame")
+def camera_frame(camera_index: int | None = None):
+    """Single live JPEG frame for the UI preview (no run needed).
+
+    Opens the camera, grabs one frame with a short warm-up
+    (Camera.open(quick=True)) and closes it again. Refused while a run
+    owns the camera.
+    """
+    if harness.state()["status"] in ("running", "aborting"):
+        raise HTTPException(409, "camera busy: run in progress")
+    cfg = load_config()
+    index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
+    cam = Camera(index)
+    try:
+        cam.open(quick=True)
+        frame = cam.capture()
+    except CameraError as exc:
+        raise HTTPException(502, f"camera error: {exc}")
+    finally:
+        cam.close()
+    h, w = frame.shape[:2]
+    if w > 960:
+        frame = cv2.resize(frame, (960, int(h * 960 / w)))
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if not ok:
+        raise HTTPException(502, "JPEG encode failed")
+    return Response(content=bytes(buf), media_type="image/jpeg")
 
 
 @app.post("/api/run/start")

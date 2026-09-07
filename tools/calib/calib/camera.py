@@ -131,7 +131,14 @@ class Camera:
             if reads > 5 and time.monotonic() > deadline:
                 return
 
-    def open(self) -> "Camera":
+    def open(self, quick: bool = False) -> "Camera":
+        """Open the camera and prepare it for capture.
+
+        With quick=False (runs, checks) this locks exposure, disables
+        autofocus and warms up until frames settle. With quick=True (UI
+        live view) it skips the settle wait and just grabs a few frames —
+        a slightly unconverged first frame is fine for framing.
+        """
         if hasattr(cv2, "CAP_V4L2"):
             cap = cv2.VideoCapture(self.index, cv2.CAP_V4L2)
             if not cap.isOpened():  # fall back to default backend (macOS/Windows)
@@ -154,6 +161,13 @@ class Camera:
                 cap.set(cv2.CAP_PROP_AUTOFOCUS, 0.0)
         except Exception:
             pass
+        if quick:
+            for _ in range(3):
+                try:
+                    cap.read()
+                except Exception:
+                    pass
+            return self
         self._warmup()
         return self
 

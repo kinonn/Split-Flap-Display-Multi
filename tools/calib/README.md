@@ -35,7 +35,8 @@ uv run splitflap-calib-ui   # http://127.0.0.1:8001
 ```
 
 Configure (display host, camera, phase 1–4, dwell, identity threshold),
-then Start. The UI streams the run log, every camera photo with
+then Start. A live camera view (toggle, on by default) at the bottom of
+the Configure card helps frame the display before starting. The UI streams the run log, every camera photo with
 per-module verdict chips (click to inspect vs the expected frame), the
 template bank, and the final `report.json`. Abort and pre-run snapshot
 restore included. State lives in `./calib-ui-data` (`CALIB_DATA`
