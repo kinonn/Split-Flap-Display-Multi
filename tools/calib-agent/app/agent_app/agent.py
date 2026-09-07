@@ -129,8 +129,8 @@ def load_system_prompt() -> str:
     base = docs_dir()
     prompt_path = os.path.join(base, "PROMPT_SNIPPET.md")
     prod_path = os.path.join(base, "PRODUCTION.md")
-    prompt = open(prompt_path).read() if os.path.exists(prompt_path) else ""
-    prod = open(prod_path).read() if os.path.exists(prod_path) else ""
+    prompt = open(prompt_path, encoding="utf-8").read() if os.path.exists(prompt_path) else ""
+    prod = open(prod_path, encoding="utf-8").read() if os.path.exists(prod_path) else ""
     return (
         "You are calibrating a split-flap display through tools. Rules:\n"
         + prompt + "\n\nFull runbook:\n" + prod + "\n\nTool discipline:\n"
@@ -461,7 +461,7 @@ class Agent:
         calib.group_widths = calib._widths(status)
         calib._load_bank()
         snapshot = calib.display.snapshot()
-        with open(os.path.join(calib.photo_dir, "snapshot.json"), "w") as fh:
+        with open(os.path.join(calib.photo_dir, "snapshot.json"), "w", encoding="utf-8") as fh:
             json.dump(snapshot, fh)
         try:
             # Harness-owned hold (issue kinonn-bot#31): engaged here, only
@@ -557,7 +557,7 @@ class Agent:
                                     "bank": {"source": self.calib.template_source,
                                              "glyphs": sorted(self.calib.templates)}}}
         path = os.path.join(self.calib.photo_dir, "agent_report.json")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.report, fh, indent=2)
         self.event("done", f"{verdict}: {reason}")
         return self.report

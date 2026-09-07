@@ -48,7 +48,7 @@ def config_path() -> str:
 def load_config() -> dict:
     cfg: dict = {}
     try:
-        with open(config_path()) as fh:
+        with open(config_path(), encoding="utf-8") as fh:
             cfg = json.load(fh)
     except (OSError, ValueError):
         pass
@@ -73,7 +73,7 @@ def save_config(patch: dict) -> dict:
     # here we only store what the UI sent (empty key keeps the old one).
     stored = {}
     try:
-        with open(config_path()) as fh:
+        with open(config_path(), encoding="utf-8") as fh:
             stored = json.load(fh)
     except (OSError, ValueError):
         pass
@@ -87,7 +87,7 @@ def save_config(patch: dict) -> dict:
         if patch["mode"] not in ("dry-run", "preview", "full"):
             raise HTTPException(400, "mode must be dry-run, preview or full")
         stored["mode"] = patch["mode"]
-    with open(config_path(), "w") as fh:
+    with open(config_path(), "w", encoding="utf-8") as fh:
         json.dump(stored, fh, indent=2)
     os.chmod(config_path(), 0o600)
     return masked_config()
@@ -217,7 +217,7 @@ app = FastAPI(title="Split-Flap VLM Calibration Harness")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    with open(os.path.join(STATIC_DIR, "index.html")) as fh:
+    with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as fh:
         return fh.read()
 
 
@@ -314,7 +314,7 @@ def template_list():
     if not run_dir:
         return {"glyphs": [], "source": None}
     try:
-        with open(os.path.join(run_dir, "templates", "manifest.json")) as fh:
+        with open(os.path.join(run_dir, "templates", "manifest.json"), encoding="utf-8") as fh:
             manifest = json.load(fh)
     except OSError:
         return {"glyphs": [], "source": None}
@@ -336,7 +336,7 @@ def template_image(glyph: str):
 def restore_snapshot():
     path = os.path.join(harness.state()["run_dir"], "snapshot.json")
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             snapshot = json.load(fh)
     except OSError:
         raise HTTPException(404, "no snapshot from a run yet")

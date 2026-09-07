@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def load_contract(args) -> dict:
     if args.contract:
-        with open(args.contract) as fh:
+        with open(args.contract, encoding="utf-8") as fh:
             return json.load(fh)
     try:
         return load_bundled_contract()
