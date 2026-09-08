@@ -20,7 +20,7 @@ class FakeResp:
 def test_chat_parses_tool_calls(monkeypatch):
     calls = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
+    def fake_post(self, url, json=None, headers=None, timeout=None):
         calls["url"] = url
         calls["json"] = json
         return FakeResp({"choices": [{"message": {
@@ -29,7 +29,7 @@ def test_chat_parses_tool_calls(monkeypatch):
                             "function": {"name": "hold",
                                          "arguments": '{"active": true}'}}]}}]})
 
-    monkeypatch.setattr(vlm.requests, "post", fake_post)
+    monkeypatch.setattr(vlm.requests.Session, "post", fake_post)
     client = vlm.VLMClient("https://llm.example/v1", "m", "k")
     out = client.chat([{"role": "user", "content": "hi"}], tools=[{"type": "function"}])
     assert calls["url"] == "https://llm.example/v1/chat/completions"
@@ -38,16 +38,33 @@ def test_chat_parses_tool_calls(monkeypatch):
 
 
 def test_chat_text_reply(monkeypatch):
-    monkeypatch.setattr(vlm.requests, "post",
-                        lambda *a, **k: FakeResp({"choices": [{"message": {
+    monkeypatch.setattr(vlm.requests.Session, "post",
+                        lambda self, *a, **k: FakeResp({"choices": [{"message": {
                             "content": "done", "tool_calls": []}}]}))
     out = vlm.VLMClient("https://x", "m", "k").chat([{"role": "user", "content": "hi"}])
     assert out == {"content": "done", "tool_calls": []}
 
 
+def test_reasoning_effort_passthrough(monkeypatch):
+    seen = {}
+
+    def fake_post(self, url, json=None, headers=None, timeout=None):
+        seen.update(json or {})
+        return FakeResp({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(vlm.requests.Session, "post", fake_post)
+    # Set -> forwarded to the provider.
+    vlm.VLMClient("https://x", "m", "k", reasoning_effort="low").chat([])
+    assert seen["reasoning_effort"] == "low"
+    # Unset -> key absent (provider default, as before this knob).
+    seen.clear()
+    vlm.VLMClient("https://x", "m", "k").chat([])
+    assert "reasoning_effort" not in seen
+
+
 def test_http_error_maps_to_vlm_error(monkeypatch):
-    monkeypatch.setattr(vlm.requests, "post",
-                        lambda *a, **k: FakeResp({"error": "nope"}, status=500))
+    monkeypatch.setattr(vlm.requests.Session, "post",
+                        lambda self, *a, **k: FakeResp({"error": "nope"}, status=500))
     with pytest.raises(vlm.VLMError):
         vlm.VLMClient("https://x", "m", "k").chat([])
 
@@ -60,11 +77,11 @@ def test_image_part_is_data_url():
 def test_opencode_headers_only_for_opencode(monkeypatch):
     seen = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
+    def fake_post(self, url, json=None, headers=None, timeout=None):
         seen.update(headers or {})
         return FakeResp({"choices": [{"message": {"content": "ok"}}]})
 
-    monkeypatch.setattr(vlm.requests, "post", fake_post)
+    monkeypatch.setattr(vlm.requests.Session, "post", fake_post)
     vlm.VLMClient("https://opencode.ai/zen/go/v1", "deepseek-v4-flash", "k",
                   session_id="abc").chat([])
     assert seen["X-Opencode-Session"] == "splitflap-calib-abc"

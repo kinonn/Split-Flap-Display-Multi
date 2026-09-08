@@ -8,3 +8,5 @@ tools/calib/.venv/
 tools/calib-agent/app/.venv/
 __pycache__/
 .idea
+calib-ui-data/
+tools/calib-agent/app/data/

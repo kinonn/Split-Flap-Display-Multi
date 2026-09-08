@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
+import uuid
 
 import cv2
 from fastapi import FastAPI, HTTPException
@@ -24,11 +26,17 @@ from .vlm import VLMClient
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-# Serializes the quick camera endpoints (check, live frame). FastAPI runs
-# each request in its own thread and Windows webcam drivers handle
-# concurrent opens badly (empty grabs); runs own the camera exclusively
-# and are 409-guarded instead.
+# Camera ownership: the run is the ONLY component that opens the camera
+# for real work, and it does so under this lock for the whole run. The
+# quick endpoints (check, live frame) take it non-blocking/bounded and
+# answer 409 when busy — FastAPI runs each request in its own thread and
+# Windows webcam drivers handle concurrent opens badly (empty grabs).
 _camera_lock = threading.Lock()
+# Bounded waits so nobody ever opens the device twice: a live-view poll
+# releases it within ~2 s, so the check briefly waits for stragglers and
+# the run waits a little longer before giving up.
+_CHECK_LOCK_WAIT_S = 2.5
+_RUN_LOCK_WAIT_S = 30.0
 
 
 def data_dir() -> str:
@@ -52,6 +60,43 @@ def config_path() -> str:
     return os.path.join(data_dir(), "config.json")
 
 
+def vlm_session_id(cfg: dict) -> str:
+    """Stable OpenCode session id, derived from the API key.
+
+    The VLM system prompt is runbook-sized, and the provider caches the
+    prompt prefix per session. A fresh random id per run (the old
+    behavior) made the FIRST request of every run a full cold ingest of
+    the system prompt — visible as a ~45 s pause between "run started"
+    and the first show. Deriving the id from the key keeps the cache
+    warm from turn 1 of every run; a different key/url gets a different
+    session automatically.
+    """
+    scope = str(cfg.get("llm_api_key") or cfg.get("llm_base_url") or "local")
+    return uuid.uuid5(uuid.NAMESPACE_URL, "splitflap-calib:" + scope).hex
+
+
+def clear_previous_runs(runs_dir: str) -> int:
+    """Delete the output of earlier runs (photos, logs, reports, snapshots).
+
+    Called when a run starts so runs/ only ever holds the active run —
+    stale evidence must not linger beside (or be mistaken for) current
+    results. Returns how many entries were removed.
+    """
+    removed = 0
+    if os.path.isdir(runs_dir):
+        for name in os.listdir(runs_dir):
+            path = os.path.join(runs_dir, name)
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def load_config() -> dict:
     cfg: dict = {}
     try:
@@ -61,7 +106,8 @@ def load_config() -> dict:
         pass
     env_map = {"display_host": "DISPLAY_HOST", "llm_base_url": "LLM_BASE_URL",
                "llm_model": "LLM_MODEL", "llm_api_key": "LLM_API_KEY",
-               "camera_index": "CAMERA_INDEX"}
+               "camera_index": "CAMERA_INDEX",
+               "llm_reasoning_effort": "LLM_REASONING_EFFORT"}
     for key, env in env_map.items():
         if env in os.environ and os.environ[env]:
             cfg[key] = os.environ[env]
@@ -70,6 +116,7 @@ def load_config() -> dict:
     cfg.setdefault("llm_model", "deepseek-v4-flash-vision-exp")
     cfg.setdefault("camera_index", 0)
     cfg.setdefault("camera_brightness", 50)
+    cfg.setdefault("llm_reasoning_effort", "")
     cfg.setdefault("mode", "full")
     return cfg
 
@@ -89,6 +136,9 @@ def save_config(patch: dict) -> dict:
                 "camera_brightness", "identity_thresh", "phase"):
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
+    # Effort is settable AND clearable (empty string = provider default).
+    if "llm_reasoning_effort" in patch:
+        stored["llm_reasoning_effort"] = str(patch["llm_reasoning_effort"] or "").strip()
     if patch.get("llm_api_key"):
         stored["llm_api_key"] = patch["llm_api_key"]
     if "mode" in patch:
@@ -149,9 +199,14 @@ class Harness:
             self.photos = []
             self.report = None
         runs_dir = os.path.join(data_dir(), "runs")
+        cleared = clear_previous_runs(runs_dir)
         run_dir = alloc_run_dir(runs_dir)
         with self.lock:
             self.run_dir = run_dir
+        if cleared:
+            self.log({"t": "", "kind": "run",
+                      "text": f"cleared {cleared} previous run(s) "
+                              "(old logs, photos, reports)", "photo": None})
 
         def _run():
             camera: Camera | None = None
@@ -167,30 +222,57 @@ class Harness:
                         self.report = {"result": "needs-human",
                                        "reason": f"display unreachable: {exc}"}
                     return
-                camera = Camera(int(cfg.get("camera_index", 0)),
-                                brightness=float(cfg.get("camera_brightness", 50)))
-                camera.open()
+                # The camera is initialized exactly once, here, under
+                # _camera_lock. A quick-endpoint request that slipped
+                # past its 409 guard just before start() may still hold
+                # the device — wait for it (releases within ~2 s)
+                # instead of double-opening, which Windows drivers
+                # answer with empty grabs and a bogus "busy elsewhere".
+                if not _camera_lock.acquire(timeout=_RUN_LOCK_WAIT_S):
+                    raise CameraError(
+                        f"camera stayed busy for {_RUN_LOCK_WAIT_S:.0f}s "
+                        "(live view or check never released it)")
                 try:
-                    camera.check_camera()
-                except CameraError as exc:
-                    self.log({"t": "", "kind": "error",
-                              "text": f"camera check failed: {exc}", "photo": None})
+                    camera = Camera(int(cfg.get("camera_index", 0)),
+                                    brightness=float(cfg.get("camera_brightness", 50)))
+                    camera.open()
+                    try:
+                        camera.check_camera()
+                    except CameraError as exc:
+                        self.log({"t": "", "kind": "error",
+                                  "text": f"camera check failed: {exc}", "photo": None})
+                        with self.lock:
+                            self.status = "failed"
+                            self.report = {"result": "needs-human",
+                                           "reason": f"camera check failed: {exc}"}
+                        return
+                    vlm = VLMClient(cfg["llm_base_url"], cfg["llm_model"],
+                                    cfg["llm_api_key"],
+                                    session_id=vlm_session_id(cfg),
+                                    reasoning_effort=cfg.get("llm_reasoning_effort") or None)
+                    calib = Calibrator(display, camera, photo_dir=run_dir,
+                                       identity_thresh=float(cfg.get("identity_thresh", 0.85)))
+                    agent = Agent(vlm, calib, load_system_prompt(), on_event=self.log,
+                                  mode=cfg.get("mode", "full"))
                     with self.lock:
-                        self.status = "failed"
-                        self.report = {"result": "needs-human",
-                                       "reason": f"camera check failed: {exc}"}
-                    return
-                vlm = VLMClient(cfg["llm_base_url"], cfg["llm_model"], cfg["llm_api_key"])
-                calib = Calibrator(display, camera, photo_dir=run_dir,
-                                   identity_thresh=float(cfg.get("identity_thresh", 0.85)))
-                agent = Agent(vlm, calib, load_system_prompt(), on_event=self.log,
-                              mode=cfg.get("mode", "full"))
+                        self.agent = agent
+                    self.report = agent.run()
+                    with self.lock:
+                        self.report = agent.report
+                        self.status = "done"
+                finally:
+                    _camera_lock.release()
+            except CameraError as exc:
+                try:
+                    Display(cfg["display_host"]).hold(False)
+                except Exception:
+                    pass
+                self.log({"t": "", "kind": "error",
+                          "text": f"camera error: {exc}", "photo": None})
                 with self.lock:
-                    self.agent = agent
-                self.report = agent.run()
-                with self.lock:
-                    self.report = agent.report
-                    self.status = "done"
+                    self.status = "failed"
+                    self.report = {"result": "needs-human",
+                                   "reason": f"camera error: {exc}"}
             except Exception as exc:  # surface crash in UI, release hold
                 try:
                     Display(cfg["display_host"]).hold(False)
@@ -257,19 +339,25 @@ def display_status():
 @app.post("/api/check-camera")
 def check_camera(body: dict | None = None):
     cfg = load_config()
+    if harness.state()["status"] in ("running", "aborting"):
+        raise HTTPException(409, "camera busy: run in progress")
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
     brightness = float((body or {}).get("camera_brightness",
                                         cfg.get("camera_brightness", 50)))
-    with _camera_lock:
-        cam = Camera(index, brightness=brightness)
-        try:
-            cam.open()
-            diag = cam.check_camera()
-            return {"ok": True, "diagnostics": diag}
-        except CameraError as exc:
-            return {"ok": False, "error": str(exc)}
-        finally:
-            cam.close()
+    # Brief bounded wait: an in-flight live-view poll releases the device
+    # within ~2 s. Never open the camera concurrently with anyone.
+    if not _camera_lock.acquire(timeout=_CHECK_LOCK_WAIT_S):
+        raise HTTPException(409, "camera busy: live view or run holds it")
+    cam = Camera(index, brightness=brightness)
+    try:
+        cam.open()
+        diag = cam.check_camera()
+        return {"ok": True, "diagnostics": diag}
+    except CameraError as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        cam.close()
+        _camera_lock.release()
 
 
 @app.get("/api/camera/frame")
@@ -278,7 +366,9 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
 
     Opens the camera, grabs one frame with a short warm-up
     (Camera.open(quick=True)) and closes it again. Refused while a run
-    owns the camera.
+    owns the camera, or while any other request holds the device —
+    never opened concurrently (Windows drivers answer that with empty
+    grabs, which is how runs used to die right after start).
     """
     if harness.state()["status"] in ("running", "aborting"):
         raise HTTPException(409, "camera busy: run in progress")
@@ -286,15 +376,17 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
     index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
     if brightness is None:
         brightness = float(cfg.get("camera_brightness", 50))
-    with _camera_lock:
-        cam = Camera(index, brightness=float(brightness))
-        try:
-            cam.open(quick=True)
-            frame = cam.capture()
-        except CameraError as exc:
-            raise HTTPException(502, f"camera error: {exc}")
-        finally:
-            cam.close()
+    if not _camera_lock.acquire(blocking=False):
+        raise HTTPException(409, "camera busy: check or run holds it")
+    cam = Camera(index, brightness=float(brightness))
+    try:
+        cam.open(quick=True)
+        frame = cam.capture()
+    except CameraError as exc:
+        raise HTTPException(502, f"camera error: {exc}")
+    finally:
+        cam.close()
+        _camera_lock.release()
     h, w = frame.shape[:2]
     if w > 960:
         frame = cv2.resize(frame, (960, int(h * 960 / w)))

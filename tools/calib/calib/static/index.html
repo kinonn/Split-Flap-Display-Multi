@@ -169,6 +169,7 @@ async function checkDisplay() {
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
 }
 async function checkCamera() {
+  setLive(false); // free the device first: a live poll holding it would fail the check
   try {
     const s = await api("/api/check-camera", {method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -180,6 +181,7 @@ async function checkCamera() {
 }
 async function start() {
   try {
+    setLive(false); // stop the 800ms polls before the run takes the camera
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfg())});
     await api("/api/run/start", {method: "POST"}); $("runmsg").textContent = "Running…";
