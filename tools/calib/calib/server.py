@@ -488,7 +488,8 @@ def main():
     import uvicorn
 
     uvicorn.run(app, host=os.environ.get("CALIB_HOST", "127.0.0.1"),
-                port=int(os.environ.get("CALIB_PORT", "8001")))
+                port=int(os.environ.get("CALIB_PORT", "8001")),
+                access_log=False)  # state poll every 1.5s would spam the log
 
 
 if __name__ == "__main__":
