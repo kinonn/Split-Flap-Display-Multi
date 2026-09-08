@@ -24,6 +24,12 @@ from .vlm import VLMClient
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
+# Serializes the quick camera endpoints (check, live frame). FastAPI runs
+# each request in its own thread and Windows webcam drivers handle
+# concurrent opens badly (empty grabs); runs own the camera exclusively
+# and are 409-guarded instead.
+_camera_lock = threading.Lock()
+
 
 def data_dir() -> str:
     return os.environ.get("CALIB_AGENT_DATA", os.path.join(os.getcwd(), "data"))
@@ -254,15 +260,16 @@ def check_camera(body: dict | None = None):
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
     brightness = float((body or {}).get("camera_brightness",
                                         cfg.get("camera_brightness", 50)))
-    cam = Camera(index, brightness=brightness)
-    try:
-        cam.open()
-        diag = cam.check_camera()
-        return {"ok": True, "diagnostics": diag}
-    except CameraError as exc:
-        return {"ok": False, "error": str(exc)}
-    finally:
-        cam.close()
+    with _camera_lock:
+        cam = Camera(index, brightness=brightness)
+        try:
+            cam.open()
+            diag = cam.check_camera()
+            return {"ok": True, "diagnostics": diag}
+        except CameraError as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            cam.close()
 
 
 @app.get("/api/camera/frame")
@@ -279,14 +286,15 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
     index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
     if brightness is None:
         brightness = float(cfg.get("camera_brightness", 50))
-    cam = Camera(index, brightness=float(brightness))
-    try:
-        cam.open(quick=True)
-        frame = cam.capture()
-    except CameraError as exc:
-        raise HTTPException(502, f"camera error: {exc}")
-    finally:
-        cam.close()
+    with _camera_lock:
+        cam = Camera(index, brightness=float(brightness))
+        try:
+            cam.open(quick=True)
+            frame = cam.capture()
+        except CameraError as exc:
+            raise HTTPException(502, f"camera error: {exc}")
+        finally:
+            cam.close()
     h, w = frame.shape[:2]
     if w > 960:
         frame = cv2.resize(frame, (960, int(h * 960 / w)))

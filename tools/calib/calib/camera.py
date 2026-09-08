@@ -181,16 +181,27 @@ class Camera:
         self._warmup()
         return self
 
-    def capture(self) -> np.ndarray:
+    def capture(self, retries: int = 3) -> np.ndarray:
+        """Grab one frame, retrying transient driver hiccups.
+
+        Windows drivers commonly return an empty grab when another open
+        handle just closed (e.g. the UI live view polling while a check
+        runs), so retry briefly before giving up.
+        """
         if self.cap is None:
             raise CameraError("camera not open")
-        try:
-            ok, frame = self.cap.read()
-        except Exception as exc:
-            raise CameraError(f"frame grab failed: {exc}") from exc
-        if not ok or frame is None:
-            raise CameraError("frame grab failed")
-        return frame
+        last_exc: Exception | None = None
+        for _ in range(max(1, retries)):
+            try:
+                ok, frame = self.cap.read()
+            except Exception as exc:  # driver threw instead of returning False
+                last_exc = exc
+                ok, frame = False, None
+            if ok and frame is not None:
+                return frame
+            time.sleep(0.1)
+        detail = f": {last_exc}" if last_exc is not None else " (camera busy elsewhere or unplugged?)"
+        raise CameraError(f"frame grab failed{detail}")
 
     def close(self):
         if self.cap is not None:
