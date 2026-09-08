@@ -90,6 +90,20 @@ def test_autofocus_failure_tolerated(fake_cv):
     assert cam.cap is not None
 
 
+def test_throwing_driver_properties_tolerated(fake_cv):
+    # Some Windows drivers raise instead of returning False from set().
+    FakeCapture.set_results = {
+        cv2.CAP_PROP_FRAME_WIDTH: RuntimeError("boom"),
+        cv2.CAP_PROP_FRAME_HEIGHT: RuntimeError("boom"),
+        cv2.CAP_PROP_BRIGHTNESS: RuntimeError("boom"),
+        cv2.CAP_PROP_AUTO_EXPOSURE: RuntimeError("boom"),
+        cv2.CAP_PROP_AUTOFOCUS: RuntimeError("boom"),
+    }
+    cam = Camera().open()
+    assert cam.cap is not None
+    assert cam.check_camera()["drift"] == 0.0
+
+
 def test_check_discards_settling_frames(fake_cv):
     # Warm-up consumes the ramp; the check then sees only stable frames.
     FakeCapture.values = [100, 120, 140] + [150] * 30

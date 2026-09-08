@@ -59,6 +59,16 @@ class Camera:
         except (TypeError, ValueError):
             return "unknown"
 
+    @staticmethod
+    def _try_set(cap, prop, value) -> bool:
+        """cap.set() that never throws: some drivers (seen on Windows)
+        raise cv2.error instead of returning False for properties they
+        reject, which used to crash open() with a 500."""
+        try:
+            return bool(cap.set(prop, value))
+        except Exception:
+            return False
+
     def _lock_exposure(self) -> None:
         """Best-effort exposure lock, per backend.
 
@@ -80,13 +90,9 @@ class Camera:
             auto, manual = 3.0, 1.0
         else:
             auto, manual = 0.75, 0.25
-        try:
-            if self.backend == "V4L2":
-                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, auto)
-            locked = cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, manual)
-        except Exception:
-            return
-        if not locked:
+        if self.backend == "V4L2":
+            self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, auto)
+        if not self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, manual):
             return
         try:
             exposure = float(current)  # type: ignore[arg-type]
@@ -94,10 +100,7 @@ class Camera:
             return
         if exposure == 0.0:
             return  # placeholder read; forcing 0 could black out the image
-        try:
-            cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
-        except Exception:
-            pass
+        self._try_set(cap, cv2.CAP_PROP_EXPOSURE, exposure)
 
     def _warmup(self) -> None:
         """Discard frames until the picture settles (or budget expires).
@@ -151,14 +154,14 @@ class Camera:
             cap = cv2.VideoCapture(self.index)
         if not cap.isOpened():
             raise CameraError(f"cannot open camera index {self.index}")
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self._try_set(cap, cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self._try_set(cap, cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         # Best-effort brightness from the UI slider (0..100 -> 0..1).
         try:
             clamped = max(0.0, min(100.0, float(self.brightness)))
-            cap.set(cv2.CAP_PROP_BRIGHTNESS, clamped / 100.0)
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            clamped = 50.0
+        self._try_set(cap, cv2.CAP_PROP_BRIGHTNESS, clamped / 100.0)
         self.cap = cap
         try:
             self.backend = self._backend_name(cap.get(cv2.CAP_PROP_BACKEND))
@@ -166,11 +169,8 @@ class Camera:
             self.backend = "unknown"
         self._lock_exposure()
         # Best-effort autofocus off: focus hunting looks exactly like drift.
-        try:
-            if hasattr(cv2, "CAP_PROP_AUTOFOCUS"):
-                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0.0)
-        except Exception:
-            pass
+        if hasattr(cv2, "CAP_PROP_AUTOFOCUS"):
+            self._try_set(cap, cv2.CAP_PROP_AUTOFOCUS, 0.0)
         if quick:
             for _ in range(3):
                 try:
@@ -184,7 +184,10 @@ class Camera:
     def capture(self) -> np.ndarray:
         if self.cap is None:
             raise CameraError("camera not open")
-        ok, frame = self.cap.read()
+        try:
+            ok, frame = self.cap.read()
+        except Exception as exc:
+            raise CameraError(f"frame grab failed: {exc}") from exc
         if not ok or frame is None:
             raise CameraError("frame grab failed")
         return frame
