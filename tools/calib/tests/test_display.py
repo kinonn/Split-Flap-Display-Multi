@@ -48,6 +48,32 @@ def _display(monkeypatch):
     return Display("splitflap.local")
 
 
+class PickupGapSession(FakeSession):
+    """Queued show not yet picked up: the first polls see an idle display
+    with a stale frame, then busy, then idle with the frame settled. The
+    old code failed this instantly with 'never reported settled'."""
+
+    def get(self, url, timeout=None, params=None):
+        if url.endswith("/api/calib/status"):
+            self.polls += 1
+            if self.polls <= 2:
+                return FakeResponse({"busy": False, "lastFrameId": 6})
+            if self.polls <= 4:
+                return FakeResponse({"busy": True, "lastFrameId": 6})
+            return FakeResponse({"busy": False, "lastFrameId": 7})
+        if url.endswith("/api/calib/frame"):
+            asked = (params or {}).get("frameId")
+            return FakeResponse({"settled": asked == 7 and self.polls >= 5})
+        return super().get(url, timeout=timeout, params=params)
+
+
+def test_show_survives_pickup_gap(monkeypatch):
+    monkeypatch.setattr(requests, "Session", PickupGapSession)
+    disp = Display("splitflap.local")
+    out = disp.show_and_settle("ABCD", dwell_ms=0, timeout_s=5)
+    assert out["frameId"] == 7
+
+
 def test_show_and_settle_polls_until_idle(monkeypatch):
     disp = _display(monkeypatch)
     out = disp.show_and_settle("ABCD", dwell_ms=0, timeout_s=5)

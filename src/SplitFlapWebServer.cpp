@@ -283,7 +283,13 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["schemaVersion"] = SETTINGS_SCHEMA_VERSION;
         response["mode"] = settings.getInt("mode");
         response["holdActive"] = settings.getInt("mode") == CALIB_HOLD_MODE;
-        response["busy"] = getCalibBusy();
+        // Busy covers queued work too: the loop task sets the flag only
+        // while executing, so a status poll landing between queueing and
+        // pickup used to see busy==false with a stale frame — the tool
+        // then aborted the whole run with a spurious "never reported
+        // settled" (seen on a 12-module fleet at frame 63).
+        response["busy"] = getCalibBusy() || pendingActions_.hasCalibShowPending() ||
+            pendingActions_.hasCalibPreviewPending();
         response["frameId"] = getCalibFrameId();
         {
             std::lock_guard<std::mutex> lock(calibMutex_);
