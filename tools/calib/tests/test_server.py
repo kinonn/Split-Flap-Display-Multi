@@ -187,8 +187,12 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIB_DATA", str(tmp_path))
 
     class FakeCam:
-        def __init__(self, index=0):
+        seen = []
+
+        def __init__(self, index=0, brightness=50.0):
             self.index = index
+            self.brightness = brightness
+            FakeCam.seen.append(self)
 
         def open(self, quick=False):
             assert quick  # live view must skip the settle wait
@@ -206,10 +210,16 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
 
     monkeypatch.setattr(srv, "Camera", FakeCam)
     monkeypatch.setattr(srv, "harness", IdleHarness())
-    r = TestClient(srv.app).get("/api/camera/frame?camera_index=0")
+    client = TestClient(srv.app)
+    r = client.get("/api/camera/frame?camera_index=0&brightness=80")
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/jpeg"
     assert r.content[:2] == b"\xff\xd8"
+    assert FakeCam.seen[-1].brightness == 80.0
+    # Without a query value the saved config applies.
+    save_config({"camera_brightness": 33})
+    assert client.get("/api/camera/frame").status_code == 200
+    assert FakeCam.seen[-1].brightness == 33.0
 
 
 def test_camera_frame_busy_during_run(tmp_path, monkeypatch):

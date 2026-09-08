@@ -86,6 +86,11 @@
     <span style="margin-left:8px;">Live camera view</span>
     <span class="hint" id="livemsg"></span>
   </div>
+  <div>
+    <label>Camera brightness (<span id="brightness_val">50</span>)</label>
+    <input id="camera_brightness" type="range" min="0" max="100" step="1" value="50"
+      oninput="$('brightness_val').textContent = this.value" />
+  </div>
   <img id="liveview" alt="Live camera view" />
 </div>
 
@@ -129,11 +134,18 @@ async function load() {
   $("timeout_s").value = c.timeout_s ?? 60;
   $("identity_thresh").value = c.identity_thresh ?? 0.85;
   $("relearn_templates").checked = !!c.relearn_templates;
+  $("camera_brightness").value = c.camera_brightness ?? 50;
+  $("brightness_val").textContent = c.camera_brightness ?? 50;
+}
+function brightness() {
+  const v = Number($("camera_brightness").value);
+  return Number.isFinite(v) ? v : 50;
 }
 function cfg() {
   return {
     display_host: $("display_host").value.trim(),
     camera_index: Number($("camera_index").value || 0),
+    camera_brightness: brightness(),
     phase: Number($("phase").value || 4),
     dwell_ms: Number($("dwell_ms").value || 800),
     timeout_s: Number($("timeout_s").value || 60),
@@ -160,7 +172,8 @@ async function checkCamera() {
   try {
     const s = await api("/api/check-camera", {method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({camera_index: Number($("camera_index").value || 0)})});
+      body: JSON.stringify({camera_index: Number($("camera_index").value || 0),
+                            camera_brightness: brightness()})});
     $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
                                    : "Camera problem: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
@@ -186,7 +199,8 @@ async function liveTick() {
   if (!liveOn) return;
   try {
     const idx = Number($("camera_index").value || 0);
-    const r = await fetch("/api/camera/frame?camera_index=" + idx);
+    const r = await fetch("/api/camera/frame?camera_index=" + idx +
+                          "&brightness=" + brightness());
     if (r.status === 409) {
       setLive(false);
       $("livemsg").textContent = "Camera busy — run in progress.";
