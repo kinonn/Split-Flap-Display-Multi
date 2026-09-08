@@ -57,6 +57,7 @@ def config_path() -> str:
 DEFAULTS = {
     "display_host": "splitflap.local",
     "camera_index": 0,
+    "camera_brightness": 50,
     "phase": 4,
     "dwell_ms": 800,
     "timeout_s": 60.0,
@@ -244,7 +245,8 @@ class Harness:
                                        "reason": f"display unreachable: {exc}"}
                     return
                 if owns_camera:
-                    cam = Camera(int(cfg.get("camera_index", 0)))
+                    cam = Camera(int(cfg.get("camera_index", 0)),
+                                 brightness=float(cfg.get("camera_brightness", 50)))
                     cam.open()
                     try:
                         diag = cam.check_camera()
@@ -357,7 +359,9 @@ def display_status():
 def check_camera(body: dict | None = None):
     cfg = load_config()
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
-    cam = Camera(index)
+    brightness = float((body or {}).get("camera_brightness",
+                                        cfg.get("camera_brightness", 50)))
+    cam = Camera(index, brightness=brightness)
     try:
         cam.open()
         diag = cam.check_camera()
@@ -369,7 +373,7 @@ def check_camera(body: dict | None = None):
 
 
 @app.get("/api/camera/frame")
-def camera_frame(camera_index: int | None = None):
+def camera_frame(camera_index: int | None = None, brightness: float | None = None):
     """Single live JPEG frame for the UI preview (no run needed).
 
     Opens the camera, grabs one frame with a short warm-up
@@ -380,7 +384,9 @@ def camera_frame(camera_index: int | None = None):
         raise HTTPException(409, "camera busy: run in progress")
     cfg = load_config()
     index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
-    cam = Camera(index)
+    if brightness is None:
+        brightness = float(cfg.get("camera_brightness", 50))
+    cam = Camera(index, brightness=float(brightness))
     try:
         cam.open(quick=True)
         frame = cam.capture()

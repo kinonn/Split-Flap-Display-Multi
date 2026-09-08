@@ -115,3 +115,13 @@ def test_check_raises_after_attempts(fake_cv, monkeypatch):
     cam = Camera().open()
     with pytest.raises(CameraError, match=r"frame drift.*after 3 attempts"):
         cam.check_camera()
+
+
+def test_brightness_applied_and_clamped(fake_cv):
+    cam = Camera(brightness=80).open()
+    assert cam.brightness == 80
+    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [0.8]
+    Camera(brightness=250).open()
+    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [1.0]
+    Camera().open()  # default 50 -> 0.5
+    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [0.5]

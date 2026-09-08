@@ -22,6 +22,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", required=True,
                         help="Master hostname/IP, e.g. splitflap.local")
     parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--camera-brightness", type=float, default=50.0,
+                        help="Camera brightness 0..100 (best-effort, "
+                             "backend-dependent)")
     parser.add_argument("--photo-dir", default="./calib-photos")
     parser.add_argument("--phase", type=int, choices=(1, 2, 3, 4), default=4,
                         help="1=read-only proposals, 2=+volatile previews, "
@@ -80,7 +83,7 @@ def main(argv=None) -> int:
     print(f"display: {status.get('totalModules')} modules, "
           f"charset {status.get('charset')}, contract v{status.get('contractVersion')}")
 
-    with Camera(args.camera_index) as camera:
+    with Camera(args.camera_index, brightness=args.camera_brightness) as camera:
         if args.check_camera:
             try:
                 diag = camera.check_camera()

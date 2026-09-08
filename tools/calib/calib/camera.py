@@ -32,10 +32,14 @@ class Camera:
     # longer fails the whole check.
     CHECK_ATTEMPTS = 3
 
-    def __init__(self, index: int = 0, width: int = 1280, height: int = 720):
+    def __init__(self, index: int = 0, width: int = 1280, height: int = 720,
+                 brightness: float = 50.0):
         self.index = index
         self.width = width
         self.height = height
+        # UI slider scale 0..100. Applied best-effort: exact property
+        # ranges are backend-dependent, unsupported backends ignore it.
+        self.brightness = brightness
         self.cap: cv2.VideoCapture | None = None
         self.backend = "unknown"
 
@@ -149,6 +153,12 @@ class Camera:
             raise CameraError(f"cannot open camera index {self.index}")
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        # Best-effort brightness from the UI slider (0..100 -> 0..1).
+        try:
+            clamped = max(0.0, min(100.0, float(self.brightness)))
+            cap.set(cv2.CAP_PROP_BRIGHTNESS, clamped / 100.0)
+        except Exception:
+            pass
         self.cap = cap
         try:
             self.backend = self._backend_name(cap.get(cv2.CAP_PROP_BACKEND))
