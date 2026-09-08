@@ -10,8 +10,9 @@ import json
 import os
 import threading
 
+import cv2
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from urllib.parse import urlparse
 
 from calib.camera import Camera, CameraError
@@ -62,6 +63,7 @@ def load_config() -> dict:
     cfg.setdefault("llm_base_url", "https://opencode.ai/zen/go/v1")
     cfg.setdefault("llm_model", "deepseek-v4-flash-vision-exp")
     cfg.setdefault("camera_index", 0)
+    cfg.setdefault("camera_brightness", 50)
     cfg.setdefault("mode", "full")
     return cfg
 
@@ -78,7 +80,7 @@ def save_config(patch: dict) -> dict:
     except (OSError, ValueError):
         pass
     for key in ("display_host", "llm_base_url", "llm_model", "camera_index",
-                "identity_thresh", "phase"):
+                "camera_brightness", "identity_thresh", "phase"):
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
     if patch.get("llm_api_key"):
@@ -159,7 +161,8 @@ class Harness:
                         self.report = {"result": "needs-human",
                                        "reason": f"display unreachable: {exc}"}
                     return
-                camera = Camera(int(cfg.get("camera_index", 0)))
+                camera = Camera(int(cfg.get("camera_index", 0)),
+                                brightness=float(cfg.get("camera_brightness", 50)))
                 camera.open()
                 try:
                     camera.check_camera()
@@ -249,7 +252,9 @@ def display_status():
 def check_camera(body: dict | None = None):
     cfg = load_config()
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
-    cam = Camera(index)
+    brightness = float((body or {}).get("camera_brightness",
+                                        cfg.get("camera_brightness", 50)))
+    cam = Camera(index, brightness=brightness)
     try:
         cam.open()
         diag = cam.check_camera()
@@ -258,6 +263,37 @@ def check_camera(body: dict | None = None):
         return {"ok": False, "error": str(exc)}
     finally:
         cam.close()
+
+
+@app.get("/api/camera/frame")
+def camera_frame(camera_index: int | None = None, brightness: float | None = None):
+    """Single live JPEG frame for the UI preview (no run needed).
+
+    Opens the camera, grabs one frame with a short warm-up
+    (Camera.open(quick=True)) and closes it again. Refused while a run
+    owns the camera.
+    """
+    if harness.state()["status"] in ("running", "aborting"):
+        raise HTTPException(409, "camera busy: run in progress")
+    cfg = load_config()
+    index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
+    if brightness is None:
+        brightness = float(cfg.get("camera_brightness", 50))
+    cam = Camera(index, brightness=float(brightness))
+    try:
+        cam.open(quick=True)
+        frame = cam.capture()
+    except CameraError as exc:
+        raise HTTPException(502, f"camera error: {exc}")
+    finally:
+        cam.close()
+    h, w = frame.shape[:2]
+    if w > 960:
+        frame = cv2.resize(frame, (960, int(h * 960 / w)))
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if not ok:
+        raise HTTPException(502, "JPEG encode failed")
+    return Response(content=bytes(buf), media_type="image/jpeg")
 
 
 @app.post("/api/run/start")

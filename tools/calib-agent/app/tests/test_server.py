@@ -63,3 +63,44 @@ def test_start_key_policy(tmp_path, monkeypatch):
     # local endpoint needs no key -> accepted
     client.post("/api/config", json={"llm_base_url": "http://localhost:11434/v1"})
     assert client.post("/api/run/start").status_code == 200
+
+
+def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
+    import numpy as np
+
+    monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
+    monkeypatch.setattr(server.harness, "run_dir", "")
+    monkeypatch.setattr(server.harness, "status", "idle")
+
+    class FakeCam:
+        seen = []
+
+        def __init__(self, index=0, brightness=50.0):
+            self.brightness = brightness
+            FakeCam.seen.append(self)
+
+        def open(self, quick=False):
+            assert quick  # live view must skip the settle wait
+            return self
+
+        def capture(self):
+            return np.zeros((48, 64, 3), dtype=np.uint8)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "Camera", FakeCam)
+    client = TestClient(server.app)
+    r = client.get("/api/camera/frame?camera_index=0&brightness=80")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content[:2] == b"\xff\xd8"
+    assert FakeCam.seen[-1].brightness == 80.0
+
+
+def test_camera_frame_busy_during_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
+    monkeypatch.setattr(server.harness, "run_dir", "")
+    monkeypatch.setattr(server.harness, "status", "running")
+    client = TestClient(server.app)
+    assert client.get("/api/camera/frame").status_code == 409

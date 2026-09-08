@@ -34,6 +34,18 @@
   #report { white-space: pre-wrap; font-family: monospace; font-size: .8rem;
             background: #0d0d0d; border-radius: 6px; padding: 8px; }
   .hint { color: #999; font-size: .85rem; }
+  .switch { position: relative; display: inline-block; width: 40px; height: 22px;
+            vertical-align: middle; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; border-radius: 22px; background: #444;
+            transition: .2s; }
+  .slider:before { content: ""; position: absolute; height: 16px; width: 16px;
+                   left: 3px; top: 3px; border-radius: 50%; background: #eee;
+                   transition: .2s; }
+  .switch input:checked + .slider { background: #2e7d32; }
+  .switch input:checked + .slider:before { transform: translateX(18px); }
+  #liveview { display: none; max-width: 100%; margin-top: 8px; border-radius: 6px;
+              border: 1px solid #444; }
 </style>
 </head>
 <body>
@@ -65,6 +77,18 @@
     <button class="mid" onclick="checkCamera()">Check camera</button>
   </div>
   <p class="hint" id="cfgmsg"></p>
+  <div>
+    <label class="switch"><input id="live_toggle" type="checkbox" checked />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Live camera view</span>
+    <span class="hint" id="livemsg"></span>
+  </div>
+  <div>
+    <label>Camera brightness (<span id="brightness_val">50</span>)</label>
+    <input id="camera_brightness" type="range" min="0" max="100" step="1" value="50"
+      oninput="$('brightness_val').textContent = this.value" />
+  </div>
+  <img id="liveview" alt="Live camera view" />
 </div>
 
 <div class="card">
@@ -110,18 +134,25 @@ async function load() {
   $("llm_model").value = c.llm_model || "";
   $("llm_base_url").value = c.llm_base_url || "";
   $("run_mode").value = c.mode || "full";
+  $("camera_brightness").value = c.camera_brightness ?? 50;
+  $("brightness_val").textContent = c.camera_brightness ?? 50;
   const known = [...$("preset").options].map(o => o.value);
   $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
 }
 $("preset").onchange = () => {
   if ($("preset").value !== "custom") $("llm_base_url").value = $("preset").value;
 };
+function brightness() {
+  const v = Number($("camera_brightness").value);
+  return Number.isFinite(v) ? v : 50;
+}
 async function save() {
   try {
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"}, body: JSON.stringify({
         display_host: $("display_host").value.trim(),
         camera_index: Number($("camera_index").value || 0),
+        camera_brightness: brightness(),
         llm_base_url: $("llm_base_url").value.trim(),
         llm_model: $("llm_model").value.trim(),
         llm_api_key: $("llm_api_key").value })});
@@ -141,7 +172,8 @@ async function checkCamera() {
   try {
     const s = await api("/api/check-camera", {method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({camera_index: Number($("camera_index").value || 0)})});
+      body: JSON.stringify({camera_index: Number($("camera_index").value || 0),
+                            camera_brightness: brightness()})});
     $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
                                    : "Camera problem: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
@@ -156,6 +188,39 @@ async function start() {
   catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
 }
 async function abort() { await api("/api/run/abort", {method: "POST"}); }
+let liveOn = false, liveTimer = null;
+function setLive(on) {
+  liveOn = on;
+  $("live_toggle").checked = on;
+  try { localStorage.setItem("calibAgentLiveView", on ? "1" : "0"); } catch (e) {}
+  $("liveview").style.display = on ? "block" : "none";
+  if (on) { $("livemsg").textContent = ""; liveTick(); }
+  else if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+}
+async function liveTick() {
+  if (!liveOn) return;
+  try {
+    const idx = Number($("camera_index").value || 0);
+    const r = await fetch("/api/camera/frame?camera_index=" + idx +
+                          "&brightness=" + brightness());
+    if (r.status === 409) {
+      setLive(false);
+      $("livemsg").textContent = "Camera busy — run in progress.";
+      return;
+    }
+    if (!r.ok) throw new Error(r.statusText);
+    const blob = await r.blob();
+    const img = $("liveview");
+    const old = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+  } catch (e) {
+    setLive(false);
+    $("livemsg").textContent = "Live view off: " + e.message;
+    return;
+  }
+  liveTimer = setTimeout(liveTick, 800);
+}
 async function restore() {
   try { const r = await api("/api/run/restore-snapshot", {method: "POST"});
         $("runmsg").textContent = "Snapshot restored."; }
@@ -231,6 +296,11 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 load(); poll();
+// Live view toggle, enabled by default; preference sticks across reloads.
+$("live_toggle").onchange = (e) => setLive(e.target.checked);
+let livePref = "1";
+try { livePref = localStorage.getItem("calibAgentLiveView") || "1"; } catch (e) {}
+setLive(livePref !== "0");
 </script>
 </body>
 </html>
