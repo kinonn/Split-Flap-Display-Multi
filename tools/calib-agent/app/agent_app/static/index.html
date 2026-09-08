@@ -71,6 +71,8 @@
   <label>Base URL</label><input id="llm_base_url" />
   <label>API key (OpenCode Zen key for Go; stored server-side, never shown)</label>
   <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off" />
+  <label>Reasoning effort (optional: low/medium/high — empty = provider default)</label>
+  <input id="llm_reasoning_effort" placeholder="(provider default)" />
   <div>
     <button class="mid" onclick="save()">Save</button>
     <button class="mid" onclick="checkDisplay()">Check display</button>
@@ -133,6 +135,7 @@ async function load() {
   $("camera_index").value = c.camera_index ?? 0;
   $("llm_model").value = c.llm_model || "";
   $("llm_base_url").value = c.llm_base_url || "";
+  $("llm_reasoning_effort").value = c.llm_reasoning_effort || "";
   $("run_mode").value = c.mode || "full";
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
@@ -155,6 +158,7 @@ async function save() {
         camera_brightness: brightness(),
         llm_base_url: $("llm_base_url").value.trim(),
         llm_model: $("llm_model").value.trim(),
+        llm_reasoning_effort: $("llm_reasoning_effort").value.trim(),
         llm_api_key: $("llm_api_key").value })});
     $("cfgmsg").textContent = "Saved.";
     $("llm_api_key").value = "";
@@ -169,6 +173,7 @@ async function checkDisplay() {
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
 }
 async function checkCamera() {
+  setLive(false); // free the device first: a live poll holding it would fail the check
   try {
     const s = await api("/api/check-camera", {method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -180,6 +185,7 @@ async function checkCamera() {
 }
 async function start() {
   try {
+    setLive(false); // stop the 800ms polls before the run takes the camera
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({mode: $("run_mode").value})});

@@ -31,14 +31,22 @@ class Camera:
     # Measurement attempts per check_camera() call: one unlucky window no
     # longer fails the whole check.
     CHECK_ATTEMPTS = 3
+    # Opening can transiently fail right after another handle released
+    # the device (Windows MSMF reports "busy" for a short while), so
+    # open() retries a few times before declaring the camera gone.
+    OPEN_ATTEMPTS = 3
+    OPEN_RETRY_GAP_S = 0.4
 
     def __init__(self, index: int = 0, width: int = 1280, height: int = 720,
                  brightness: float = 50.0):
         self.index = index
         self.width = width
         self.height = height
-        # UI slider scale 0..100. Applied best-effort: exact property
-        # ranges are backend-dependent, unsupported backends ignore it.
+        # UI slider scale 0..100, 50 = neutral. Applied in software to
+        # every frame capture() delivers: the driver property
+        # (CAP_PROP_BRIGHTNESS) is unreliable — many backends ignore it
+        # or map it to a narrow range — and the live view must show
+        # exactly what the camera check and calibration score.
         self.brightness = brightness
         self.cap: cv2.VideoCapture | None = None
         self.backend = "unknown"
@@ -107,12 +115,15 @@ class Camera:
 
         Minimum 5 reads (first frames are often dark/partial), then keep
         going while consecutive gray frames disagree by more than
-        DRIFT_OK.
+        DRIFT_OK. Raises CameraError when the device opened but never
+        produced a single frame — without this open() would "succeed"
+        and the failure resurface later as a confusing frame-grab error.
         """
         cap = self.cap
         assert cap is not None
         prev = None
         reads = 0
+        good = 0
         deadline = time.monotonic() + self.WARMUP_SETTLE_S
         while True:
             try:
@@ -122,6 +133,7 @@ class Camera:
             reads += 1
             gray = None
             if ok and frame is not None:
+                good += 1
                 try:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 except Exception:
@@ -136,7 +148,39 @@ class Camera:
             if gray is not None:
                 prev = gray
             if reads > 5 and time.monotonic() > deadline:
+                if good == 0:
+                    raise CameraError(
+                        "camera opened but returned no frames within "
+                        f"{self.WARMUP_SETTLE_S:.0f}s "
+                        "(busy elsewhere or unplugged?)")
                 return
+
+    def _open_backend(self) -> "cv2.VideoCapture | None":
+        """One open attempt through the backend preference order.
+
+        Returns an opened capture or None; constructors are guarded
+        because some drivers raise cv2.error instead of yielding an
+        unopened handle.
+        """
+        cap = None
+        if hasattr(cv2, "CAP_V4L2"):
+            try:
+                cap = cv2.VideoCapture(self.index, cv2.CAP_V4L2)
+            except Exception:
+                cap = None
+            if cap is not None and not cap.isOpened():
+                # fall back to default backend (macOS/Windows)
+                cap.release()
+                cap = None
+        if cap is None:
+            try:
+                cap = cv2.VideoCapture(self.index)
+            except Exception:
+                cap = None
+        if cap is not None and not cap.isOpened():
+            cap.release()
+            return None
+        return cap
 
     def open(self, quick: bool = False) -> "Camera":
         """Open the camera and prepare it for capture.
@@ -146,22 +190,18 @@ class Camera:
         live view) it skips the settle wait and just grabs a few frames —
         a slightly unconverged first frame is fine for framing.
         """
-        if hasattr(cv2, "CAP_V4L2"):
-            cap = cv2.VideoCapture(self.index, cv2.CAP_V4L2)
-            if not cap.isOpened():  # fall back to default backend (macOS/Windows)
-                cap = cv2.VideoCapture(self.index)
-        else:
-            cap = cv2.VideoCapture(self.index)
-        if not cap.isOpened():
-            raise CameraError(f"cannot open camera index {self.index}")
+        cap = None
+        for attempt in range(1, self.OPEN_ATTEMPTS + 1):
+            cap = self._open_backend()
+            if cap is not None:
+                break
+            if attempt < self.OPEN_ATTEMPTS:
+                time.sleep(self.OPEN_RETRY_GAP_S)
+        if cap is None:
+            raise CameraError(f"cannot open camera index {self.index} "
+                              "(busy elsewhere, wrong index, or unplugged?)")
         self._try_set(cap, cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self._try_set(cap, cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        # Best-effort brightness from the UI slider (0..100 -> 0..1).
-        try:
-            clamped = max(0.0, min(100.0, float(self.brightness)))
-        except (TypeError, ValueError):
-            clamped = 50.0
-        self._try_set(cap, cv2.CAP_PROP_BRIGHTNESS, clamped / 100.0)
         self.cap = cap
         try:
             self.backend = self._backend_name(cap.get(cv2.CAP_PROP_BACKEND))
@@ -181,6 +221,26 @@ class Camera:
         self._warmup()
         return self
 
+    def _apply_brightness(self, frame: np.ndarray) -> np.ndarray:
+        """Software brightness gain applied to every delivered frame.
+
+        Slider 0..100 maps to gain 0..2 with 50 = neutral (1.0), so
+        dragging the slider visibly changes the live view on every
+        backend. This is the single source of truth for brightness:
+        captures (camera check, calibration scoring) see the same image
+        the live view shows.
+        """
+        try:
+            b = float(self.brightness)
+        except (TypeError, ValueError):
+            return frame
+        if not np.isfinite(b):
+            return frame
+        factor = max(0.0, min(100.0, b)) / 50.0
+        if abs(factor - 1.0) < 0.01:
+            return frame
+        return cv2.convertScaleAbs(frame, alpha=factor, beta=0.0)
+
     def capture(self, retries: int = 3) -> np.ndarray:
         """Grab one frame, retrying transient driver hiccups.
 
@@ -198,7 +258,7 @@ class Camera:
                 last_exc = exc
                 ok, frame = False, None
             if ok and frame is not None:
-                return frame
+                return self._apply_brightness(frame)
             time.sleep(0.1)
         detail = f": {last_exc}" if last_exc is not None else " (camera busy elsewhere or unplugged?)"
         raise CameraError(f"frame grab failed{detail}")
@@ -240,6 +300,7 @@ class Camera:
             dark = float(np.mean(grays[-1] <= 5))
             diag = {
                 "resolution": [int(frames[-1].shape[1]), int(frames[-1].shape[0])],
+                "brightness": self.brightness,
                 "mean_brightness": round(mean, 1),
                 "drift": round(drift, 3),
                 "saturated_frac": round(saturated, 4),

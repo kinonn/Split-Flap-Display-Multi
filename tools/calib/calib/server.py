@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 
@@ -27,11 +28,18 @@ from .loop import Calibrator
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-# Serializes the quick camera endpoints (check, live frame). FastAPI runs
-# each request in its own thread and Windows webcam drivers handle
-# concurrent opens badly (empty grabs); runs own the camera exclusively
-# and are 409-guarded instead.
+# Camera ownership: the run is the ONLY component that opens the camera
+# for real work, and it does so under this lock for the whole run (only
+# when it owns the camera; injected fakes in tests skip it). The quick
+# endpoints (check, live frame) take it non-blocking/bounded and answer
+# 409 when busy — FastAPI runs each request in its own thread and
+# Windows webcam drivers handle concurrent opens badly (empty grabs).
 _camera_lock = threading.Lock()
+# Bounded waits so nobody ever opens the device twice: a live-view poll
+# releases it within ~2 s, so the check briefly waits for stragglers and
+# the run waits a little longer before giving up.
+_CHECK_LOCK_WAIT_S = 2.5
+_RUN_LOCK_WAIT_S = 30.0
 
 
 def data_dir() -> str:
@@ -58,6 +66,28 @@ def alloc_run_dir(runs_dir: str) -> str:
 
 def config_path() -> str:
     return os.path.join(data_dir(), "config.json")
+
+
+def clear_previous_runs(runs_dir: str) -> int:
+    """Delete the output of earlier runs (photos, logs, reports, snapshots).
+
+    Called when a run starts so runs/ only ever holds the active run —
+    stale evidence must not linger beside (or be mistaken for) current
+    results. Returns how many entries were removed.
+    """
+    removed = 0
+    if os.path.isdir(runs_dir):
+        for name in os.listdir(runs_dir):
+            path = os.path.join(runs_dir, name)
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 DEFAULTS = {
@@ -230,13 +260,19 @@ class Harness:
             self.calib = None
             self.abort_requested = False
         runs_dir = os.path.join(data_dir(), "runs")
+        cleared = clear_previous_runs(runs_dir)
         run_dir = alloc_run_dir(runs_dir)
         with self.lock:
             self.run_dir = run_dir
+        if cleared:
+            self.log({"t": time.strftime("%H:%M:%S"), "kind": "run",
+                      "text": f"cleared {cleared} previous run(s) "
+                              "(old logs, photos, reports)", "photo": None})
 
         def _run():
             cam = camera
             owns_camera = cam is None
+            cam_lock_held = False
             try:
                 disp = display or Display(cfg["display_host"],
                                          timeout_s=float(cfg.get("timeout_s", 60.0)))
@@ -251,6 +287,17 @@ class Harness:
                                        "reason": f"display unreachable: {exc}"}
                     return
                 if owns_camera:
+                    # The camera is initialized exactly once, here, under
+                    # _camera_lock. A quick-endpoint request that slipped
+                    # past its 409 guard just before start() may still
+                    # hold the device — wait for it (releases within ~2 s)
+                    # instead of double-opening, which Windows drivers
+                    # answer with empty grabs and a bogus "busy elsewhere".
+                    if not _camera_lock.acquire(timeout=_RUN_LOCK_WAIT_S):
+                        raise CameraError(
+                            f"camera stayed busy for {_RUN_LOCK_WAIT_S:.0f}s "
+                            "(live view or check never released it)")
+                    cam_lock_held = True
                     cam = Camera(int(cfg.get("camera_index", 0)),
                                  brightness=float(cfg.get("camera_brightness", 50)))
                     cam.open()
@@ -297,6 +344,17 @@ class Harness:
                     self.status = "aborting" if self.abort_requested else "done"
                     if self.status == "aborting":
                         self.report["reason"] = "aborted by user"
+            except CameraError as exc:
+                try:
+                    (display or Display(cfg["display_host"])).hold(False)
+                except Exception:
+                    pass
+                self.log({"t": time.strftime("%H:%M:%S"), "kind": "error",
+                          "text": f"camera error: {exc}", "photo": None})
+                with self.lock:
+                    self.status = "failed"
+                    self.report = {"result": "needs-human",
+                                   "reason": f"camera error: {exc}"}
             except Exception as exc:  # surface crash in UI, release hold
                 try:
                     (display or Display(cfg["display_host"])).hold(False)
@@ -313,6 +371,8 @@ class Harness:
                         cam.close()
                     except Exception:
                         pass
+                if cam_lock_held:
+                    _camera_lock.release()
 
         self.thread = threading.Thread(target=_run, daemon=True)
         self.thread.start()
@@ -364,19 +424,25 @@ def display_status():
 @app.post("/api/check-camera")
 def check_camera(body: dict | None = None):
     cfg = load_config()
+    if harness.state()["status"] in ("running", "aborting"):
+        raise HTTPException(409, "camera busy: run in progress")
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
     brightness = float((body or {}).get("camera_brightness",
                                         cfg.get("camera_brightness", 50)))
-    with _camera_lock:
-        cam = Camera(index, brightness=brightness)
-        try:
-            cam.open()
-            diag = cam.check_camera()
-            return {"ok": True, "diagnostics": diag}
-        except CameraError as exc:
-            return {"ok": False, "error": str(exc)}
-        finally:
-            cam.close()
+    # Brief bounded wait: an in-flight live-view poll releases the device
+    # within ~2 s. Never open the camera concurrently with anyone.
+    if not _camera_lock.acquire(timeout=_CHECK_LOCK_WAIT_S):
+        raise HTTPException(409, "camera busy: live view or run holds it")
+    cam = Camera(index, brightness=brightness)
+    try:
+        cam.open()
+        diag = cam.check_camera()
+        return {"ok": True, "diagnostics": diag}
+    except CameraError as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        cam.close()
+        _camera_lock.release()
 
 
 @app.get("/api/camera/frame")
@@ -385,7 +451,9 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
 
     Opens the camera, grabs one frame with a short warm-up
     (Camera.open(quick=True)) and closes it again. Refused while a run
-    owns the camera.
+    owns the camera, or while any other request holds the device —
+    never opened concurrently (Windows drivers answer that with empty
+    grabs, which is how runs used to die right after start).
     """
     if harness.state()["status"] in ("running", "aborting"):
         raise HTTPException(409, "camera busy: run in progress")
@@ -393,15 +461,17 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
     index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
     if brightness is None:
         brightness = float(cfg.get("camera_brightness", 50))
-    with _camera_lock:
-        cam = Camera(index, brightness=float(brightness))
-        try:
-            cam.open(quick=True)
-            frame = cam.capture()
-        except CameraError as exc:
-            raise HTTPException(502, f"camera error: {exc}")
-        finally:
-            cam.close()
+    if not _camera_lock.acquire(blocking=False):
+        raise HTTPException(409, "camera busy: check or run holds it")
+    cam = Camera(index, brightness=float(brightness))
+    try:
+        cam.open(quick=True)
+        frame = cam.capture()
+    except CameraError as exc:
+        raise HTTPException(502, f"camera error: {exc}")
+    finally:
+        cam.close()
+        _camera_lock.release()
     h, w = frame.shape[:2]
     if w > 960:
         frame = cv2.resize(frame, (960, int(h * 960 / w)))

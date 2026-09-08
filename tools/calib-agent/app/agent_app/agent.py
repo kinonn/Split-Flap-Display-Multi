@@ -134,6 +134,10 @@ def load_system_prompt() -> str:
     return (
         "You are calibrating a split-flap display through tools. Rules:\n"
         + prompt + "\n\nFull runbook:\n" + prod + "\n\nTool discipline:\n"
+        "- Module indices are 0-BASED: the leftmost module is 0. The Nth "
+        "module from the left is index N-1 (a defect on the 7th module "
+        "from the left is m6). When a capture result lists suspects, "
+        "preview/persist exactly those indices.\n"
         "- Call get_status first; engage hold before any show.\n"
         "- P0 registration: show blank, all-H, then the index strip with a "
         "tag containing 'index', capturing after every show.\n"
@@ -304,6 +308,19 @@ class Agent:
         out = {"photo": rec["photo"], "scores": rec["scores"], "_image": rec["image"]}
         if len(expected) == len(rec["crops"]):
             out["identity_outliers"] = outliers
+        if outliers:
+            # The model kept converting "7th module from the left" into m7
+            # instead of m6 (1-based vs 0-based) and nudged the neighbor.
+            # Spell the indices out so there is nothing to convert.
+            suspects = []
+            for i in outliers:
+                ranked = (vision.identify(rec["crops"][i], self.calib.templates)
+                          if expected[i] in self.calib.templates else [])
+                seen = ranked[0][0] if ranked else "?"
+                suspects.append(f"module {i} (= {i + 1}th from left): "
+                                f"expected {expected[i]!r}, displays {seen!r}")
+            out["suspects"] = ("defective modules — use these exact 0-BASED "
+                               "indices in preview/persist: " + "; ".join(suspects))
         out["verified"] = verified
         if not verified:
             out["warning"] = (f"expected {expected!r} != shown frame "
@@ -349,7 +366,10 @@ class Agent:
         # Structural verify-after: photo + scores are part of the result.
         frame = self.last_frame or " " * self.calib.total
         rec = self._photo_record(frame, f"pv_m{module}c{ci}")
-        self.event("preview", f"preview m{module} c{ci} {delta:+d}", rec["photo"],
+        expected = frame[module] if 0 <= module < len(frame) else "?"
+        self.event("preview", f"preview m{module} c{ci} {delta:+d} "
+                              f"(0-based; expected glyph {expected!r} "
+                              f"at this module)", rec["photo"],
                    detail={"frame": frame, "scores": rec["scores"],
                            "module": module, "charIndex": ci, "delta": delta})
         return {"scores": rec["scores"], "photo": rec["photo"], "_image": rec["image"]}
@@ -479,13 +499,28 @@ class Agent:
         self.event("run", f"started: {calib.total} modules, charset {calib.charset}")
         while self.steps < self.max_steps and not self.aborted:
             self.steps += 1
+            # The model round trip is the long pole between one show+photo
+            # set and the next (runbook-sized system prompt + trailing
+            # photos + whole text history, then provider inference). Log
+            # it so the UI shows what the pause is instead of looking hung.
+            self.event("vlm", f"step {self.steps}: model thinking… "
+                              f"({len(messages)} msgs, ~"
+                              f"{len(json.dumps(messages, default=str)) // 1024} KB)")
+            t0 = time.monotonic()
             try:
                 reply = self.vlm.chat(messages, TOOL_SCHEMAS)
             except Exception as exc:
+                self.event("vlm", f"step {self.steps}: model call failed after "
+                                  f"{time.monotonic() - t0:.0f}s: {exc}")
                 messages.append({"role": "assistant", "content": f"VLM error: {exc}"})
                 if self.steps > 5:
                     return self._done("needs-human", f"VLM failing repeatedly: {exc}")
                 continue
+            calls = reply.get("tool_calls") or []
+            names = ", ".join(str(c.get("name") or "?") for c in calls)
+            self.event("vlm", f"step {self.steps}: model replied in "
+                              f"{time.monotonic() - t0:.0f}s → "
+                              f"{names or 'text only, no tool call'}")
             assistant: dict = {"role": "assistant"}
             if reply.get("content"):
                 assistant["content"] = reply["content"]

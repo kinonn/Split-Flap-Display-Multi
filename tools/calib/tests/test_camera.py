@@ -136,14 +136,31 @@ def test_check_raises_after_attempts(fake_cv, monkeypatch):
         cam.check_camera()
 
 
-def test_brightness_applied_and_clamped(fake_cv):
-    cam = Camera(brightness=80).open()
-    assert cam.brightness == 80
-    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [0.8]
-    Camera(brightness=250).open()
-    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [1.0]
-    Camera().open()  # default 50 -> 0.5
-    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [0.5]
+def test_brightness_slider_adjusts_captured_frames(fake_cv):
+    # Slider 0..100 applies a software gain (50 = neutral, gain 0..2) to
+    # every captured frame, so the live view reflects the slider on
+    # backends that ignore CAP_PROP_BRIGHTNESS.
+    FakeCapture.values = [100]
+    cam = Camera(brightness=75).open()
+    assert float(np.mean(cam.capture())) == 150.0
+    cam = Camera(brightness=25).open()
+    assert float(np.mean(cam.capture())) == 50.0
+    cam = Camera(brightness=50).open()
+    assert float(np.mean(cam.capture())) == 100.0
+    # Out-of-range slider values clamp to 0..100 (gain 2 at the top).
+    cam = Camera(brightness=250).open()
+    assert float(np.mean(cam.capture())) == 200.0
+    # No driver CAP_PROP_BRIGHTNESS is set anymore (software-only).
+    assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == []
+
+
+def test_brightness_reported_in_check_diagnostics(fake_cv):
+    FakeCapture.values = [100]
+    cam = Camera(brightness=75).open()
+    diag = cam.check_camera()
+    assert diag["brightness"] == 75
+    # The measured mean reflects the software gain, not the raw frame.
+    assert diag["mean_brightness"] == 150.0
 
 
 def test_capture_retries_transient_grab(fake_cv):
@@ -159,3 +176,41 @@ def test_capture_raises_after_retries(fake_cv):
     FakeCapture.fail_reads = 99
     with pytest.raises(CameraError, match="frame grab failed"):
         cam.capture()
+
+
+def test_open_retries_transient_busy(fake_cv, monkeypatch):
+    # A device just released by another handle can refuse the first open
+    # attempt (Windows MSMF reports "busy" for a moment): open() must
+    # retry before giving up.
+    monkeypatch.setattr(Camera, "OPEN_ATTEMPTS", 3)
+    monkeypatch.setattr(Camera, "OPEN_RETRY_GAP_S", 0.01)
+    built = []
+    orig_init = FakeCapture.__init__
+
+    def counting_init(self, index, backend=None):
+        built.append(self)
+        orig_init(self, index, backend)
+
+    monkeypatch.setattr(FakeCapture, "__init__", counting_init)
+    # First two constructor attempts yield an unopened handle.
+    monkeypatch.setattr(FakeCapture, "isOpened", lambda self: built.index(self) >= 2)
+    cam = Camera().open()
+    assert len(built) == 3
+    assert cam.cap is built[-1]
+
+
+def test_open_raises_when_always_busy(fake_cv, monkeypatch):
+    monkeypatch.setattr(Camera, "OPEN_RETRY_GAP_S", 0.01)
+    monkeypatch.setattr(FakeCapture, "isOpened", lambda self: False)
+    with pytest.raises(CameraError, match="cannot open camera index 0"):
+        Camera().open()
+
+
+def test_open_raises_when_no_frames_ever_arrive(fake_cv, monkeypatch):
+    # Windows can report the device open yet hand back only empty grabs
+    # while another process still holds it: fail fast at open with a
+    # clear reason instead of a confusing frame-grab error later.
+    monkeypatch.setattr(Camera, "WARMUP_SETTLE_S", 0.1)
+    FakeCapture.fail_reads = 10 ** 9  # never serves a frame during the test
+    with pytest.raises(CameraError, match="returned no frames"):
+        Camera().open()

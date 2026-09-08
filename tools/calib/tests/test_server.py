@@ -160,6 +160,25 @@ def test_double_start_conflicts(tmp_path, monkeypatch):
         h.thread.join(timeout=120)
 
 
+def test_start_clears_previous_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+    old = tmp_path / "runs" / "run-001"
+    old.mkdir(parents=True)
+    (old / "photo_0001.jpg").write_bytes(b"old")
+    (old / "report.json").write_text("{}")
+    h = Harness()
+    h.start(_cfg(), display=FakeDisplay(), camera=FakeCamera())
+    h.thread.join(timeout=120)
+    st = h.state()
+    assert st["status"] == "done", st["report"]
+    # Old run output is gone; the fresh run reuses the run-001 name
+    # (its dir exists again but only holds this run's files).
+    assert st["run_dir"].endswith("run-001")
+    assert not (old / "photo_0001.jpg").exists()
+    # report.json exists again, but is this run's report, not the stale {}.
+    assert (old / "report.json").read_text() != "{}"
+
+
 def test_photo_rejects_path_traversal():
     with pytest.raises(Exception, match="bad photo name"):
         photo("../report.json")
@@ -235,3 +254,64 @@ def test_camera_frame_busy_during_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(srv, "harness", BusyHarness())
     assert TestClient(srv.app).get("/api/camera/frame").status_code == 409
+
+
+def test_check_camera_busy_during_run(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+
+    class BusyHarness:
+        def state(self):
+            return {"status": "running"}
+
+    monkeypatch.setattr(srv, "harness", BusyHarness())
+    assert TestClient(srv.app).post("/api/check-camera", json={}).status_code == 409
+
+
+def test_quick_endpoints_409_when_camera_lock_held(tmp_path, monkeypatch):
+    # A request that slipped past the status guard (e.g. a live-view poll
+    # in flight when run/start flipped the status) must be refused
+    # instead of double-opening the device: the run opens the camera
+    # under _camera_lock, so anyone holding it blocks a second opener.
+    from fastapi.testclient import TestClient
+
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+    monkeypatch.setattr(srv, "_CHECK_LOCK_WAIT_S", 0.05)
+
+    class IdleHarness:
+        def state(self):
+            return {"status": "idle"}
+
+    monkeypatch.setattr(srv, "harness", IdleHarness())
+    assert srv._camera_lock.acquire()
+    try:
+        client = TestClient(srv.app)
+        assert client.get("/api/camera/frame").status_code == 409
+        assert client.post("/api/check-camera", json={}).status_code == 409
+    finally:
+        srv._camera_lock.release()
+
+
+def test_run_fails_cleanly_when_camera_lock_stuck(tmp_path, monkeypatch):
+    # A run that cannot get exclusive camera ownership must report a
+    # clear needs-human reason — never open the device concurrently.
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+    monkeypatch.setattr(srv, "_RUN_LOCK_WAIT_S", 0.2)
+    assert srv._camera_lock.acquire()
+    try:
+        h = Harness()
+        h.start(_cfg(), display=FakeDisplay())  # camera=None → run owns it
+        h.thread.join(timeout=30)
+        st = h.state()
+        assert st["status"] == "failed", st["report"]
+        assert st["report"]["result"] == "needs-human", st["report"]
+        assert "camera" in st["report"]["reason"], st["report"]
+    finally:
+        srv._camera_lock.release()
