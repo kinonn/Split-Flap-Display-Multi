@@ -15,6 +15,7 @@ class FakeCapture:
     exposure_value = -7.0
     set_results = {}
     values = [150]
+    fail_reads = 0
     instances = []
 
     def __init__(self, index, backend=None):
@@ -42,6 +43,9 @@ class FakeCapture:
         return result
 
     def read(self):
+        if FakeCapture.fail_reads > 0:
+            FakeCapture.fail_reads -= 1
+            return False, None
         value = FakeCapture.values[self.reads % len(FakeCapture.values)]
         self.reads += 1
         return True, np.full((48, 64, 3), value, dtype=np.uint8)
@@ -56,6 +60,7 @@ def fake_cv(monkeypatch):
     FakeCapture.exposure_value = -7.0
     FakeCapture.set_results = {}
     FakeCapture.values = [150]
+    FakeCapture.fail_reads = 0
     FakeCapture.instances = []
     monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
     return FakeCapture
@@ -139,3 +144,18 @@ def test_brightness_applied_and_clamped(fake_cv):
     assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [1.0]
     Camera().open()  # default 50 -> 0.5
     assert _sets_of(FakeCapture.instances[-1], cv2.CAP_PROP_BRIGHTNESS) == [0.5]
+
+
+def test_capture_retries_transient_grab(fake_cv):
+    cam = Camera().open()
+    FakeCapture.fail_reads = 2
+    frame = cam.capture()
+    assert frame.shape == (48, 64, 3)
+    assert FakeCapture.fail_reads == 0
+
+
+def test_capture_raises_after_retries(fake_cv):
+    cam = Camera().open()
+    FakeCapture.fail_reads = 99
+    with pytest.raises(CameraError, match="frame grab failed"):
+        cam.capture()
