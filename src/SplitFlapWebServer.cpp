@@ -288,8 +288,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
         // pickup used to see busy==false with a stale frame — the tool
         // then aborted the whole run with a spurious "never reported
         // settled" (seen on a 12-module fleet at frame 63).
-        response["busy"] =
-            getCalibBusy() || pendingActions_.hasCalibShowPending() || pendingActions_.hasCalibPreviewPending();
+        response["busy"] = isCalibBusy();
         response["frameId"] = getCalibFrameId();
         {
             std::lock_guard<std::mutex> lock(calibMutex_);
@@ -413,7 +412,9 @@ void SplitFlapWebServer::registerCalibRoutes() {
         }
         response["frameId"] = wanted;
         response["frame"] = (wanted == calibLastFrameId_) ? calibLastFrame_ : "";
-        response["busy"] = calibBusy_.load();
+        response["busy"] = isCalibBusy();
+        // settled is per-frame ground truth: frame N stays settled even if a
+        // later frame (new monotonic frameId) is queued or executing.
         response["settled"] = (wanted == calibLastFrameId_) && ! calibBusy_.load();
         request->send(200, "application/json", response.as<String>());
     });

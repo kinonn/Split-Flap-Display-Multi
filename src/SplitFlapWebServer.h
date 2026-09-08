@@ -73,6 +73,13 @@ class SplitFlapWebServer {
     // atomic or mutex-guarded.
     bool getCalibBusy() const { return calibBusy_.load(std::memory_order_acquire); }
     void setCalibBusy(bool busy) { calibBusy_.store(busy, std::memory_order_release); }
+    // Busy covers actively-executing calibration work AND work still queued
+    // in the PendingActions mailbox (not yet picked up by the loop task), so
+    // status polls in the queue-to-pickup gap never see busy==false with a
+    // stale lastFrameId.
+    bool isCalibBusy() {
+        return getCalibBusy() || pendingActions_.hasCalibShowPending() || pendingActions_.hasCalibPreviewPending();
+    }
     int getCalibFrameId() const { return calibFrameId_.load(std::memory_order_acquire); }
     int nextCalibFrameId() { return calibFrameId_.fetch_add(1) + 1; }
     String getCalibLastFrame();
