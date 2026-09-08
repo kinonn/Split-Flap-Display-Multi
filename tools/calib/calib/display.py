@@ -120,11 +120,34 @@ class Display:
             if abort_flag is not None and abort_flag():
                 raise CalibError("aborted by user")
 
+    def _await_pickup(self, frame_id: int, grace_s: float, abort_flag=None) -> None:
+        """Grace for the loop task to pick up a queued show.
+
+        busy goes true once the loop starts executing (plus queued work on
+        new firmware), so a first poll in that gap sees an idle display
+        with a stale frame — without this grace the wait below fails
+        instantly with a spurious never-settled and kills the whole run.
+        """
+        deadline = time.monotonic() + max(0.0, grace_s)
+        while True:
+            if abort_flag is not None and abort_flag():
+                raise CalibError("aborted by user")
+            try:
+                st = self.status()
+            except CalibError:
+                return  # unreachable; wait_settled below reports it properly
+            if st.get("busy", False) or st.get("lastFrameId") == frame_id:
+                return
+            if time.monotonic() > deadline:
+                return
+            time.sleep(0.2)
+
     def show_and_settle(self, frame: str, dwell_ms: int = 800, timeout_s: float | None = None,
-                        abort_flag=None) -> dict:
+                        abort_flag=None, pickup_grace_s: float = 3.0) -> dict:
         """Show a frame and wait until the display reports settled."""
         show_resp = self.show(frame, dwell_ms)
         frame_id = show_resp["frameId"]
+        self._await_pickup(frame_id, pickup_grace_s, abort_flag)
         self.wait_settled(timeout_s=timeout_s, abort_flag=abort_flag)
         info = self.frame_info(frame_id)
         if not info.get("settled", False):

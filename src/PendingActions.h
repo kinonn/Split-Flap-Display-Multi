@@ -66,6 +66,11 @@ class PendingActions {
         return calibShowPending_;
     }
 
+    bool hasCalibPreviewPending() {
+        std::lock_guard<std::mutex> lock(calibMutex_);
+        return calibPreviewPending_;
+    }
+
     // Calibration preview slot: volatile RAM-only nudge (no NVS write). The
     // loop task applies it via SplitFlapDisplay::previewNudgeLocal(); a later
     // reloadOffsets() (from NVS) reverts it.
