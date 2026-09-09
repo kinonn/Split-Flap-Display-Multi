@@ -33,7 +33,7 @@ import cv2
 
 from calib import vision
 from calib.display import CalibError
-from calib.loop import MAX_PERSISTS, MAX_PREVIEWS, SUPPORTED_CONTRACT, Calibrator
+from calib.loop import SUPPORTED_CONTRACT, Calibrator
 
 MAX_STEPS = 150
 KEEP_PHOTOS = 4  # trailing captures kept inline; older ones pruned to text
@@ -157,6 +157,20 @@ def load_system_prompt() -> str:
         "preview additionally allows volatile preview nudges, and only "
         "full allows persist and finish(converged)."
     )
+
+
+# Appended to the system prompt when the run enables the exhaustive
+# per-character sweep (full_drum config): the VLM drives coverage itself,
+# so it must be told to visit every drum character on every module
+# instead of stopping after a sampled subset.
+FULL_DRUM_PROMPT_EXTRA = (
+    "Exhaustive sweep is ON for this run: show staggered frames at all six "
+    "stride offsets (offset o = 0..5; within a pass, module i = "
+    "drumOrder[(k+i) % N] for k = o, o+stride, ...), so each drum character "
+    "is photographed on each module at least once. Tune every suspect "
+    "cell, not just the first few. Preview/persist budgets are raised "
+    "accordingly; a rejected tool call still means change strategy."
+)
 
 
 class Agent:
@@ -357,7 +371,7 @@ class Agent:
         n = self.calib.display.status()["numModules"]
         if not (0 <= module < n):
             raise CalibError(f"module out of range 0..{n - 1}")
-        if self.calib.previews >= MAX_PREVIEWS:
+        if self.calib.previews >= self.calib.max_previews:
             raise CalibError("preview budget exhausted")
         self.calib.display.preview(module, ci, delta)
         self.calib.previews += 1
@@ -394,7 +408,7 @@ class Agent:
             # photo cycle so the value is grounded in evidence, not blind.
             raise CalibError("capture the display first: remote/display "
                              "persists need a prior photo cycle")
-        if self.calib.persists >= MAX_PERSISTS:
+        if self.calib.persists >= self.calib.max_persists:
             raise CalibError("persist budget exhausted")
         if kind == "char":
             self.calib.overlay[(group, module, ci)] = int(args["value"])

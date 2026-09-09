@@ -166,3 +166,22 @@ def test_p2_two_staggered_passes_cover_two_residue_classes(tmp_path, monkeypatch
         # Superset (drum length need not divide the stride, so wraparound
         # frames may leak extra residues); both passes must be present.
         assert {0, 3} <= residues, f"module {i}: residues {sorted(residues)}"
+
+
+def test_p2_full_mode_covers_every_residue_class(tmp_path, monkeypatch):
+    # --full: all six stride offsets, so each drum character lands on each
+    # module; budgets must scale (no sweep-budget abort mid-run).
+    monkeypatch.setattr(vision, "split_crops",
+                        lambda gray, n: [gray[:, i * 68:(i + 1) * 68] for i in range(n)])
+    cal = Calibrator(FakeDisplay(), FakeCamera(), photo_dir=str(tmp_path),
+                     dwell_ms=0, timeout_s=5, max_phase=2, full=True)
+    report = cal.run()
+    assert "budget exhausted" not in report.get("reason", "")
+    assert report["full"] is True
+    drum = cal.drum
+    n = len(drum)
+    p2 = [f for f in cal.frames if f["tag"].startswith("p2_stride")]
+    assert len(p2) == sum(len(range(o, n, 6)) for o in range(6))
+    for i in range(cal.total):
+        residues = {(drum.index(f["frame"][i]) - i) % 6 for f in p2}
+        assert set(range(6)) <= residues, f"module {i}: {sorted(residues)}"

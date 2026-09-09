@@ -46,6 +46,16 @@ def test_config_masks_key(tmp_path, monkeypatch):
     assert "secret" not in got["llm_api_key"]
 
 
+def test_full_drum_toggle_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
+    client = TestClient(server.app)
+    assert client.get("/api/config").json()["full_drum"] is False
+    client.post("/api/config", json={"full_drum": True})
+    assert client.get("/api/config").json()["full_drum"] is True
+    client.post("/api/config", json={"full_drum": False})
+    assert client.get("/api/config").json()["full_drum"] is False
+
+
 def test_config_write_is_atomic_and_private(tmp_path, monkeypatch):
     # Issue kinonn-bot#36: tmp-file + chmod + rename, no leftovers.
     import os

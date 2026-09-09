@@ -21,7 +21,7 @@ from calib.camera import Camera, CameraError
 from calib.display import CalibError, Display
 from calib.loop import Calibrator
 
-from .agent import Agent, load_system_prompt
+from .agent import FULL_DRUM_PROMPT_EXTRA, Agent, load_system_prompt
 from .vlm import VLMClient
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -118,6 +118,7 @@ def load_config() -> dict:
     cfg.setdefault("camera_brightness", 50)
     cfg.setdefault("llm_reasoning_effort", "")
     cfg.setdefault("mode", "full")
+    cfg.setdefault("full_drum", False)
     return cfg
 
 
@@ -145,6 +146,9 @@ def save_config(patch: dict) -> dict:
         if patch["mode"] not in ("dry-run", "preview", "full"):
             raise HTTPException(400, "mode must be dry-run, preview or full")
         stored["mode"] = patch["mode"]
+    # Boolean toggle: accept real booleans (and 0/1 from form posts).
+    if "full_drum" in patch:
+        stored["full_drum"] = bool(patch["full_drum"])
     _atomic_write_json(config_path(), stored)
     return masked_config()
 
@@ -266,8 +270,12 @@ class Harness:
                                     session_id=vlm_session_id(cfg),
                                     reasoning_effort=cfg.get("llm_reasoning_effort") or None)
                     calib = Calibrator(display, camera, photo_dir=run_dir,
-                                       identity_thresh=float(cfg.get("identity_thresh", 0.85)))
-                    agent = Agent(vlm, calib, load_system_prompt(), on_event=self.log,
+                                       identity_thresh=float(cfg.get("identity_thresh", 0.85)),
+                                       full=bool(cfg.get("full_drum", False)))
+                    prompt = load_system_prompt()
+                    if cfg.get("full_drum"):
+                        prompt += "\n\n" + FULL_DRUM_PROMPT_EXTRA
+                    agent = Agent(vlm, calib, prompt, on_event=self.log,
                                   mode=cfg.get("mode", "full"))
                     with self.lock:
                         self.agent = agent
