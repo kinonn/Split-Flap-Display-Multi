@@ -411,3 +411,24 @@ def test_malformed_tool_arguments_surface_explicitly(tmp_path):
     out = agent._execute("show", {"_parse_error": "{oops"})
     assert "not valid JSON" in out["error"]
     assert "{oops" in out["error"]
+
+
+def test_agent_preview_uses_calibrator_instance_budget(tmp_path):
+    # full_drum scales the Calibrator caps; the agent must honor the
+    # instance caps, not the module-level defaults.
+    from calib.loop import MAX_PREVIEWS, Calibrator
+
+    agent, _, _ = _direct_agent(tmp_path)
+    agent.p0_done = True
+    args = {"module": 0, "charIndex": -1, "delta": 2}
+    agent.calib.previews = MAX_PREVIEWS
+    out = agent._execute("preview", args)
+    assert out["error"] == "preview budget exhausted"
+    full_calib = Calibrator(agent.calib.display, agent.calib.camera,
+                            photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                            full=True)
+    full_calib.total = agent.calib.total  # run() normally sets this
+    agent.calib = full_calib
+    agent.calib.previews = MAX_PREVIEWS  # old cap: still headroom when full
+    out = agent._execute("preview", args)
+    assert "error" not in out, out

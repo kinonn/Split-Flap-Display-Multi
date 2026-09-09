@@ -101,6 +101,11 @@
     <option value="preview">Preview — dry run + volatile offset nudges (nothing saved)</option>
     <option value="full">Full calibration — persist offsets, converge when verified</option>
   </select>
+  <div style="margin-top:8px;">
+    <label class="switch"><input id="full_drum" type="checkbox" />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Exhaustive per-character sweep (slower, more motor wear)</span>
+  </div>
   <div>
   <button class="go" id="startBtn" onclick="start()">Start calibration</button>
   <button class="stop" onclick="abort()">Abort</button>
@@ -137,6 +142,7 @@ async function load() {
   $("llm_base_url").value = c.llm_base_url || "";
   $("llm_reasoning_effort").value = c.llm_reasoning_effort || "";
   $("run_mode").value = c.mode || "full";
+  $("full_drum").checked = !!c.full_drum;
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
   const known = [...$("preset").options].map(o => o.value);
@@ -188,7 +194,8 @@ async function start() {
     setLive(false); // stop the 800ms polls before the run takes the camera
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({mode: $("run_mode").value})});
+      body: JSON.stringify({mode: $("run_mode").value,
+                            full_drum: $("full_drum").checked})});
     await api("/api/run/start", {method: "POST"}); $("runmsg").textContent = "Running…";
   }
   catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
