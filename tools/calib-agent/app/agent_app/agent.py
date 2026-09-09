@@ -26,6 +26,7 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 
 import cv2
@@ -508,7 +509,11 @@ class Agent:
                               f"{len(json.dumps(messages, default=str)) // 1024} KB)")
             t0 = time.monotonic()
             try:
-                reply = self.vlm.chat(messages, TOOL_SCHEMAS)
+                reply = self._chat_abortable(messages, TOOL_SCHEMAS)
+            except CalibError:
+                # Abort during the model round trip (issue kinonn-bot#36):
+                # stop promptly instead of executing a late reply.
+                return self._done("needs-human", "aborted by user")
             except Exception as exc:
                 self.event("vlm", f"step {self.steps}: model call failed after "
                                   f"{time.monotonic() - t0:.0f}s: {exc}")
@@ -516,6 +521,9 @@ class Agent:
                 if self.steps > 5:
                     return self._done("needs-human", f"VLM failing repeatedly: {exc}")
                 continue
+            if self.aborted:
+                # Abort landed as the reply arrived: do not execute it.
+                return self._done("needs-human", "aborted by user")
             calls = reply.get("tool_calls") or []
             names = ", ".join(str(c.get("name") or "?") for c in calls)
             self.event("vlm", f"step {self.steps}: model replied in "
@@ -558,10 +566,47 @@ class Agent:
         reason = "aborted by user" if self.aborted else "step budget exhausted"
         return self._done("needs-human", reason)
 
+    def _chat_abortable(self, messages: list, tools: list,
+                        poll_s: float = 0.5) -> dict:
+        """One VLM round trip that stays responsive to abort (issue kinonn-bot#36).
+
+        requests has no cancellation, so the call runs in a daemon worker
+        while this thread waits in short slices. On abort the late reply
+        is discarded — no tool call from it is ever executed. Raises
+        CalibError("aborted by user") in that case; transport/model
+        failures propagate unchanged for the caller's retry logic.
+        """
+        box: dict = {}
+
+        def _work():
+            try:
+                box["reply"] = self.vlm.chat(messages, tools)
+            except Exception as exc:
+                box["error"] = exc
+
+        worker = threading.Thread(target=_work, daemon=True)
+        worker.start()
+        while worker.is_alive():
+            worker.join(timeout=poll_s)
+            if self.aborted:
+                self.event("vlm", f"step {self.steps}: abort during model call; "
+                                  "late reply will be discarded")
+                raise CalibError("aborted by user")
+        if "error" in box:
+            raise box["error"]
+        return box["reply"]
+
     def _execute(self, name: str, args: dict) -> dict:
         fn = self.TOOLS.get(name)
         if fn is None:
             return {"error": f"unknown tool {name}"}
+        if isinstance(args, dict) and "_parse_error" in args:
+            # The model sent arguments that were not valid JSON (issue
+            # kinonn-bot#36): say exactly that, with the raw text, instead
+            # of a confusing KeyError from deep inside the tool.
+            return {"error": "arguments were not valid JSON: "
+                             f"{str(args['_parse_error'])[:200]}. "
+                             "Resend the call with corrected JSON arguments."}
         try:
             out = fn(self, args)
             return out if isinstance(out, dict) else {"result": out}

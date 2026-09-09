@@ -457,10 +457,17 @@ class Calibrator:
         prev_crops: list | None = None
         stuck_votes: dict[int, int] = {}
         sweep_comparisons = 0
-        for k in range(0, n, stride):
-            self._guard_budgets()
-            frame = "".join(self.drum[(k + i) % n] for i in range(self.total))
-            rec = self.shoot(frame, f"p2_stride{k}")
+        # Two staggered passes (offsets 0 and stride//2): every drum
+        # character still appears, but each module is now exercised on two
+        # residue classes instead of one — doubling per-module coverage for
+        # one extra sweep of shows. prev_crops chains across passes: the
+        # first frame of pass 2 commands different glyphs than the last
+        # frame of pass 1, so the stuck comparison stays valid.
+        for offset in (0, stride // 2):
+            for k in range(offset, n, stride):
+                self._guard_budgets()
+                frame = "".join(self.drum[(k + i) % n] for i in range(self.total))
+                rec = self.shoot(frame, f"p2_stride{k}")
             self.sweeps += stride / n
             if prev_crops is not None:
                 sweep_comparisons += 1

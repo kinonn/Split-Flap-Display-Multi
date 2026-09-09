@@ -372,3 +372,42 @@ def test_mismatched_capture_warns_and_skips_bank(tmp_path, monkeypatch):
     out = agent.tool_capture({"expected": "ABCD", "tag": "c2"})
     assert out["verified"] is True
     assert agent.p0_done is True
+
+
+def test_abort_during_model_call_returns_promptly(tmp_path):
+    # Issue kinonn-bot#36: a hung gateway call must not delay abort.
+    import threading
+    import time
+
+    from agent_app.agent import Agent as AgentCls
+    from calib.loop import Calibrator as CalibratorCls
+
+    class SlowVLM:
+        def chat(self, messages, tools):
+            time.sleep(30)  # hung provider; abort must cut this short
+            return {"content": "late", "tool_calls": []}
+
+    display, camera = FakeDisplay(), FakeCamera()
+    calib = CalibratorCls(display, camera, photo_dir=str(tmp_path),
+                          dwell_ms=0, timeout_s=5)
+    agent = AgentCls(SlowVLM(), calib, "system", on_event=lambda e: None)
+    box = {}
+    t = threading.Thread(target=lambda: box.update(report=agent.run()))
+    t0 = time.monotonic()
+    t.start()
+    time.sleep(2.0)  # let the run reach the blocking model call
+    agent.aborted = True
+    t.join(timeout=15)
+    dt = time.monotonic() - t0
+    assert not t.is_alive(), "run ignored abort during the model call"
+    assert dt < 15, f"abort took {dt:.1f}s"
+    assert box["report"]["result"] == "needs-human"
+    assert box["report"]["reason"] == "aborted by user"
+
+
+def test_malformed_tool_arguments_surface_explicitly(tmp_path):
+    # Issue kinonn-bot#36: non-JSON arguments must name the real problem.
+    agent, _, _ = _direct_agent(tmp_path)
+    out = agent._execute("show", {"_parse_error": "{oops"})
+    assert "not valid JSON" in out["error"]
+    assert "{oops" in out["error"]

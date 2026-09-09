@@ -198,6 +198,20 @@ def test_config_roundtrip(tmp_path, monkeypatch):
         assert json.load(fh)["phase"] == 2
 
 
+def test_config_write_is_atomic_and_private(tmp_path, monkeypatch):
+    # Issue kinonn-bot#36: tmp-file + chmod + rename, no leftovers.
+    import stat
+
+    from calib.server import _atomic_write_json, config_path
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+    os.makedirs(str(tmp_path), exist_ok=True)
+    _atomic_write_json(config_path(), {"display_host": "h"})
+    mode = stat.S_IMODE(os.stat(config_path()).st_mode)
+    assert mode == 0o600, oct(mode)
+    assert [p for p in os.listdir(str(tmp_path)) if ".tmp-" in p] == []
+
+
 def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 

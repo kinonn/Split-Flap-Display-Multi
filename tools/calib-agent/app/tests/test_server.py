@@ -46,6 +46,21 @@ def test_config_masks_key(tmp_path, monkeypatch):
     assert "secret" not in got["llm_api_key"]
 
 
+def test_config_write_is_atomic_and_private(tmp_path, monkeypatch):
+    # Issue kinonn-bot#36: tmp-file + chmod + rename, no leftovers.
+    import os
+    import stat
+
+    from agent_app.server import _atomic_write_json, config_path
+
+    monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
+    _atomic_write_json(config_path(), {"llm_api_key": "sk-secret123"})
+    mode = stat.S_IMODE(os.stat(config_path()).st_mode)
+    assert mode == 0o600, oct(mode)
+    assert json.load(open(config_path())) == {"llm_api_key": "sk-secret123"}
+    assert [p for p in os.listdir(tmp_path) if ".tmp-" in p] == []
+
+
 def test_photos_404_before_any_run(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     # run_dir is empty pre-run: must not resolve against the server CWD.
