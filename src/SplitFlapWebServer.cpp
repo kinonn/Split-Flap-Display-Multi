@@ -297,7 +297,13 @@ void SplitFlapWebServer::registerCalibRoutes() {
         }
         response["numModules"] = localModules;
         response["totalModules"] = getCalibTotalModules();
-        response["groupCount"] = espNow ? espNow->getTotalModuleCount() / localModules : 1;
+        // Group count must come from settings, not total/local: integer
+        // division truncates (12 modules / 8 local = 1), which made the
+        // calibration tool treat remote modules as local and preview
+        // out-of-range indices (firmware 400 "expected 0..7").
+        response["groupCount"] = isMultiDisplayMasterEnabled()
+                                     ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
+                                     : 1;
         response["charset"] = charset;
         response["drumOrder"] = drumStr;
         response["displayOffset"] = display.getLiveDisplayOffset();

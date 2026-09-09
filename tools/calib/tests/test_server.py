@@ -87,8 +87,43 @@ def test_shoot_emits_photo_event_with_scores(tmp_path):
     assert evt["kind"] == "photo"
     assert evt["photo"] == os.path.basename(rec["photo"])
     assert evt["detail"]["frame"] == "HHHH"
+    assert evt["detail"]["took_s"] >= 0  # cycle timing is logged
     assert [s["module"] for s in evt["detail"]["scores"]] == [0, 1, 2, 3]
     assert all(s["verdict"] == "ok" for s in evt["detail"]["scores"])
+
+
+def test_tune_logs_expected_glyph_and_timing(tmp_path):
+    got, sink = _events()
+    cal = UICalibrator(FakeDisplay(), FakeCamera(), photo_dir=str(tmp_path),
+                       dwell_ms=0, timeout_s=5, max_phase=1, on_event=sink)
+    cal.total = 4
+    cal.group_widths = [4]  # single local group (normally set from status)
+    cal._tune_cell(2, -1, "HHOH")
+    kinds = [e["kind"] for e in got]
+    # Start line, the cycle's photo, then the outcome line.
+    assert kinds == ["tune", "photo", "tune"]
+    # Start line names the cell, restates 0-based, shows the expected glyph.
+    assert "module 2" in got[0]["text"] and "coarse" in got[0]["text"]
+    assert "0-based" in got[0]["text"] and "'O'" in got[0]["text"]
+    # Outcome line carries the cycle duration.
+    assert "took" in got[1]["text"]
+
+
+def test_identity_outliers_emit_event(tmp_path):
+    got, sink = _events()
+    cal = UICalibrator(FakeDisplay(), FakeCamera(), photo_dir=str(tmp_path),
+                       dwell_ms=0, timeout_s=5, max_phase=1, on_event=sink)
+    cal.total = 4
+    rec = cal.shoot("HHHH", "id")
+    # No outliers -> no identity event (clean runs stay quiet).
+    assert not [e for e in got if e["kind"] == "identity"]
+    # Force an outlier through the consensus path.
+    cal.consensus(rec, "H")  # flat crops abstain; still no event
+    assert not [e for e in got if e["kind"] == "identity"]
+    cal._identity_event("consensus", "H", [2])
+    evt = [e for e in got if e["kind"] == "identity"][-1]
+    assert "m2 (= 3th from left)" in evt["text"]
+    assert "0-based" in evt["text"]
 
 
 def test_abort_flag_raises_before_touching_hardware(tmp_path):
@@ -120,6 +155,12 @@ def test_harness_phase1_run_converges(tmp_path, monkeypatch):
     assert st["report"]["result"] == "converged", st["report"].get("reason")
     assert os.path.isfile(os.path.join(h.run_dir, "snapshot.json"))
     assert os.path.isfile(os.path.join(h.run_dir, "report.json"))
+    # The full event log is persisted in the run folder (JSON lines),
+    # not just the last 100 the UI polls.
+    with open(os.path.join(h.run_dir, "events.jsonl"), encoding="utf-8") as fh:
+        logged = [json.loads(line) for line in fh if line.strip()]
+    assert {e["kind"] for e in logged} >= {"run", "phase", "photo"}
+    assert len(logged) >= len(st["events"])
     assert len(st["photos"]) > 0
     kinds = {e["kind"] for e in st["events"]}
     assert {"run", "phase", "photo"} <= kinds
@@ -171,6 +212,7 @@ def test_start_clears_previous_runs(tmp_path, monkeypatch):
     h.thread.join(timeout=120)
     st = h.state()
     assert st["status"] == "done", st["report"]
+    assert st["run_seq"] == 1  # UI keys "new run" cleanup off this counter
     # Old run output is gone; the fresh run reuses the run-001 name
     # (its dir exists again but only holds this run's files).
     assert st["run_dir"].endswith("run-001")
@@ -207,9 +249,23 @@ def test_config_write_is_atomic_and_private(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIB_DATA", str(tmp_path))
     os.makedirs(str(tmp_path), exist_ok=True)
     _atomic_write_json(config_path(), {"display_host": "h"})
-    mode = stat.S_IMODE(os.stat(config_path()).st_mode)
-    assert mode == 0o600, oct(mode)
+    if os.name != "nt":  # os.chmod cannot express 0o600 on Windows/NTFS
+        mode = stat.S_IMODE(os.stat(config_path()).st_mode)
+        assert mode == 0o600, oct(mode)
     assert [p for p in os.listdir(str(tmp_path)) if ".tmp-" in p] == []
+
+
+def test_exposure_config_roundtrip_and_validation(tmp_path, monkeypatch):
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+    # Set a value, clear it back to auto, reject garbage with 400.
+    srv.save_config({"camera_exposure": -4})
+    assert srv.load_config()["camera_exposure"] == -4.0
+    srv.save_config({"camera_exposure": ""})
+    assert srv.load_config()["camera_exposure"] is None
+    with pytest.raises(Exception, match="must be a number"):
+        srv.save_config({"camera_exposure": "bright"})
 
 
 def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
@@ -222,9 +278,10 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     class FakeCam:
         seen = []
 
-        def __init__(self, index=0, brightness=50.0):
+        def __init__(self, index=0, brightness=50.0, exposure=None):
             self.index = index
             self.brightness = brightness
+            self.exposure = exposure
             FakeCam.seen.append(self)
 
         def open(self, quick=False):
@@ -253,6 +310,14 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     save_config({"camera_brightness": 33})
     assert client.get("/api/camera/frame").status_code == 200
     assert FakeCam.seen[-1].brightness == 33.0
+    # Exposure query value passes through; absent/auto means AE on (None).
+    r = client.get("/api/camera/frame?exposure=-4")
+    assert r.status_code == 200
+    assert FakeCam.seen[-1].exposure == -4.0
+    client.get("/api/camera/frame?exposure=auto")
+    assert FakeCam.seen[-1].exposure is None
+    # Garbage exposure is a 400, not a silent auto.
+    assert client.get("/api/camera/frame?exposure=bright").status_code == 400
 
 
 def test_camera_frame_busy_during_run(tmp_path, monkeypatch):

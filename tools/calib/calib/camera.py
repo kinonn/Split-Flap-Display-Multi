@@ -36,9 +36,19 @@ class Camera:
     # open() retries a few times before declaring the camera gone.
     OPEN_ATTEMPTS = 3
     OPEN_RETRY_GAP_S = 0.4
+    # Auto-exposure search (full open only): walk the exposure property
+    # until the frame mean is comfortably inside the check's gates, so
+    # warm-up settles in seconds instead of fighting an AE hunt for its
+    # whole budget. Closed loop ("keep what improved") because exposure
+    # property units differ per backend (log2-seconds on MSMF, raw
+    # counts on V4L2); bounded by steps and time so checks stay fast.
+    AUTO_BAND = (60.0, 180.0)
+    AUTO_MAX_STEPS = 6
+    AUTO_BUDGET_S = 4.0
+    AUTO_STEP = 1.0
 
     def __init__(self, index: int = 0, width: int = 1280, height: int = 720,
-                 brightness: float = 50.0):
+                 brightness: float = 50.0, exposure: float | None = None):
         self.index = index
         self.width = width
         self.height = height
@@ -48,8 +58,14 @@ class Camera:
         # or map it to a narrow range — and the live view must show
         # exactly what the camera check and calibration score.
         self.brightness = brightness
+        # Manual sensor exposure (CAP_PROP_EXPOSURE units, backend-
+        # dependent). None = auto-search on full open (default); a value
+        # is applied directly instead — the fix for a dark live view,
+        # where software gain alone only amplifies noise.
+        self.exposure = exposure
         self.cap: cv2.VideoCapture | None = None
         self.backend = "unknown"
+        self.auto_exposure: dict | None = None
 
     @staticmethod
     def _backend_name(value) -> str:
@@ -77,38 +93,152 @@ class Camera:
         except Exception:
             return False
 
-    def _lock_exposure(self) -> None:
-        """Best-effort exposure lock, per backend.
+    def _auto_mode(self) -> float:
+        """Backend's auto-mode value for CAP_PROP_AUTO_EXPOSURE."""
+        return 3.0 if self.backend == "V4L2" else 0.75
 
-        V4L2 uses 3=auto/1=manual while DSHOW/MSMF use 0.75=auto/0.25=
-        manual, so the old bare set(AUTO_EXPOSURE, 1.0) was manual on
-        Linux but meaningless on Windows — the camera kept hunting and
-        check_camera() failed with drift ~2.7. Lock the camera's
-        *current* exposure instead of forcing a magic value; where the
-        backend refuses (set() returns False), leave auto on and let
-        warm-up + check retries cope.
+    def _manual_mode(self) -> float:
+        """Backend's manual-mode value for CAP_PROP_AUTO_EXPOSURE."""
+        return 1.0 if self.backend == "V4L2" else 0.25
+
+    def _lock_exposure(self) -> None:
+        """Ensure the driver's auto-exposure is engaged (live view path).
+
+        The old behavior flipped to manual and froze the current value;
+        on drivers whose manual range is darker than their AE (AE adds
+        gain) that made the live view darker than doing nothing at all.
         """
         cap = self.cap
         assert cap is not None
+        self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, self._auto_mode())
+
+    def _get_exposure(self) -> float | None:
         try:
-            current = cap.get(cv2.CAP_PROP_EXPOSURE)
+            value = float(self.cap.get(cv2.CAP_PROP_EXPOSURE))
         except Exception:
-            current = None
-        if self.backend == "V4L2":
-            auto, manual = 3.0, 1.0
-        else:
-            auto, manual = 0.75, 0.25
-        if self.backend == "V4L2":
-            self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, auto)
-        if not self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, manual):
-            return
+            return None
+        return None if value == 0.0 else value  # 0.0 = placeholder read
+
+    @property
+    def current_exposure(self) -> float | None:
+        """The exposure currently set on the device (None if unreadable)."""
+        if self.cap is None:
+            return None
+        return self._get_exposure()
+
+    def _measure(self) -> float | None:
+        """One post-gain frame mean, or None when the grab fails."""
         try:
-            exposure = float(current)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
+            frame = self.capture(retries=1)
+        except Exception:
+            return None
+        try:
+            return float(np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+        except Exception:
+            return None
+
+    def _manual_mode(self) -> float:
+        """Backend's manual-mode value for CAP_PROP_AUTO_EXPOSURE."""
+        return 1.0 if self.backend == "V4L2" else 0.25
+
+    def _apply_manual_exposure(self) -> dict:
+        """Apply the user-supplied exposure value (no search).
+
+        Returns the diagnostics record: locked when the driver accepted
+        both the manual flip and the value, driver_refused otherwise.
+        """
+        cap = self.cap
+        assert cap is not None
+        diag: dict = {"steps": 0, "mean_before": None, "mean_after": None,
+                      "locked": False, "driver_refused": False,
+                      "mode": "manual", "manual": self.exposure}
+        self.auto_exposure = diag
+        if not self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE,
+                             self._manual_mode()):
+            diag["driver_refused"] = True
+            return diag
+        if not self._try_set(cap, cv2.CAP_PROP_EXPOSURE, self.exposure):
+            diag["driver_refused"] = True
+            return diag
+        mean = self._measure()
+        if mean is not None:
+            diag["mean_before"] = diag["mean_after"] = round(mean, 1)
+        diag["locked"] = True
+        return diag
+
+    def _auto_exposure(self) -> None:
+        """Keep the driver's AE when it lands in the check gates; else
+        search manual exposure for better, restoring AE on failure.
+
+        Forcing manual unconditionally (the old behavior) made dark
+        scenes DARKER on drivers whose manual range caps above their AE
+        (AE adds gain): on the affected camera the mean dropped from 32
+        (auto) to 8 (manual max). Full-open only; the live view's quick
+        open just ensures AE via _lock_exposure.
+        """
+        cap = self.cap
+        assert cap is not None
+        diag: dict = {"steps": 0, "mean_before": None, "mean_after": None,
+                      "locked": False, "driver_refused": False, "mode": "auto"}
+        self.auto_exposure = diag
+        mean = self._measure()
+        if mean is None:
             return
-        if exposure == 0.0:
-            return  # placeholder read; forcing 0 could black out the image
-        self._try_set(cap, cv2.CAP_PROP_EXPOSURE, exposure)
+        diag["mean_before"] = diag["mean_after"] = round(mean, 1)
+        if 30.0 <= mean <= 225.0:  # the check's own gates: AE is good enough
+            diag["locked"] = True
+            return
+        if not self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE,
+                             self._manual_mode()):
+            diag["driver_refused"] = True
+            return
+        current = self._get_exposure()
+        if current is not None:
+            # Re-apply so flipping to manual does not jump the image.
+            self._try_set(cap, cv2.CAP_PROP_EXPOSURE, current)
+        mean = self._measure()
+        if mean is None:
+            self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, self._auto_mode())
+            return
+        lo, hi = self.AUTO_BAND
+        deadline = time.monotonic() + self.AUTO_BUDGET_S
+        step = self.AUTO_STEP
+        for _ in range(self.AUTO_MAX_STEPS):
+            if time.monotonic() > deadline:
+                break
+            current = self._get_exposure()
+            if current is None:
+                diag["driver_refused"] = True
+                break
+            moved = False
+            for sign in (1, -1):
+                if not self._try_set(cap, cv2.CAP_PROP_EXPOSURE,
+                                     current + sign * step):
+                    continue
+                new_mean = self._measure()
+                if new_mean is None:
+                    self._try_set(cap, cv2.CAP_PROP_EXPOSURE, current)
+                    continue
+                if abs(new_mean - 128.0) < abs(mean - 128.0):
+                    mean = new_mean
+                    diag["steps"] += 1
+                    moved = True
+                    break
+                self._try_set(cap, cv2.CAP_PROP_EXPOSURE, current)
+            if not moved:
+                break
+            if lo <= mean <= hi:
+                break
+            step *= 2
+        diag["mean_after"] = round(mean, 1)
+        diag["locked"] = 30.0 <= mean <= 225.0
+        if diag["locked"]:
+            diag["mode"] = "manual"
+        else:
+            # Manual could not reach the gates either: restore the
+            # driver's AE — at least as good as any manual value found.
+            self._try_set(cap, cv2.CAP_PROP_AUTO_EXPOSURE, self._auto_mode())
+            diag["mode"] = "auto"
 
     def _warmup(self) -> None:
         """Discard frames until the picture settles (or budget expires).
@@ -207,7 +337,16 @@ class Camera:
             self.backend = self._backend_name(cap.get(cv2.CAP_PROP_BACKEND))
         except Exception:
             self.backend = "unknown"
-        self._lock_exposure()
+        if quick:
+            if self.exposure is None:
+                self._lock_exposure()  # live view: cheap lock, no settle wait
+            else:
+                self._apply_manual_exposure()  # live view with fixed exposure
+        else:
+            if self.exposure is None:
+                self._auto_exposure()  # runs/checks: search, then locked manual
+            else:
+                self._apply_manual_exposure()  # runs/checks: fixed exposure
         # Best-effort autofocus off: focus hunting looks exactly like drift.
         if hasattr(cv2, "CAP_PROP_AUTOFOCUS"):
             self._try_set(cap, cv2.CAP_PROP_AUTOFOCUS, 0.0)
@@ -301,11 +440,13 @@ class Camera:
             diag = {
                 "resolution": [int(frames[-1].shape[1]), int(frames[-1].shape[0])],
                 "brightness": self.brightness,
+                "exposure": self.exposure,
                 "mean_brightness": round(mean, 1),
                 "drift": round(drift, 3),
                 "saturated_frac": round(saturated, 4),
                 "dark_frac": round(dark, 4),
                 "backend": self.backend,
+                "auto_exposure": dict(self.auto_exposure) if self.auto_exposure else None,
                 "attempts": attempt,
                 "drift_history": [round(d, 3) for d in drifts],
             }
