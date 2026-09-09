@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--relearn-templates", action="store_true",
                         help="Ignore stored golden templates and rebuild the "
                              "glyph bank from this run")
+    parser.add_argument("--full", action="store_true",
+                        help="Exhaustive per-character tuning: P2 sweeps every "
+                             "drum position on every module (slower, more "
+                             "motor wear, higher budgets) instead of the "
+                             "default sampled passes")
     parser.add_argument("--contract", default=None,
                         help="Override bundled calib/contract.json")
     parser.add_argument("--check-camera", action="store_true",
@@ -103,7 +108,8 @@ def main(argv=None) -> int:
                            dwell_ms=args.dwell_ms, timeout_s=args.timeout_s,
                            max_phase=args.phase,
                            identity_thresh=args.identity_thresh,
-                           relearn_templates=args.relearn_templates)
+                           relearn_templates=args.relearn_templates,
+                           full=args.full)
         report = calib.run()
     print(f"result: {report['result']} ({report.get('reason', '')})")
     print(f"photos + report.json in {args.photo_dir}")

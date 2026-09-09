@@ -39,7 +39,7 @@ class Calibrator:
     def __init__(self, display, camera, photo_dir: str, dwell_ms: int = 800,
                  timeout_s: float = 60.0, max_phase: int = 4,
                  identity_thresh: float = vision.IDENTITY_THRESH,
-                 relearn_templates: bool = False):
+                 relearn_templates: bool = False, full: bool = False):
         self.display = display
         self.camera = camera
         self.photo_dir = photo_dir
@@ -48,6 +48,13 @@ class Calibrator:
         self.max_phase = max_phase
         self.identity_thresh = identity_thresh
         self.relearn_templates = relearn_templates
+        # Exhaustive per-character mode: P2 sweeps every residue class so
+        # each drum character lands on each module at least once (slower,
+        # more motor wear; default off preserves the fast sampled run).
+        self.full = full
+        self.max_sweeps = MAX_FULL_SWEEPS if not full else 8
+        self.max_previews = MAX_PREVIEWS if not full else MAX_PREVIEWS * 4
+        self.max_persists = MAX_PERSISTS if not full else MAX_PERSISTS * 4
         self.frames: list[dict] = []
         self.deltas: list[dict] = []
         self.identity: list[dict] = []  # every identity check
@@ -313,11 +320,11 @@ class Calibrator:
         return {"kept": new != old and not proposal, "after": after}
 
     def _guard_budgets(self, preview: bool = False):
-        if preview and self.previews >= MAX_PREVIEWS:
+        if preview and self.previews >= self.max_previews:
             raise CalibError("preview budget exhausted")
-        if not preview and self.persists >= MAX_PERSISTS:
+        if not preview and self.persists >= self.max_persists:
             raise CalibError("persist budget exhausted")
-        if self.sweeps >= MAX_FULL_SWEEPS:
+        if self.sweeps >= self.max_sweeps:
             raise CalibError("sweep budget exhausted")
 
     def _read_cell(self, group: int, local: int, char_index: int) -> int:
@@ -353,6 +360,7 @@ class Calibrator:
         snapshot = self.display.snapshot()
         report: dict = {
             "contractVersion": SUPPORTED_CONTRACT,
+            "full": self.full,
             "fleet": {"totalModules": self.total, "groupWidths": self.group_widths,
                       "charset": self.charset},
             "result": "needs-human", "reason": "", "deltas": self.deltas,
@@ -457,13 +465,13 @@ class Calibrator:
         prev_crops: list | None = None
         stuck_votes: dict[int, int] = {}
         sweep_comparisons = 0
-        # Two staggered passes (offsets 0 and stride//2): every drum
-        # character still appears, but each module is now exercised on two
-        # residue classes instead of one — doubling per-module coverage for
-        # one extra sweep of shows. prev_crops chains across passes: the
-        # first frame of pass 2 commands different glyphs than the last
-        # frame of pass 1, so the stuck comparison stays valid.
-        for offset in (0, stride // 2):
+        # Two staggered passes by default (offsets 0 and stride//2); every
+        # pass in full mode, so each drum character lands on each module at
+        # least once. prev_crops chains across passes: the first frame of a
+        # pass commands different glyphs than the last frame of the previous
+        # one, so the stuck comparison stays valid.
+        offsets = range(stride) if self.full else (0, stride // 2)
+        for offset in offsets:
             for k in range(offset, n, stride):
                 self._guard_budgets()
                 frame = "".join(self.drum[(k + i) % n] for i in range(self.total))
@@ -496,7 +504,7 @@ class Calibrator:
                      "note": "crop unchanged across different commanded glyphs (stuck?)"})
         for (module, ci), frame in suspects.items():
             self._tune_cell(module, ci, frame)
-        self.sweeps = min(MAX_FULL_SWEEPS, self.sweeps + 1)
+        self.sweeps = min(self.max_sweeps, self.sweeps + 1)
         if self._bootstrap_missing():
             self._save_bank("bootstrapped")
         # Identity across the sweep: same glyph on different modules must
