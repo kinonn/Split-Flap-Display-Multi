@@ -221,7 +221,9 @@ class Calibrator:
             if module < off + width:
                 return g
             off += width
-        return 1
+        raise CalibError(
+            f"module {module} outside fleet geometry {self.group_widths} "
+            f"(covers {off} of {self.total} modules)")
 
     def _local_index(self, module: int) -> int:
         off = sum(self.group_widths[: self._group_of(module) - 1])
@@ -395,6 +397,7 @@ class Calibrator:
                                   "persistent": self.identity_persistent,
                                   "bank": {"source": self.template_source,
                                            "glyphs": sorted(self.templates)}}
+            report["summary"] = self.summarize(report["result"])
             with open(os.path.join(self.photo_dir, "report.json"), "w", encoding="utf-8") as fh:
                 json.dump(report, fh, indent=2)
         return report
@@ -404,6 +407,15 @@ class Calibrator:
         local = int(status["numModules"])
         groups = int(status.get("groupCount", 1)) or 1
         if groups <= 1:
+            if total != local:
+                # Geometry from a buggy/old firmware: claiming one group
+                # while reporting more total than local modules would map
+                # remote modules to out-of-range local indices (preview
+                # 400 "expected 0..N"). Fail with the real problem named.
+                raise CalibError(
+                    f"fleet geometry inconsistent: totalModules {total} but "
+                    f"groupCount {groups} covers only {local} local modules "
+                    "(firmware groupCount bug? update firmware)")
             return [local]
         # Remote widths unknown to us; assume local width except possibly the
         # last group. The master validates frame length = total either way.
@@ -559,6 +571,57 @@ class Calibrator:
             if wrong:
                 return False, f"acceptance: wrong glyph on modules {sorted(wrong)}"
         return True, "edge glyphs clean, identity verified, repeats stable"
+
+    def summarize(self, result: str) -> dict:
+        """Compact per-module outcome for quick post-run verification.
+
+        Answers "did the calibration perform as expected" without reading
+        the full log: net coarse-offset change per module, which modules
+        still show the wrong glyph after everything, and the acceptance
+        seam verdicts. ``ok`` is the machine-checkable verdict used by
+        ``--verify``: converged AND no persistent wrong glyphs.
+        """
+        persistent = sorted({e["module"] for e in self.identity_persistent})
+        # Net coarse-offset change per global module: deltas record
+        # (scope, LOCAL module) cells, so map back through group widths.
+        # Only non-proposal entries touched hardware.
+        coarse: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for d in self.deltas:
+            if d.get("charIndex") != -1 or d.get("proposal"):
+                continue
+            coarse.setdefault((d.get("scope", 1), d.get("module", 0)), []) \
+                .append((d.get("old", 0), d.get("new", 0)))
+        offset_delta: dict[int, int] = {}
+        for (scope, local), pairs in coarse.items():
+            try:
+                idx = sum(self.group_widths[:max(0, scope - 1)]) + local
+            except Exception:
+                continue
+            if 0 <= idx < self.total:
+                offset_delta[idx] = pairs[-1][1] - pairs[0][0]
+        # Acceptance seam verdicts from the accept_* frames (absent when
+        # the run failed before acceptance).
+        seams: dict[int, dict[str, str]] = {}
+        for f in self.frames:
+            if not str(f.get("tag", "")).startswith("accept_"):
+                continue
+            try:
+                for i, s in enumerate(self.scores(f)):
+                    seams.setdefault(i, {})[f["tag"]] = s["verdict"]
+            except Exception:
+                continue
+        modules = [{
+            "module": i,
+            "offset_delta": offset_delta.get(i, 0),
+            "persistent_wrong_glyph": i in persistent,
+            "acceptance": seams.get(i, {}),
+        } for i in range(self.total)]
+        return {
+            "ok": result == "converged" and not persistent,
+            "result": result,
+            "persistent_wrong_glyph_modules": persistent,
+            "modules": modules,
+        }
 
 
 def load_bundled_contract() -> dict:

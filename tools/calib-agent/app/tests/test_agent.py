@@ -432,3 +432,105 @@ def test_agent_preview_uses_calibrator_instance_budget(tmp_path):
     agent.calib.previews = MAX_PREVIEWS  # old cap: still headroom when full
     out = agent._execute("preview", args)
     assert "error" not in out, out
+
+
+def test_multi_tool_turn_keeps_tool_responses_adjacent(tmp_path, monkeypatch):
+    # Strict providers 400 the whole history when a user message (the
+    # capture photo) lands between two tool responses of one assistant
+    # tool_calls block ("must be followed by tool messages responding to
+    # each tool_call_id"). Photos must be buffered until after ALL
+    # responses. Issue: run died at step 33 with exactly that 400.
+    monkeypatch.setattr(vision, "split_crops",
+                        lambda gray, n: [gray[:, i * 68:(i + 1) * 68] for i in range(n)])
+    script = [
+        (None, [("show", {"frame": "HHHH", "tag": "p0_index"}),
+                ("capture", {"expected": "HHHH", "tag": "c"})]),
+        (None, [("finish", {"verdict": "needs-human", "summary": "order ok"})]),
+    ]
+    agent, _ = _agent(script, tmp_path)
+    report = agent.run()
+    assert report["result"] == "needs-human"
+    # Capture the message order via a recording VLM wrapper.
+    recorded = []
+
+    class RecordingVLM(ScriptVLM):
+        def chat(self, messages, tools):
+            recorded.append([dict(m, content=m.get("content")) for m in messages])
+            return super().chat(messages, tools)
+
+    display, camera = FakeDisplay(), FakeCamera()
+    calib = Calibrator(display, camera, photo_dir=str(tmp_path),
+                       dwell_ms=0, timeout_s=5)
+    agent2 = Agent(RecordingVLM([
+        (None, [("show", {"frame": "HHHH", "tag": "p0_index"}),
+                ("capture", {"expected": "HHHH", "tag": "c"})]),
+        (None, [("finish", {"verdict": "needs-human", "summary": "order ok"})]),
+    ]), calib, "system", on_event=lambda e: None)
+    agent2.run()
+    final = recorded[-1]
+    # Find the assistant message with two tool_calls and verify both tool
+    # responses are adjacent, with photos only after them.
+    for i, m in enumerate(final):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            ids = [c["id"] for c in m["tool_calls"]]
+            assert len(ids) == 2
+            roles = [final[j].get("role") for j in range(i + 1, i + 3)]
+            assert roles == ["tool", "tool"], roles
+            answered = [final[j].get("tool_call_id") for j in range(i + 1, i + 3)]
+            assert answered == ids
+            # Any photo user messages come after both tool responses.
+            for j in range(i + 3, len(final)):
+                if final[j].get("role") == "assistant":
+                    break
+                assert final[j].get("role") in ("tool", "user")
+
+
+def test_repair_tool_messages_fills_orphans():
+    from agent_app.agent import Agent
+
+    messages = [
+        {"role": "system", "content": "s"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "show", "arguments": "{}"}},
+            {"id": "b", "type": "function", "function": {"name": "capture", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "a", "content": "{}"},
+        {"role": "user", "content": "photo"},
+    ]
+    fixed = Agent._repair_tool_messages(messages)
+    assert fixed == 1
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "assistant", "tool", "tool", "user"]
+    assert messages[2]["tool_call_id"] == "a"
+    assert messages[3]["tool_call_id"] == "b"
+    # Idempotent: a second pass inserts nothing.
+    assert Agent._repair_tool_messages(messages) == 0
+
+
+def test_vlm_synthesizes_missing_tool_call_ids(monkeypatch):
+    from agent_app import vlm as vlm_mod
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    def fake_post(self, url, json=None, headers=None, timeout=None):
+        return FakeResp({"choices": [{"message": {
+            "content": None,
+            "tool_calls": [
+                {"id": None, "type": "function",
+                 "function": {"name": "show", "arguments": "{}"}},
+                {"type": "function",
+                 "function": {"name": "capture", "arguments": "{}"}},
+            ]}}]})
+
+    monkeypatch.setattr(vlm_mod.requests.Session, "post", fake_post)
+    out = vlm_mod.VLMClient("https://x", "m", "k").chat([])
+    ids = [c["id"] for c in out["tool_calls"]]
+    assert ids == ["call_0", "call_1"]
+    assert all(ids)

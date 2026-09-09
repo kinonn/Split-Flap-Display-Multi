@@ -78,12 +78,15 @@ class VLMClient:
         except (KeyError, IndexError, ValueError) as exc:
             raise VLMError(f"bad LLM response: {resp.text[:300]}") from exc
         calls = []
-        for call in msg.get("tool_calls") or []:
+        for i, call in enumerate(msg.get("tool_calls") or []):
             fn = call.get("function", {})
             try:
                 args = json.loads(fn.get("arguments") or "{}")
             except ValueError:
                 args = {"_parse_error": fn.get("arguments", "")}
-            calls.append({"id": call.get("id", ""), "name": fn.get("name", ""),
+            # A missing/null id would never match its tool response and
+            # strict providers reject the history for it — synthesize one.
+            calls.append({"id": call.get("id") or f"call_{i}",
+                          "name": fn.get("name", ""),
                           "arguments": args if isinstance(args, dict) else {}})
         return {"content": msg.get("content"), "tool_calls": calls}

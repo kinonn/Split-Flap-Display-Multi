@@ -22,6 +22,7 @@
   #log { height: 260px; overflow-y: auto; background: #0d0d0d; border-radius: 6px;
          padding: 8px; font-family: monospace; font-size: .8rem; }
   #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
+  #log .phase { color: #82b1ff; }
   #gallery img { max-width: 220px; margin: 4px; border-radius: 6px; border: 1px solid #444;
                 cursor: pointer; }
   #gallery img:hover { border-color: #888; }
@@ -76,7 +77,7 @@
   <div>
     <button class="mid" onclick="save()">Save</button>
     <button class="mid" onclick="checkDisplay()">Check display</button>
-    <button class="mid" onclick="checkCamera()">Check camera</button>
+    <button class="mid" id="checkCamBtn" onclick="checkCamera()">Check camera</button>
   </div>
   <p class="hint" id="cfgmsg"></p>
   <div>
@@ -89,6 +90,16 @@
     <label>Camera brightness (<span id="brightness_val">50</span>)</label>
     <input id="camera_brightness" type="range" min="0" max="100" step="1" value="50"
       oninput="$('brightness_val').textContent = this.value" />
+  </div>
+  <div>
+    <label>Sensor exposure (<span id="exposure_val">auto</span>)</label>
+    <input id="camera_exposure" type="range" min="-13" max="0" step="1" value="-7"
+      oninput="$('exposure_val').textContent = exposureOn() ? this.value : 'auto'" />
+    <div>
+      <label class="switch"><input id="exposure_auto" type="checkbox" checked />
+        <span class="slider"></span></label>
+      <span style="margin-left:8px;">Auto exposure</span>
+    </div>
   </div>
   <img id="liveview" alt="Live camera view" />
 </div>
@@ -145,6 +156,13 @@ async function load() {
   $("full_drum").checked = !!c.full_drum;
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
+  if (c.camera_exposure === null || c.camera_exposure === undefined || c.camera_exposure === "") {
+    $("exposure_auto").checked = true;
+  } else {
+    $("exposure_auto").checked = false;
+    $("camera_exposure").value = c.camera_exposure;
+  }
+  $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
   const known = [...$("preset").options].map(o => o.value);
   $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
 }
@@ -155,6 +173,12 @@ function brightness() {
   const v = Number($("camera_brightness").value);
   return Number.isFinite(v) ? v : 50;
 }
+function exposureOn() { return !$("exposure_auto").checked; }
+function exposure() {
+  if (!exposureOn()) return null;
+  const v = Number($("camera_exposure").value);
+  return Number.isFinite(v) ? v : null;
+}
 async function save() {
   try {
     await api("/api/config", {method: "POST",
@@ -162,6 +186,7 @@ async function save() {
         display_host: $("display_host").value.trim(),
         camera_index: Number($("camera_index").value || 0),
         camera_brightness: brightness(),
+        camera_exposure: exposure(),
         llm_base_url: $("llm_base_url").value.trim(),
         llm_model: $("llm_model").value.trim(),
         llm_reasoning_effort: $("llm_reasoning_effort").value.trim(),
@@ -178,16 +203,34 @@ async function checkDisplay() {
       : "Display unreachable: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
 }
+let camCheckBusy = false;
 async function checkCamera() {
+  if (camCheckBusy) return;
+  camCheckBusy = true;
+  $("checkCamBtn").disabled = true;
   setLive(false); // free the device first: a live poll holding it would fail the check
+  // The check runs exposure-settle warm-up plus 3x14 stability frames
+  // server-side (~10-30 s); show liveness instead of a frozen-looking UI.
+  const t0 = Date.now();
+  const ticker = setInterval(() => {
+    $("cfgmsg").textContent = "Checking camera… " +
+      Math.round((Date.now() - t0) / 1000) + "s " +
+      "(exposure settle + stability frames, can take ~30 s)";
+  }, 500);
   try {
     const s = await api("/api/check-camera", {method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({camera_index: Number($("camera_index").value || 0),
-                            camera_brightness: brightness()})});
+                            camera_brightness: brightness(),
+                            camera_exposure: exposure()})});
     $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
                                    : "Camera problem: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
+  finally {
+    clearInterval(ticker);
+    $("checkCamBtn").disabled = false;
+    camCheckBusy = false;
+  }
 }
 async function start() {
   try {
@@ -214,14 +257,21 @@ async function liveTick() {
   if (!liveOn) return;
   try {
     const idx = Number($("camera_index").value || 0);
+    const exp = exposure();
     const r = await fetch("/api/camera/frame?camera_index=" + idx +
-                          "&brightness=" + brightness());
+                          "&brightness=" + brightness() +
+                          "&exposure=" + (exp === null ? "auto" : exp));
     if (r.status === 409) {
       setLive(false);
       $("livemsg").textContent = "Camera busy — run in progress.";
       return;
     }
-    if (!r.ok) throw new Error(r.statusText);
+    if (!r.ok) {
+      // Surface the server's reason (e.g. "cannot open camera index 1")
+      // instead of a bare "Bad Gateway" that hides the actual problem.
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || r.statusText);
+    }
     const blob = await r.blob();
     const img = $("liveview");
     const old = img.src;
@@ -241,6 +291,7 @@ async function restore() {
 }
 let seenEvents = 0;
 let lastEvents = [];
+let lastRunSeq = null;
 function detailFor(photo) {
   for (let i = lastEvents.length - 1; i >= 0; i--) {
     const e = lastEvents[i];
@@ -285,11 +336,27 @@ function inspect(photo) {
 async function poll() {
   try {
     const s = await api("/api/run/state");
+    if (lastRunSeq !== null && s.run_seq !== lastRunSeq) {
+      // New run started: clear the previous run's log, report and inspector.
+      $("log").innerHTML = "";
+      $("report").textContent = "–";
+      $("detailCard").style.display = "none";
+      seenEvents = 0;
+    }
+    lastRunSeq = s.run_seq;
+    if (s.events.length < seenEvents) {
+      // Belt-and-braces: server restarted mid-session (run_seq reset).
+      $("log").innerHTML = "";
+      $("report").textContent = "–";
+      seenEvents = 0;
+    }
     lastEvents = s.events;
     const log = $("log");
     for (const e of s.events.slice(seenEvents)) {
       const div = document.createElement("div");
       if (e.kind === "error") div.className = "err";
+      else if (e.kind === "ok" || e.kind === "tune" || e.kind === "vlm") div.className = "ok";
+      else if (e.kind === "phase" || e.kind === "run") div.className = "phase";
       div.textContent = `[${e.t}] ${e.kind}: ${e.text}`;
       log.appendChild(div);
     }
@@ -304,13 +371,16 @@ async function poll() {
     }
     if (s.report) $("report").textContent = JSON.stringify(s.report, null, 2);
     $("runmsg").textContent = `status: ${s.status} · mode: ${s.mode || "?"} (steps ${s.steps})`;
-    $("startBtn").disabled = s.status === "running";
+    $("startBtn").disabled = s.status === "running" || s.status === "aborting";
   } catch (e) { /* server restarting? keep polling */ }
   setTimeout(poll, 1500);
 }
 load(); poll();
 // Live view toggle, enabled by default; preference sticks across reloads.
 $("live_toggle").onchange = (e) => setLive(e.target.checked);
+$("exposure_auto").onchange = () => {
+  $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
+};
 let livePref = "1";
 try { livePref = localStorage.getItem("calibAgentLiveView") || "1"; } catch (e) {}
 setLive(livePref !== "0");

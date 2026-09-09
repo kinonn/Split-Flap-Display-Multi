@@ -19,12 +19,16 @@ from .loop import SUPPORTED_CONTRACT, Calibrator, load_bundled_contract
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Vision-guided auto-calibration for the split-flap display.")
-    parser.add_argument("--host", required=True,
-                        help="Master hostname/IP, e.g. splitflap.local")
+    parser.add_argument("--host", required=False, default=None,
+                        help="Master hostname/IP, e.g. splitflap.local "
+                             "(not needed with --verify)")
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--camera-brightness", type=float, default=50.0,
                         help="Camera brightness 0..100 (best-effort, "
                              "backend-dependent)")
+    parser.add_argument("--camera-exposure", type=float, default=None,
+                        help="Fixed sensor exposure (CAP_PROP_EXPOSURE units, "
+                             "backend-dependent); omit for auto-search")
     parser.add_argument("--photo-dir", default="./calib-photos")
     parser.add_argument("--phase", type=int, choices=(1, 2, 3, 4), default=4,
                         help="1=read-only proposals, 2=+volatile previews, "
@@ -47,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Override bundled calib/contract.json")
     parser.add_argument("--check-camera", action="store_true",
                         help="Camera + device preflight only, then exit")
+    parser.add_argument("--verify", metavar="RUN_DIR", default=None,
+                        help="Check a finished run's report (report.json or "
+                             "agent_report.json) and exit 0 only when the "
+                             "calibration converged with no persistent wrong "
+                             "glyphs; no display connection needed")
     return parser
 
 
@@ -60,8 +69,53 @@ def load_contract(args) -> dict:
         return {"contractVersion": SUPPORTED_CONTRACT}
 
 
+def verify_run(run_dir: str) -> int:
+    """Post-run verification: exit 0 only when converged and clean.
+
+    Reads report.json (deterministic tool) or agent_report.json (VLM
+    agent) — no display or camera needed, so it works on any run dir
+    after the fact and is safe for CI.
+    """
+    path = os.path.join(run_dir, "report.json")
+    if not os.path.isfile(path):
+        path = os.path.join(run_dir, "agent_report.json")
+    if not os.path.isfile(path):
+        print(f"error: no report.json or agent_report.json in {run_dir}",
+              file=sys.stderr)
+        return 2
+    with open(path, encoding="utf-8") as fh:
+        report = json.load(fh)
+    result = report.get("result")
+    summary = report.get("summary") or {}
+    persistent = summary.get("persistent_wrong_glyph_modules")
+    if persistent is None:  # older reports: derive from the identity log
+        ident = (report.get("identity") or {}).get("persistent") or []
+        persistent = sorted({e.get("module") for e in ident})
+    ok = result == "converged" and not persistent
+    print(f"report: {path}")
+    print(f"result: {result}")
+    print(f"persistent wrong glyphs: {persistent or 'none'}")
+    for m in summary.get("modules", []):
+        acc = m.get("acceptance") or {}
+        acc_s = ",".join(f"{k}={v}" for k, v in sorted(acc.items())) or "n/a"
+        flag = "WRONG-GLYPH" if m.get("persistent_wrong_glyph") else "ok"
+        print(f"  m{m['module']}: offset_delta={m.get('offset_delta', 0):+d} "
+              f"{flag} acceptance[{acc_s}]")
+    if ok:
+        print("VERIFY OK")
+        return 0
+    print("VERIFY FAILED", file=sys.stderr)
+    return 1
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.verify:
+        return verify_run(args.verify)
+    if not args.host:
+        print("error: --host is required (unless using --verify)",
+              file=sys.stderr)
+        return 2
     # The --contract flag used to be dead wiring (return value ignored,
     # issue kinonn-bot#28). It now selects the local compatibility baseline:
     # bundled calib/contract.json or the override path. Fail fast when it
@@ -88,7 +142,8 @@ def main(argv=None) -> int:
     print(f"display: {status.get('totalModules')} modules, "
           f"charset {status.get('charset')}, contract v{status.get('contractVersion')}")
 
-    with Camera(args.camera_index, brightness=args.camera_brightness) as camera:
+    with Camera(args.camera_index, brightness=args.camera_brightness,
+                exposure=args.camera_exposure) as camera:
         if args.check_camera:
             try:
                 diag = camera.check_camera()

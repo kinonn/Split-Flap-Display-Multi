@@ -56,6 +56,18 @@ def test_full_drum_toggle_roundtrip(tmp_path, monkeypatch):
     assert client.get("/api/config").json()["full_drum"] is False
 
 
+def test_exposure_config_roundtrip_and_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
+    client = TestClient(server.app)
+    # Set a value, clear it back to auto, reject garbage with 400.
+    assert client.post("/api/config", json={"camera_exposure": -4}).status_code == 200
+    assert client.get("/api/config").json()["camera_exposure"] == -4.0
+    assert client.post("/api/config", json={"camera_exposure": ""}).status_code == 200
+    assert client.get("/api/config").json()["camera_exposure"] is None
+    r = client.post("/api/config", json={"camera_exposure": "bright"})
+    assert r.status_code == 400
+
+
 def test_config_write_is_atomic_and_private(tmp_path, monkeypatch):
     # Issue kinonn-bot#36: tmp-file + chmod + rename, no leftovers.
     import os
@@ -65,8 +77,9 @@ def test_config_write_is_atomic_and_private(tmp_path, monkeypatch):
 
     monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
     _atomic_write_json(config_path(), {"llm_api_key": "sk-secret123"})
-    mode = stat.S_IMODE(os.stat(config_path()).st_mode)
-    assert mode == 0o600, oct(mode)
+    if os.name != "nt":  # os.chmod cannot express 0o600 on Windows/NTFS
+        mode = stat.S_IMODE(os.stat(config_path()).st_mode)
+        assert mode == 0o600, oct(mode)
     assert json.load(open(config_path())) == {"llm_api_key": "sk-secret123"}
     assert [p for p in os.listdir(tmp_path) if ".tmp-" in p] == []
 
@@ -102,8 +115,9 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     class FakeCam:
         seen = []
 
-        def __init__(self, index=0, brightness=50.0):
+        def __init__(self, index=0, brightness=50.0, exposure=None):
             self.brightness = brightness
+            self.exposure = exposure
             FakeCam.seen.append(self)
 
         def open(self, quick=False):
@@ -123,6 +137,14 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     assert r.headers["content-type"] == "image/jpeg"
     assert r.content[:2] == b"\xff\xd8"
     assert FakeCam.seen[-1].brightness == 80.0
+    # Exposure query value passes through; absent/auto means AE on (None).
+    r = client.get("/api/camera/frame?exposure=-4")
+    assert r.status_code == 200
+    assert FakeCam.seen[-1].exposure == -4.0
+    client.get("/api/camera/frame?exposure=auto")
+    assert FakeCam.seen[-1].exposure is None
+    # Garbage exposure is a 400, not a silent auto.
+    assert client.get("/api/camera/frame?exposure=bright").status_code == 400
 
 
 def test_camera_frame_busy_during_run(tmp_path, monkeypatch):
@@ -187,6 +209,7 @@ def test_start_clears_previous_runs(tmp_path, monkeypatch):
             raise CalibError("offline")
 
     monkeypatch.setattr(server, "Display", DeadDisplay)
+    seq_before = server.harness.state()["run_seq"]
     client = TestClient(server.app)
     client.post("/api/config", json={"display_host": "x",
                                      "llm_base_url": "http://localhost:11434/v1"})
@@ -195,9 +218,16 @@ def test_start_clears_previous_runs(tmp_path, monkeypatch):
         if server.harness.state()["status"] == "failed":
             break
         time.sleep(0.02)
-    # Old run output is gone; the fresh run reuses the run-001 name
-    # (its dir exists again but is empty).
+    # Old run output is gone; the fresh run reuses the run-001 name.
     assert not (old / "photo_0001.jpg").exists()
     assert not (old / "agent_report.json").exists()
     assert server.harness.run_dir.endswith("run-001")
-    assert os.listdir(server.harness.run_dir) == []
+    assert server.harness.state()["run_seq"] == seq_before + 1  # UI keys cleanup off this
+    # The run's log is persisted in the run folder (JSON lines) — even a
+    # failed run leaves its narrative on disk.
+    log_path = os.path.join(server.harness.run_dir, "events.jsonl")
+    with open(log_path, encoding="utf-8") as fh:
+        logged = [json.loads(line) for line in fh if line.strip()]
+    kinds = [e["kind"] for e in logged]
+    assert "run" in kinds and "error" in kinds
+    assert any("cleared" in e["text"] for e in logged if e["kind"] == "run")

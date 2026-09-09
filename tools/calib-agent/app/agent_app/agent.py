@@ -521,6 +521,11 @@ class Agent:
             self.event("vlm", f"step {self.steps}: model thinking… "
                               f"({len(messages)} msgs, ~"
                               f"{len(json.dumps(messages, default=str)) // 1024} KB)")
+            # Self-heal the history before sending: a strict provider
+            # 400s the WHOLE conversation if any assistant tool_calls
+            # block lacks its responses, which would end the run on one
+            # malformed turn.
+            self._repair_tool_messages(messages)
             t0 = time.monotonic()
             try:
                 reply = self._chat_abortable(messages, TOOL_SCHEMAS)
@@ -551,27 +556,39 @@ class Agent:
                     {"id": c["id"], "type": "function",
                      "function": {"name": c["name"],
                                  "arguments": json.dumps(c["arguments"])}} for c in reply["tool_calls"]]
+            if "content" not in assistant and "tool_calls" not in assistant:
+                assistant["content"] = "(empty response)"
             messages.append(assistant)
             if not reply.get("tool_calls"):
                 self.event("vlm", (reply.get("content") or "")[:500])
                 continue
             done = None  # the accepted finish call, if any
+            pending_photos: list[dict] = []
             for call in reply["tool_calls"]:
                 result = self._execute(call["name"], call["arguments"])
                 images = [result.pop("_image", None)]
                 messages.append({"role": "tool", "tool_call_id": call["id"],
                                  "content": json.dumps(result, default=str)[:4000]})
                 if images[0] is not None:
-                    messages.append({"role": "user", "content": [
-                        {"type": "text", "text": f"Photo for {call['name']} "
-                         f"(frame context in tool result above)."},
-                        {"type": "image_url", "image_url": {
-                            "url": "data:image/jpeg;base64," + base64.b64encode(images[0]).decode()}}]})
+                    # Buffer photos; they are appended after ALL tool
+                    # responses below. Strict providers reject a history
+                    # where a user message lands between two tool
+                    # responses of the same assistant tool_calls block
+                    # ("must be followed by tool messages responding to
+                    # each tool_call_id") — and show+capture turns hit
+                    # this constantly.
+                    pending_photos.append(
+                        {"role": "user", "content": [
+                            {"type": "text", "text": f"Photo for {call['name']} "
+                             f"(frame context in tool result above)."},
+                            {"type": "image_url", "image_url": {
+                                "url": "data:image/jpeg;base64," + base64.b64encode(images[0]).decode()}}]})
                 if call["name"] == "finish" and result.get("accepted"):
                     # Stop here: no display ops may run after the verdict,
                     # and summary/reason must come from THIS call.
                     done = call
                     break
+            messages.extend(pending_photos)
             self._prune(messages)
             if done:
                 verdict = done["arguments"].get("verdict", "needs-human")
@@ -579,6 +596,38 @@ class Agent:
                                            f"{result.get('reason', '')}")
         reason = "aborted by user" if self.aborted else "step budget exhausted"
         return self._done("needs-human", reason)
+
+    @staticmethod
+    def _repair_tool_messages(messages: list) -> int:
+        """Ensure every assistant tool_calls block is fully answered.
+
+        Walks the history; for each assistant message carrying
+        tool_calls, counts the tool responses before the next non-tool
+        message and inserts a synthetic "interrupted" response for any
+        missing id. Idempotent, O(n). Returns the number of insertions.
+        """
+        fixed = 0
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                i += 1
+                continue
+            expected = [c.get("id") for c in msg["tool_calls"]]
+            answered: set = set()
+            j = i + 1
+            while j < len(messages) and messages[j].get("role") == "tool":
+                answered.add(messages[j].get("tool_call_id"))
+                j += 1
+            missing = [cid for cid in expected if cid not in answered]
+            for cid in missing:
+                messages.insert(j, {"role": "tool", "tool_call_id": cid,
+                                    "content": "{\"error\": \"interrupted "
+                                               "before a result was recorded\"}"})
+                j += 1
+                fixed += 1
+            i = j
+        return fixed
 
     def _chat_abortable(self, messages: list, tools: list,
                         poll_s: float = 0.5) -> dict:
@@ -650,6 +699,16 @@ class Agent:
                                     "persistent": self.calib.identity_persistent,
                                     "bank": {"source": self.calib.template_source,
                                              "glyphs": sorted(self.calib.templates)}}}
+        try:
+            # Per-module outcome summary (same shape as the deterministic
+            # tool's report) so --verify works on agent runs too. Guarded:
+            # _done can fire before run() set the fleet geometry.
+            self.report["summary"] = self.calib.summarize(verdict)
+        except Exception:
+            self.report["summary"] = {"ok": verdict == "converged",
+                                      "result": verdict,
+                                      "persistent_wrong_glyph_modules": [],
+                                      "modules": []}
         path = os.path.join(self.calib.photo_dir, "agent_report.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.report, fh, indent=2)

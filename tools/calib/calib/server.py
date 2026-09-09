@@ -94,6 +94,7 @@ DEFAULTS = {
     "display_host": "splitflap.local",
     "camera_index": 0,
     "camera_brightness": 50,
+    "camera_exposure": None,  # None = driver AE; a value fixes the sensor
     "phase": 4,
     "dwell_ms": 800,
     "timeout_s": 60.0,
@@ -124,6 +125,17 @@ def save_config(patch: dict) -> dict:
     for key in DEFAULTS:
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
+    # Exposure is settable AND clearable (null/"" = back to auto-search).
+    # Garbage is a 400, matching _exposure_of — never a 500, never silent.
+    if "camera_exposure" in patch:
+        raw = patch["camera_exposure"]
+        if raw in (None, ""):
+            stored["camera_exposure"] = None
+        else:
+            try:
+                stored["camera_exposure"] = float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "camera_exposure must be a number or empty (auto)")
     _atomic_write_json(config_path(), stored)
     return load_config()
 
@@ -177,35 +189,68 @@ class UICalibrator(Calibrator):
     def shoot(self, frame: str, tag: str) -> dict:
         if self.abort_flag():
             raise CalibError("aborted by user")
+        t0 = time.monotonic()
         rec = super().shoot(frame, tag)
         scores = self.scores(rec)
+        took = time.monotonic() - t0
         bad = [(i, s["verdict"]) for i, s in enumerate(scores)
                if s["verdict"] != "ok"]
         summary = f"{len(scores) - len(bad)}/{len(scores)} ok" if scores else "no crops"
         if bad:
             summary += f" — off: {', '.join(f'm{i} {v}' for i, v in bad)}"
         self.event("photo", f"{tag} frameId={rec['frameId']} "
-                            f"show={frame!r} → {summary}",
+                            f"show={frame!r} → {summary} (took {took:.1f}s)",
                    photo=os.path.basename(rec["photo"]),
                    detail={"frame": frame, "frameId": rec["frameId"], "tag": tag,
+                           "took_s": round(took, 1),
                            "scores": [{"module": i, **s}
                                       for i, s in enumerate(scores)]})
         return rec
 
+    @staticmethod
+    def _glyph_at(frame: str, module: int) -> str:
+        """Expected glyph at a global module index (0-based, photo order)."""
+        return frame[module] if 0 <= module < len(frame) else "?"
+
     def _tune_cell(self, module: int, char_index: int, show_frame: str) -> dict:
-        self.event("tune", f"tuning module {module} "
-                           f"{'coarse' if char_index < 0 else f'char {char_index}'} …")
+        cell = "coarse" if char_index < 0 else f"char {char_index}"
+        self.event("tune", f"tuning module {module} {cell} "
+                           f"(0-based; expected glyph "
+                           f"{self._glyph_at(show_frame, module)!r} "
+                           "at this module) …")
+        t0 = time.monotonic()
         out = super()._tune_cell(module, char_index, show_frame)
+        took = time.monotonic() - t0
         last = self.deltas[-1] if self.deltas else {}
         if last.get("proposal"):
             self.event("tune", f"module {module}: proposal only "
-                               f"(phase 1/2, hardware untouched)")
+                               f"(phase 1/2, hardware untouched; took {took:.1f}s)")
         elif last.get("new") != last.get("old"):
             self.event("tune", f"module {module}: {last.get('old')} → "
-                               f"{last.get('new')} (kept)")
+                               f"{last.get('new')} (kept; took {took:.1f}s)")
         else:
             self.event("tune", f"module {module}: no improvement, kept "
-                               f"{last.get('old')}")
+                               f"{last.get('old')} (took {took:.1f}s)")
+        return out
+
+    def _identity_event(self, method: str, glyph: str, outliers: list[int]):
+        """Surface wrong-glyph findings (silent until now: they only
+        landed in the final report). 0-based, spelled out like the
+        agent app's suspects field."""
+        if not outliers:
+            return
+        spots = ", ".join(f"m{i} (= {i + 1}th from left)" for i in outliers)
+        self.event("identity", f"wrong glyph ({method}) on frame {glyph!r}: "
+                               f"{spots} — 0-based indices")
+
+    def consensus(self, rec: dict, glyph: str) -> list[int]:
+        out = super().consensus(rec, glyph)
+        self._identity_event("consensus", glyph, out)
+        return out
+
+    def absolute(self, rec: dict, glyph: str) -> list[int]:
+        out = super().absolute(rec, glyph)
+        self._identity_event("template", glyph, out)
         return out
 
     def _phase(self, name: str, label: str, fn):
@@ -244,6 +289,7 @@ class Harness:
         self.calib: UICalibrator | None = None
         self.thread: threading.Thread | None = None
         self.abort_requested = False
+        self.run_seq = 0  # increments per start; lets the UI detect a new run
 
     def log(self, event: dict):
         with self.lock:
@@ -251,6 +297,17 @@ class Harness:
             if event.get("photo") and event["photo"] not in self.photos:
                 self.photos.append(event["photo"])
             self.events = self.events[-500:]
+            run_dir = self.run_dir
+        # Persist the full log as JSON lines in the run folder: the UI
+        # only ever sees the last 100 events, and everything in memory
+        # dies with the server. Appends are cheap at log frequency.
+        if run_dir:
+            try:
+                with open(os.path.join(run_dir, "events.jsonl"), "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps(event, default=str) + "\n")
+            except OSError:
+                pass  # logging must never break a run
 
     def state(self) -> dict:
         with self.lock:
@@ -258,6 +315,7 @@ class Harness:
             return {"status": self.status, "events": self.events[-100:],
                     "photos": self.photos[-24:], "report": self.report,
                     "run_dir": self.run_dir, "phase": self.phase,
+                    "run_seq": self.run_seq,
                     "previews": calib.previews if calib else 0,
                     "persists": calib.persists if calib else 0,
                     "sweeps": round(calib.sweeps, 2) if calib else 0}
@@ -273,6 +331,7 @@ class Harness:
             self.photos = []
             self.report = None
             self.calib = None
+            self.run_seq += 1
             self.abort_requested = False
         runs_dir = os.path.join(data_dir(), "runs")
         cleared = clear_previous_runs(runs_dir)
@@ -314,7 +373,8 @@ class Harness:
                             "(live view or check never released it)")
                     cam_lock_held = True
                     cam = Camera(int(cfg.get("camera_index", 0)),
-                                 brightness=float(cfg.get("camera_brightness", 50)))
+                                 brightness=float(cfg.get("camera_brightness", 50)),
+                                 exposure=_exposure_of(None, "camera_exposure", cfg))
                     cam.open()
                     try:
                         diag = cam.check_camera()
@@ -406,8 +466,9 @@ app = FastAPI(title="Split-Flap Deterministic Calibration")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    # no-store: UI edits must never be hidden by a stale browser cache.
     with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as fh:
-        return fh.read()
+        return HTMLResponse(fh.read(), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
@@ -436,6 +497,23 @@ def display_status():
         return {"reachable": False, "error": str(exc)}
 
 
+def _exposure_of(source: dict | None, key: str, cfg: dict) -> float | None:
+    """Manual exposure from a request body or the saved config.
+
+    Accepts numbers; None/""/"auto" mean auto-search. Anything else is
+    a 400 — a mistyped value must not silently become auto.
+    """
+    raw = (source or {}).get(key, cfg.get("camera_exposure"))
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in ("", "auto"):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{key} must be a number or empty (auto)")
+
+
 @app.post("/api/check-camera")
 def check_camera(body: dict | None = None):
     cfg = load_config()
@@ -444,11 +522,12 @@ def check_camera(body: dict | None = None):
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
     brightness = float((body or {}).get("camera_brightness",
                                         cfg.get("camera_brightness", 50)))
+    exposure = _exposure_of(body, "camera_exposure", cfg)
     # Brief bounded wait: an in-flight live-view poll releases the device
     # within ~2 s. Never open the camera concurrently with anyone.
     if not _camera_lock.acquire(timeout=_CHECK_LOCK_WAIT_S):
         raise HTTPException(409, "camera busy: live view or run holds it")
-    cam = Camera(index, brightness=brightness)
+    cam = Camera(index, brightness=brightness, exposure=exposure)
     try:
         cam.open()
         diag = cam.check_camera()
@@ -461,7 +540,8 @@ def check_camera(body: dict | None = None):
 
 
 @app.get("/api/camera/frame")
-def camera_frame(camera_index: int | None = None, brightness: float | None = None):
+def camera_frame(camera_index: int | None = None, brightness: float | None = None,
+                 exposure: str | None = None):
     """Single live JPEG frame for the UI preview (no run needed).
 
     Opens the camera, grabs one frame with a short warm-up
@@ -476,9 +556,18 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
     index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
     if brightness is None:
         brightness = float(cfg.get("camera_brightness", 50))
+    if exposure is not None and exposure.strip().lower() not in ("", "auto"):
+        try:
+            exposure_val: float | None = float(exposure)
+        except ValueError:
+            raise HTTPException(400, "exposure must be a number or 'auto'")
+    else:
+        # Auto: let the driver's AE run (None = no manual override). The
+        # AE result beats any manual value on drivers whose AE adds gain.
+        exposure_val = None
     if not _camera_lock.acquire(blocking=False):
         raise HTTPException(409, "camera busy: check or run holds it")
-    cam = Camera(index, brightness=float(brightness))
+    cam = Camera(index, brightness=float(brightness), exposure=exposure_val)
     try:
         cam.open(quick=True)
         frame = cam.capture()

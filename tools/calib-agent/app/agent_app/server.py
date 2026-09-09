@@ -116,6 +116,7 @@ def load_config() -> dict:
     cfg.setdefault("llm_model", "deepseek-v4-flash-vision-exp")
     cfg.setdefault("camera_index", 0)
     cfg.setdefault("camera_brightness", 50)
+    cfg.setdefault("camera_exposure", None)  # None = driver AE; a value fixes the sensor
     cfg.setdefault("llm_reasoning_effort", "")
     cfg.setdefault("mode", "full")
     cfg.setdefault("full_drum", False)
@@ -137,6 +138,17 @@ def save_config(patch: dict) -> dict:
                 "camera_brightness", "identity_thresh", "phase"):
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
+    # Exposure is settable AND clearable (null/"" = back to auto-search).
+    # Garbage is a 400, matching _exposure_of — never a 500, never silent.
+    if "camera_exposure" in patch:
+        raw = patch["camera_exposure"]
+        if raw in (None, ""):
+            stored["camera_exposure"] = None
+        else:
+            try:
+                stored["camera_exposure"] = float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "camera_exposure must be a number or empty (auto)")
     # Effort is settable AND clearable (empty string = provider default).
     if "llm_reasoning_effort" in patch:
         stored["llm_reasoning_effort"] = str(patch["llm_reasoning_effort"] or "").strip()
@@ -193,6 +205,7 @@ class Harness:
         self.run_dir = ""
         self.agent: Agent | None = None
         self.thread: threading.Thread | None = None
+        self.run_seq = 0  # increments per start; lets the UI detect a new run
 
     def log(self, event: dict):
         with self.lock:
@@ -200,12 +213,24 @@ class Harness:
             if event.get("photo") and event["photo"] not in self.photos:
                 self.photos.append(event["photo"])
             self.events = self.events[-500:]
+            run_dir = self.run_dir
+        # Persist the full log as JSON lines in the run folder: the UI
+        # only ever sees the last 100 events, and everything in memory
+        # dies with the server. Appends are cheap at log frequency.
+        if run_dir:
+            try:
+                with open(os.path.join(run_dir, "events.jsonl"), "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps(event, default=str) + "\n")
+            except OSError:
+                pass  # logging must never break a run
 
     def state(self) -> dict:
         with self.lock:
             return {"status": self.status, "events": self.events[-100:],
                     "photos": self.photos[-24:], "report": self.report,
                     "run_dir": self.run_dir, "mode": self.mode,
+                    "run_seq": self.run_seq,
                     "steps": self.agent.steps if self.agent else 0}
 
     def start(self, cfg: dict) -> dict:
@@ -216,6 +241,7 @@ class Harness:
             self.mode = cfg.get("mode", "full")
             self.events = []
             self.photos = []
+            self.run_seq += 1
             self.report = None
         runs_dir = os.path.join(data_dir(), "runs")
         cleared = clear_previous_runs(runs_dir)
@@ -253,7 +279,8 @@ class Harness:
                         "(live view or check never released it)")
                 try:
                     camera = Camera(int(cfg.get("camera_index", 0)),
-                                    brightness=float(cfg.get("camera_brightness", 50)))
+                                    brightness=float(cfg.get("camera_brightness", 50)),
+                                    exposure=_exposure_of(None, "camera_exposure", cfg))
                     camera.open()
                     try:
                         camera.check_camera()
@@ -331,8 +358,9 @@ app = FastAPI(title="Split-Flap VLM Calibration Harness")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    # no-store: UI edits must never be hidden by a stale browser cache.
     with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as fh:
-        return fh.read()
+        return HTMLResponse(fh.read(), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
@@ -359,6 +387,23 @@ def display_status():
         return {"reachable": False, "error": str(exc)}
 
 
+def _exposure_of(source: dict | None, key: str, cfg: dict) -> float | None:
+    """Manual exposure from a request body or the saved config.
+
+    Accepts numbers; None/""/"auto" mean auto-search. Anything else is
+    a 400 — a mistyped value must not silently become auto.
+    """
+    raw = (source or {}).get(key, cfg.get("camera_exposure"))
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in ("", "auto"):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{key} must be a number or empty (auto)")
+
+
 @app.post("/api/check-camera")
 def check_camera(body: dict | None = None):
     cfg = load_config()
@@ -367,11 +412,12 @@ def check_camera(body: dict | None = None):
     index = int((body or {}).get("camera_index", cfg.get("camera_index", 0)))
     brightness = float((body or {}).get("camera_brightness",
                                         cfg.get("camera_brightness", 50)))
+    exposure = _exposure_of(body, "camera_exposure", cfg)
     # Brief bounded wait: an in-flight live-view poll releases the device
     # within ~2 s. Never open the camera concurrently with anyone.
     if not _camera_lock.acquire(timeout=_CHECK_LOCK_WAIT_S):
         raise HTTPException(409, "camera busy: live view or run holds it")
-    cam = Camera(index, brightness=brightness)
+    cam = Camera(index, brightness=brightness, exposure=exposure)
     try:
         cam.open()
         diag = cam.check_camera()
@@ -384,7 +430,8 @@ def check_camera(body: dict | None = None):
 
 
 @app.get("/api/camera/frame")
-def camera_frame(camera_index: int | None = None, brightness: float | None = None):
+def camera_frame(camera_index: int | None = None, brightness: float | None = None,
+                 exposure: str | None = None):
     """Single live JPEG frame for the UI preview (no run needed).
 
     Opens the camera, grabs one frame with a short warm-up
@@ -399,9 +446,18 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
     index = int(camera_index) if camera_index is not None else int(cfg.get("camera_index", 0))
     if brightness is None:
         brightness = float(cfg.get("camera_brightness", 50))
+    if exposure is not None and exposure.strip().lower() not in ("", "auto"):
+        try:
+            exposure_val: float | None = float(exposure)
+        except ValueError:
+            raise HTTPException(400, "exposure must be a number or 'auto'")
+    else:
+        # Auto: let the driver's AE run (None = no manual override). The
+        # AE result beats any manual value on drivers whose AE adds gain.
+        exposure_val = None
     if not _camera_lock.acquire(blocking=False):
         raise HTTPException(409, "camera busy: check or run holds it")
-    cam = Camera(index, brightness=float(brightness))
+    cam = Camera(index, brightness=float(brightness), exposure=exposure_val)
     try:
         cam.open(quick=True)
         frame = cam.capture()
