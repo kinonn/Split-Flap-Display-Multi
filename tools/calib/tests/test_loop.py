@@ -148,3 +148,21 @@ def test_systematic_shift_caught_by_golden_bank(tmp_path, monkeypatch):
     assert report["result"] == "needs-human"
     assert report["identity"]["bank"]["source"] == "golden-test"
     assert "wrong glyph" in report["reason"]
+
+
+def test_p2_two_staggered_passes_cover_two_residue_classes(tmp_path, monkeypatch):
+    # Every drum character must appear, and each module must be exercised
+    # on both residue classes (offsets 0 and stride//2) — not just one.
+    monkeypatch.setattr(vision, "split_crops",
+                        lambda gray, n: [gray[:, i * 68:(i + 1) * 68] for i in range(n)])
+    cal = _calibrator(2, tmp_path)
+    cal.run()
+    drum = cal.drum
+    n = len(drum)
+    p2 = [f for f in cal.frames if f["tag"].startswith("p2_stride")]
+    assert len(p2) == len(range(0, n, 6)) + len(range(3, n, 6))
+    for i in range(cal.total):
+        residues = {(drum.index(f["frame"][i]) - i) % 6 for f in p2}
+        # Superset (drum length need not divide the stride, so wraparound
+        # frames may leak extra residues); both passes must be present.
+        assert {0, 3} <= residues, f"module {i}: residues {sorted(residues)}"

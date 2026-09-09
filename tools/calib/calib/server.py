@@ -124,10 +124,25 @@ def save_config(patch: dict) -> dict:
     for key in DEFAULTS:
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
-    with open(config_path(), "w", encoding="utf-8") as fh:
-        json.dump(stored, fh, indent=2)
-    os.chmod(config_path(), 0o600)
+    _atomic_write_json(config_path(), stored)
     return load_config()
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    """Write JSON with mode 0600, atomically (issue kinonn-bot#36).
+
+    The old write-then-chmod left a window where the file was
+    world-readable, and a mid-write crash left a truncated config.
+    Writing to a same-dir temp file, chmodding it, then os.replace()
+    closes both windows. The temp name carries pid + thread id: the sync
+    /api/config endpoints run on a threadpool, so two concurrent saves
+    must not share one temp file.
+    """
+    tmp = path + f".tmp-{os.getpid()}-{threading.get_ident()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 class UICalibrator(Calibrator):

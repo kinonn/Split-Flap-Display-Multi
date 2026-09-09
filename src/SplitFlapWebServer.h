@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CalibApi.h"
 #include "JsonSettings.h"
 #include "PendingActions.h"
 #include "SplitFlapDisplay.h"
@@ -138,6 +139,10 @@ class SplitFlapWebServer {
     std::mutex calibMutex_;
     String calibLastFrame_;
     int calibLastFrameId_ = 0;
+    // Mode to restore when calibration hold is released (issue
+    // kinonn-bot#35). Saved on engage; never-engaged falls back to 0.
+    // Guarded by calibMutex_ (web task only).
+    CalibHoldTracker calibHold_;
 
     void registerCalibRoutes();
 };

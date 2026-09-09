@@ -336,8 +336,20 @@ void SplitFlapWebServer::registerCalibRoutes() {
         }
         int previousMode = settings.getInt("mode");
         bool active = json["active"].as<bool>();
-        settings.putInt("mode", active ? CALIB_HOLD_MODE : 0);
         JsonDocument response;
+        int writeMode;
+        {
+            // Hold mode save/restore lives in CalibHoldTracker (issue
+            // kinonn-bot#35); the mutex guards the tracker state.
+            std::lock_guard<std::mutex> lock(calibMutex_);
+            if (active) {
+                writeMode = calibHold_.engage(previousMode);
+            } else {
+                writeMode = calibHold_.release();
+                response["restoredMode"] = writeMode;
+            }
+        }
+        settings.putInt("mode", writeMode);
         response["message"] = active ? "Calibration hold engaged" : "Calibration hold released";
         response["type"] = "success";
         response["holdActive"] = active;
