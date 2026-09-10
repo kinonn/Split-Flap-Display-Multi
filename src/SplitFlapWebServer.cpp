@@ -265,6 +265,18 @@ int SplitFlapWebServer::getCalibTotalModules() {
     return display.getNumModules();
 }
 
+bool SplitFlapWebServer::isCalibBusy() {
+    if (getCalibBusy() || pendingActions_.hasCalibShowPending() || pendingActions_.hasCalibPreviewPending() ||
+        pendingActions_.hasReloadOffsets() || pendingActions_.hasPushOffsets()) {
+        return true;
+    }
+    // Outstanding remote push acks (master only; null-safe elsewhere).
+    if (espNow && espNow->hasPushAcksPending()) {
+        return true;
+    }
+    return false;
+}
+
 void SplitFlapWebServer::registerCalibRoutes() {
     // Read-only status for the vision agent: fleet geometry, drum order,
     // live offsets (including uncommitted previews) and show progress.
@@ -525,6 +537,15 @@ void SplitFlapWebServer::registerCalibRoutes() {
         bool isLocal = (group == 1);
         int localModules = display.getNumModules();
         int charset = display.getCharsetSize();
+
+        // F1: a persist re-homes motors via the loop drain. Refuse when a
+        // show/preview/reload/push is still in flight — persisting under a
+        // settling frame corrupts both the frame and the verify photo.
+        if (isCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
 
         if (kind == "display") {
             if (! json["value"].is<int>()) {

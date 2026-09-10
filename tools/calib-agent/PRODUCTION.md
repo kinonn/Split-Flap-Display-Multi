@@ -4,6 +4,20 @@ Fixed camera framing the whole display. Agent on LAN over HTTP.
 Fleet from day one: master + ESP-NOW remotes, up to 6 groups x 8 modules.
 Firmware: `feature/ai-calibration-apis`, contract v1, settings schema v1.
 
+## 0. Transport (tools are master-only)
+
+The deterministic runner (`tools/calib`: CLI, web UI) and the VLM
+harness (`tools/calib-agent/app`) talk to ONE host: the master.
+Fleet-wide shows and remote offset persists go through the master,
+which fans out via ESP-NOW. The per-controller steps below (status /
+hold on each group IP, per-group preview) apply to MANUAL runs
+(curl by hand); tool runs do them on the master automatically.
+For a fleet tool run, engage hold on every remote controller
+out-of-band BEFORE starting — the tools cannot do it for you —
+and release afterwards. Remote groups have no preview path in
+firmware: the deterministic tool tunes them via persist-verify-revert
+through the master.
+
 Abort unless `GET /api/calib/status` and `GET /calib-contract.json`
 match this pin (contractVersion 1, charset and module counts as expected).
 
@@ -14,7 +28,8 @@ match this pin (contractVersion 1, charset and module counts as expected).
 - Shows are exact-width: `len == numModules` (local) or `== totalModules`
   (fleet-wide via master, fanned left-to-right). Centering/scroll forced off.
 - Hold (mode 4) suspends date/time/random/scroll/MQTT/ESP-NOW writes:
-  `POST /api/calib/hold {"active":true}` on EVERY controller first,
+  `POST /api/calib/hold {"active":true}` on EVERY controller first
+  (manual runs; tool runs hold the master — hold remotes out-of-band),
   `{"active":false}` on all when done.
 - Wear budget: max 3 full rotations per module per session.
 - Pre-flight: snapshot via `GET /settings` (store the full response body).
@@ -50,7 +65,9 @@ POST /api/calib/offsets {"scope":"local"|2..6, "kind":"char"|"module"|"display",
 
 Order: display -> module -> char; local group first, then remotes.
 `charIndex -1` = coarse module offset, else drum index into `drumOrder`.
-Char values clamped `-32..32`.
+Char values clamped `-32..32`. NOTE: the deterministic runner tunes
+module + char cells only; `display`-kind writes are manual/VLM-only
+(see §0: tools are master-only).
 
 ## 5. Done criteria + report
 
