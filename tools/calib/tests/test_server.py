@@ -300,10 +300,12 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     class FakeCam:
         seen = []
 
-        def __init__(self, index=0, brightness=50.0, exposure=None):
+        def __init__(self, index=0, brightness=50.0, exposure=None,
+                     crop_percent=15.0):
             self.index = index
             self.brightness = brightness
             self.exposure = exposure
+            self.crop_percent = crop_percent
             FakeCam.seen.append(self)
 
         def open(self, quick=False):
@@ -340,6 +342,80 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     assert FakeCam.seen[-1].exposure is None
     # Garbage exposure is a 400, not a silent auto.
     assert client.get("/api/camera/frame?exposure=bright").status_code == 400
+    # Crop query value passes through (clamped); absent means the saved
+    # config (default 15); garbage is a 400.
+    r = client.get("/api/camera/frame?crop_percent=10")
+    assert r.status_code == 200
+    assert FakeCam.seen[-1].crop_percent == 10.0
+    r = client.get("/api/camera/frame?crop_percent=99")
+    assert r.status_code == 200
+    assert FakeCam.seen[-1].crop_percent == 30.0
+    save_config({"camera_crop_percent": 5})
+    assert client.get("/api/camera/frame").status_code == 200
+    assert FakeCam.seen[-1].crop_percent == 5.0
+    assert client.get("/api/camera/frame?crop_percent=tall").status_code == 400
+
+
+def test_crop_config_roundtrip_clamp_and_validation(tmp_path, monkeypatch):
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+    # Default backfills to 15 for fresh configs.
+    assert srv.load_config()["camera_crop_percent"] == 15.0
+    srv.save_config({"camera_crop_percent": 10})
+    assert srv.load_config()["camera_crop_percent"] == 10.0
+    # Out-of-range clamps to the slider bounds, never stored raw.
+    srv.save_config({"camera_crop_percent": 99})
+    assert srv.load_config()["camera_crop_percent"] == 30.0
+    srv.save_config({"camera_crop_percent": -5})
+    assert srv.load_config()["camera_crop_percent"] == 0.0
+    # Empty resets to the default; garbage is a 400.
+    srv.save_config({"camera_crop_percent": ""})
+    assert srv.load_config()["camera_crop_percent"] == 15.0
+    with pytest.raises(Exception, match="must be a number"):
+        srv.save_config({"camera_crop_percent": "tall"})
+    with pytest.raises(Exception, match="must be a number"):
+        srv.save_config({"camera_crop_percent": "nan"})
+
+
+def test_check_camera_accepts_crop_body(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import calib.server as srv
+
+    monkeypatch.setenv("CALIB_DATA", str(tmp_path))
+
+    class FakeCam:
+        seen = []
+
+        def __init__(self, index=0, brightness=50.0, exposure=None,
+                     crop_percent=15.0):
+            self.crop_percent = crop_percent
+            FakeCam.seen.append(self)
+
+        def open(self):
+            return self
+
+        def check_camera(self):
+            return {"crop_percent": self.crop_percent}
+
+        def close(self):
+            pass
+
+    class IdleHarness:
+        def state(self):
+            return {"status": "idle"}
+
+    monkeypatch.setattr(srv, "Camera", FakeCam)
+    monkeypatch.setattr(srv, "harness", IdleHarness())
+    client = TestClient(srv.app)
+    r = client.post("/api/check-camera", json={"camera_crop_percent": 20})
+    assert r.status_code == 200
+    assert r.json()["diagnostics"]["crop_percent"] == 20.0
+    assert FakeCam.seen[-1].crop_percent == 20.0
+    # Garbage crop is a 400, not a silent default.
+    assert client.post("/api/check-camera",
+                       json={"camera_crop_percent": "tall"}).status_code == 400
 
 
 def test_camera_frame_busy_during_run(tmp_path, monkeypatch):

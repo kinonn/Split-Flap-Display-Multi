@@ -11,7 +11,7 @@ import json
 import os
 import sys
 
-from .camera import Camera, CameraError
+from .camera import DEFAULT_CROP_PERCENT, Camera, CameraError
 from .display import CalibError, Display
 from .loop import SUPPORTED_CONTRACT, Calibrator, load_bundled_contract
 
@@ -29,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-exposure", type=float, default=None,
                         help="Fixed sensor exposure (CAP_PROP_EXPOSURE units, "
                              "backend-dependent); omit for auto-search")
+    parser.add_argument("--camera-crop-percent", type=float, default=DEFAULT_CROP_PERCENT,
+                        help="Crop x% off the top AND bottom of every frame "
+                             "before exposure metering (0..30, default 15)")
     parser.add_argument("--photo-dir", default="./calib-photos")
     parser.add_argument("--phase", type=int, choices=(1, 2, 3, 4), default=4,
                         help="1=read-only proposals, 2=+volatile previews, "
@@ -143,7 +146,8 @@ def main(argv=None) -> int:
           f"charset {status.get('charset')}, contract v{status.get('contractVersion')}")
 
     with Camera(args.camera_index, brightness=args.camera_brightness,
-                exposure=args.camera_exposure) as camera:
+                exposure=args.camera_exposure,
+                crop_percent=args.camera_crop_percent) as camera:
         if args.check_camera:
             try:
                 diag = camera.check_camera()

@@ -92,6 +92,11 @@
       oninput="$('brightness_val').textContent = this.value" />
   </div>
   <div>
+    <label>Top/bottom crop (<span id="crop_val">15</span>%) — trims x% off the top AND bottom before exposure</label>
+    <input id="camera_crop_percent" type="range" min="0" max="30" step="1" value="15"
+      oninput="$('crop_val').textContent = this.value" />
+  </div>
+  <div>
     <label>Sensor exposure (<span id="exposure_val">auto</span>)</label>
     <input id="camera_exposure" type="range" min="-13" max="0" step="1" value="-7"
       oninput="$('exposure_val').textContent = exposureOn() ? this.value : 'auto'" />
@@ -156,6 +161,8 @@ async function load() {
   $("full_drum").checked = !!c.full_drum;
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
+  $("camera_crop_percent").value = c.camera_crop_percent ?? 15;
+  $("crop_val").textContent = c.camera_crop_percent ?? 15;
   if (c.camera_exposure === null || c.camera_exposure === undefined || c.camera_exposure === "") {
     $("exposure_auto").checked = true;
   } else {
@@ -173,6 +180,11 @@ function brightness() {
   const v = Number($("camera_brightness").value);
   return Number.isFinite(v) ? v : 50;
 }
+function cropPercent() {
+  const v = Number($("camera_crop_percent").value);
+  if (!Number.isFinite(v)) return 15;
+  return Math.max(0, Math.min(30, v));
+}
 function exposureOn() { return !$("exposure_auto").checked; }
 function exposure() {
   if (!exposureOn()) return null;
@@ -187,6 +199,7 @@ async function save() {
         camera_index: Number($("camera_index").value || 0),
         camera_brightness: brightness(),
         camera_exposure: exposure(),
+        camera_crop_percent: cropPercent(),
         llm_base_url: $("llm_base_url").value.trim(),
         llm_model: $("llm_model").value.trim(),
         llm_reasoning_effort: $("llm_reasoning_effort").value.trim(),
@@ -222,7 +235,8 @@ async function checkCamera() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({camera_index: Number($("camera_index").value || 0),
                             camera_brightness: brightness(),
-                            camera_exposure: exposure()})});
+                            camera_exposure: exposure(),
+                            camera_crop_percent: cropPercent()})});
     $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
                                    : "Camera problem: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
@@ -260,6 +274,7 @@ async function liveTick() {
     const exp = exposure();
     const r = await fetch("/api/camera/frame?camera_index=" + idx +
                           "&brightness=" + brightness() +
+                          "&crop_percent=" + cropPercent() +
                           "&exposure=" + (exp === null ? "auto" : exp));
     if (r.status === 409) {
       setLive(false);
