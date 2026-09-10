@@ -288,3 +288,56 @@ def test_cli_verify_exit_codes(tmp_path, capsys):
     empty = tmp_path / "run-empty"
     empty.mkdir()
     assert main(["--verify", str(empty)]) == 2
+
+
+def _p2_calibrator(tmp_path):
+    cal = _calibrator(2, tmp_path)
+    cal.total = 4
+    cal.charset = 37
+    cal.drum = cal.display.drum
+    cal.group_widths = [4]
+    return cal
+
+
+def test_p2_scores_every_shot_frame(tmp_path, monkeypatch):
+    # Regression: per-frame scoring used to sit outside the frame loop,
+    # so only the last frame of each pass was examined (2 of 13 scored).
+    monkeypatch.setattr(vision, "split_crops",
+                        lambda gray, n: [gray[:, i * 68:(i + 1) * 68] for i in range(n)])
+    cal = _p2_calibrator(tmp_path)
+    seen = []
+    orig_scores = Calibrator.scores
+
+    def recording_scores(self, rec):
+        if rec["tag"].startswith("p2_stride"):
+            seen.append(rec["tag"])
+        return orig_scores(self, rec)
+
+    monkeypatch.setattr(Calibrator, "scores", recording_scores)
+    cal._p2_fine()
+    shot = sorted(f["tag"] for f in cal.frames if f["tag"].startswith("p2_stride"))
+    assert len(shot) > 2  # multi-frame sweep, not a degenerate case
+    assert sorted(seen) == shot
+
+
+def test_p2_midpass_suspect_gets_tuned(tmp_path, monkeypatch):
+    # p2_stride6 is mid-pass (pass finals are 36 and 33): a misalignment
+    # there must still reach _tune_cell. The old code never scored it.
+    monkeypatch.setattr(vision, "split_crops",
+                        lambda gray, n: [gray[:, i * 68:(i + 1) * 68] for i in range(n)])
+    cal = _p2_calibrator(tmp_path)
+    orig_scores = Calibrator.scores
+
+    def suspect_scores(self, rec):
+        out = orig_scores(self, rec)
+        if rec["tag"] == "p2_stride6":
+            out = [dict(s) for s in out]
+            out[0] = {"verdict": "half", "seam_strength": 0.9,
+                      "seam_clusters": [[40, 44]], "seam_pos": 0.5}
+        return out
+
+    monkeypatch.setattr(Calibrator, "scores", suspect_scores)
+    cal._p2_fine()
+    assert "p2_stride6" in [f["tag"] for f in cal.frames]
+    assert any(d["module"] == 0 and d["charIndex"] == 6 for d in cal.deltas)
+    assert cal.display.previews != []  # group-1 preview path exercised

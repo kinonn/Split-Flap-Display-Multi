@@ -28,6 +28,11 @@ uv run splitflap-calib --host splitflap.local --phase 1 --photo-dir ./photos
 uv run splitflap-calib --host splitflap.local --photo-dir ./photos
 ```
 
+Fleet runs go through the master (single `--host`); the master fans
+show frames and offset pushes out to ESP-NOW remotes. Engage hold
+(mode 4) on every remote controller out-of-band before starting —
+the runner only holds the master — and release afterwards.
+
 ## Web UI (same deterministic runner, no LLM)
 
 ```sh

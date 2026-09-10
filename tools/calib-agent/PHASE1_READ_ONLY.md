@@ -28,6 +28,8 @@ POST /api/calib/hold {"active": true}
 
 On EVERY controller (master + each remote IP). Verify `holdActive==true`.
 Hold (mode 4) suspends date/time/random/scroll/MQTT/ESP-NOW writes.
+Tool runs hold the master automatically; remotes must be held
+out-of-band before starting (see PRODUCTION.md §0).
 
 ## 3. Sync protocol (every photo)
 

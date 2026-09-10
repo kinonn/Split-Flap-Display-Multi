@@ -473,7 +473,8 @@ class Calibrator:
         # Jammed-module detection (issue kinonn-bot#27): each staggered
         # frame commands a DIFFERENT glyph on every module, so a crop that
         # is near-identical across consecutive frames is stuck by
-        # definition. vision.stuck() was defined + tested but never called.
+        # definition. Compared per consecutive frame pair, chained
+        # across passes.
         prev_crops: list | None = None
         stuck_votes: dict[int, int] = {}
         sweep_comparisons = 0
@@ -488,28 +489,30 @@ class Calibrator:
                 self._guard_budgets()
                 frame = "".join(self.drum[(k + i) % n] for i in range(self.total))
                 rec = self.shoot(frame, f"p2_stride{k}")
-            self.sweeps += stride / n
-            if prev_crops is not None:
-                sweep_comparisons += 1
-                for i, (a, b) in enumerate(zip(prev_crops, rec["crops"])):
-                    try:
-                        if vision.stuck(a, b):
-                            stuck_votes[i] = stuck_votes.get(i, 0) + 1
-                    except Exception:
-                        pass
-            prev_crops = rec["crops"]
-            for i, s in enumerate(self.scores(rec)):
-                if s["verdict"] != "ok":
-                    suspects[(i, (k + i) % n)] = frame
-                else:
-                    samples.setdefault(frame[i], []).append((i, rec["crops"][i]))
-                    if float(vision.to_gray(rec["crops"][i]).std()) >= vision.IDENTITY_MIN_STD:
-                        self.bank_samples.setdefault(frame[i], []).append(rec["crops"][i])
-        # A module stuck across EVERY staggered comparison never moved
-        # despite different commanded glyphs: escalate so acceptance can
-        # never declare converged on a frozen display.
+                self.sweeps += 1 / n
+                if prev_crops is not None:
+                    sweep_comparisons += 1
+                    for i, (a, b) in enumerate(zip(prev_crops, rec["crops"])):
+                        try:
+                            if vision.stuck(a, b):
+                                stuck_votes[i] = stuck_votes.get(i, 0) + 1
+                        except Exception:
+                            pass
+                prev_crops = rec["crops"]
+                for i, s in enumerate(self.scores(rec)):
+                    if s["verdict"] != "ok":
+                        suspects[(i, (k + i) % n)] = frame
+                    else:
+                        samples.setdefault(frame[i], []).append((i, rec["crops"][i]))
+                        if float(vision.to_gray(rec["crops"][i]).std()) >= vision.IDENTITY_MIN_STD:
+                            self.bank_samples.setdefault(frame[i], []).append(rec["crops"][i])
+        # A module stuck in a majority of consecutive-frame comparisons
+        # never moved despite different commanded glyphs: escalate so
+        # acceptance can never declare converged on a frozen display.
+        # Majority (not unanimity): one transient frame must not clear
+        # a genuinely jammed module's votes.
         for module in sorted(stuck_votes):
-            if sweep_comparisons > 0 and stuck_votes[module] == sweep_comparisons:
+            if sweep_comparisons > 0 and stuck_votes[module] * 2 >= sweep_comparisons:
                 self.identity_persistent.append(
                     {"module": module, "glyph": "?",
                      "stage": "P2",
