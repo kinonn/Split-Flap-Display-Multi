@@ -17,6 +17,9 @@
 #define ESP_NOW_OFFSETS_REPORT 0xFB
 #define OFFSET_RELOAD_SETTLE_MS 250
 #define OFFSET_PACKET_SPACING_MS 10
+// How long the master waits for pushed groups to report back after a
+// push before the settle fence expires (remotes re-home for seconds).
+#define PUSH_ACK_TIMEOUT_MS 30000
 
 struct SplitFlapEspNowMessage
 {
@@ -100,6 +103,18 @@ class SplitFlapEspNow {
     bool isMacAssigned(const String &mac);
     void pushOffsetsToGroup(int groupIndex);
     void reportOffsetsToMaster();
+    // Settle fence for pushed groups (F2): after the master pushes, each
+    // pushed group reports back once it applied + reloaded (remotes call
+    // reportOffsetsToMaster() after applying). expectPushAcks arms groups
+    // 1..getGroupCount()-1 with a deadline; a group's module-offset report
+    // clears its bit; hasPushAcksPending (expiry-aware, never sticks)
+    // feeds the HTTP busy signal via SplitFlapWebServer::isCalibBusy().
+    void expectPushAcks();
+    bool hasPushAcksPending();
+    // Trust-on-first-use pin for offset pushes (F3): the first push sender
+    // becomes the pinned master; later pushes from any other MAC are
+    // dropped. Returns true when a pin exists and mac differs from it.
+    bool isPinnedMasterMismatch(const uint8_t mac[6]);
     void processPendingOffsetPackets();
     void distributeMessage(
         const String &message, bool centering = true, unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
@@ -141,6 +156,10 @@ class SplitFlapEspNow {
     SplitFlapCharOffsetsPushMessage pendingCharOffsetsPkts[MAX_MODULES];
     bool offsetDataDirty;
     unsigned long lastOffsetRxMs;
+    // F2 ack fence state (master side only): bit i = group i owes a report.
+    portMUX_TYPE pushAckMux = portMUX_INITIALIZER_UNLOCKED;
+    uint8_t pushAckPendingMask = 0;
+    unsigned long pushAckDeadlineMs = 0;
 
     bool ensureInitialized();
     int getGroupCount();

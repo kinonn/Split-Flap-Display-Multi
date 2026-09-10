@@ -7,10 +7,13 @@ approval, within the budgets below.
 
 ```
 snapshot = GET /settings (store body)                      # rollback point
-hold(all controllers)
+hold(all controllers: manual runs hold each; tool runs hold the
+  master — remotes out-of-band, see PRODUCTION.md §0)
 P0 register -> module map (abort on dead/stuck module: report, do not tune around silently)
 P1 coarse: show [" ","E","H","O","0","-"] on all modules
-  -> fit displayOffset globally, then moduleOffsets per module (persist via Phase 3, local first)
+  -> fit displayOffset globally (manual/VLM-only; the deterministic
+  runner tunes module + char), then moduleOffsets per module
+  (persist via Phase 3, local first)
 P2 fine: staggered drum-order sweep, strided (every 6th) then refine suspects
   -> preview (Phase 2) each candidate, persist winners (Phase 3)
 P3 boundaries: neighbor pairs, fix double-flap stragglers

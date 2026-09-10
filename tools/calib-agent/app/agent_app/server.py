@@ -504,6 +504,10 @@ def run_state():
 def photo(name: str):
     if "/" in name or name.startswith("."):
         raise HTTPException(400, "bad photo name")
+    if not name.endswith(".png"):
+        # Run dirs also hold snapshot.json (settings incl. secrets),
+        # report.json and events.jsonl: never serve non-photos.
+        raise HTTPException(404, "no such photo")
     with harness.lock:
         run_dir = harness.run_dir
     if not run_dir:  # no run yet: never resolve against the server CWD

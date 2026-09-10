@@ -90,6 +90,23 @@ def test_photos_404_before_any_run(tmp_path, monkeypatch):
     assert client.get("/api/photos/README.md").status_code == 404
 
 
+def test_photos_serve_png_only(tmp_path, monkeypatch):
+    # Run dirs hold snapshot.json (settings incl. secrets) beside the
+    # photos: the route must never serve non-PNG files.
+    client = _client(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "run-001"
+    run.mkdir(parents=True)
+    (run / "shot_f1.png").write_bytes(b"fakepng")
+    (run / "snapshot.json").write_text('{"settings": {"wifi_psk": "s3cret"}}')
+    (run / "report.json").write_text("{}")
+    (run / "events.jsonl").write_text("{}\n")
+    monkeypatch.setattr(server.harness, "run_dir", str(run))
+    assert client.get("/api/photos/shot_f1.png").status_code == 200
+    assert client.get("/api/photos/snapshot.json").status_code == 404
+    assert client.get("/api/photos/report.json").status_code == 404
+    assert client.get("/api/photos/events.jsonl").status_code == 404
+
+
 def test_start_key_policy(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
     for env in ("DISPLAY_HOST", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY"):

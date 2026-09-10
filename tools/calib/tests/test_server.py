@@ -228,6 +228,28 @@ def test_photo_rejects_path_traversal():
         photo(".hidden")
 
 
+def test_photo_serves_png_only(tmp_path):
+    # Run dirs hold snapshot.json (settings incl. secrets), report.json
+    # and events.jsonl beside the photos: only PNGs may be served.
+    import calib.server as srv
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "shot_f1.png").write_bytes(b"fakepng")
+    (run / "snapshot.json").write_text('{"settings": {"wifi_psk": "s3cret"}}')
+    (run / "report.json").write_text("{}")
+    (run / "events.jsonl").write_text("{}\n")
+    old = srv.harness.run_dir
+    srv.harness.run_dir = str(run)
+    try:
+        assert photo("shot_f1.png") is not None
+        for blocked in ("snapshot.json", "report.json", "events.jsonl", "nope.txt"):
+            with pytest.raises(Exception):
+                photo(blocked)
+    finally:
+        srv.harness.run_dir = old
+
+
 def test_config_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIB_DATA", str(tmp_path))
     save_config({"display_host": "splitflap.lan", "phase": 2, "dwell_ms": 500})
