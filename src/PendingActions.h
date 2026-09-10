@@ -30,6 +30,12 @@ class PendingActions {
     bool takeReportOffsets() { return reportOffsets_.exchange(false); }
     bool takePushOffsets() { return pushOffsets_.exchange(false); }
 
+    // Peekers for the busy signal: a queued reload/push means the display
+    // (or a remote group) is about to move, so status must report busy
+    // even before the loop task drains the mailbox.
+    bool hasReloadOffsets() { return reloadOffsets_.load(std::memory_order_acquire); }
+    bool hasPushOffsets() { return pushOffsets_.load(std::memory_order_acquire); }
+
     // Calibration show slot: the AsyncTCP web task stages an exact-width
     // frame (no centering, no scroll); the loop task drains it and performs
     // the I2C/ESP-NOW work as the single owner of the display. Single

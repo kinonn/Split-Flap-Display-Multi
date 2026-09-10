@@ -77,10 +77,11 @@ class SplitFlapWebServer {
     // Busy covers actively-executing calibration work AND work still queued
     // in the PendingActions mailbox (not yet picked up by the loop task), so
     // status polls in the queue-to-pickup gap never see busy==false with a
-    // stale lastFrameId.
-    bool isCalibBusy() {
-        return getCalibBusy() || pendingActions_.hasCalibShowPending() || pendingActions_.hasCalibPreviewPending();
-    }
+    // stale lastFrameId. Reload/push drains and outstanding remote push
+    // acks are included: a persist re-homes motors (locally and on pushed
+    // remotes) for seconds after the HTTP 200. Defined in
+    // SplitFlapWebServer.cpp (needs the complete SplitFlapEspNow type).
+    bool isCalibBusy();
     int getCalibFrameId() const { return calibFrameId_.load(std::memory_order_acquire); }
     int nextCalibFrameId() { return calibFrameId_.fetch_add(1) + 1; }
     String getCalibLastFrame();

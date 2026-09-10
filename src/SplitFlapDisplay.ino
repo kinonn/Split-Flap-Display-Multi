@@ -179,7 +179,13 @@ void loop() {
     // single owner of the display (I2C) and ESP-NOW push paths, so settings
     // saves can never run display work inside the AsyncTCP task.
     if (webServer.getPendingActions().takeReloadOffsets()) {
+        // Reload re-homes affected modules (seconds of motion): hold the
+        // busy flag across it so status/frame ground truth stays false
+        // until the display actually settled (issue: persist used to read
+        // idle the moment HTTP 200 was sent).
+        webServer.setCalibBusy(true);
         display.reloadOffsets();
+        webServer.setCalibBusy(false);
     }
     if (webServer.getPendingActions().takeReportOffsets()) {
         if (splitflapEspNow) {
@@ -187,12 +193,15 @@ void loop() {
         }
     }
     if (webServer.getPendingActions().takePushOffsets()) {
+        webServer.setCalibBusy(true);
         if (splitflapEspNow) {
             int groupCount = settings.getInt("masterGroupCount");
             for (int i = 1; i < groupCount; i++) {
                 splitflapEspNow->pushOffsetsToGroup(i);
             }
+            splitflapEspNow->expectPushAcks();
         }
+        webServer.setCalibBusy(false);
     }
 
     // Calibration mailbox (fleet day one): exact-width shows and volatile
