@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import threading
@@ -22,7 +23,8 @@ import cv2
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
-from .camera import Camera, CameraError
+from .camera import (CROP_MAX, CROP_MIN, DEFAULT_CROP_PERCENT, Camera,
+                     CameraError)
 from .display import CalibError, Display
 from .loop import Calibrator
 
@@ -95,6 +97,7 @@ DEFAULTS = {
     "camera_index": 0,
     "camera_brightness": 50,
     "camera_exposure": None,  # None = driver AE; a value fixes the sensor
+    "camera_crop_percent": DEFAULT_CROP_PERCENT,  # % trimmed top AND bottom (0..30)
     "phase": 4,
     "dwell_ms": 800,
     "timeout_s": 60.0,
@@ -124,6 +127,8 @@ def save_config(patch: dict) -> dict:
         stored = {}
     for key in DEFAULTS:
         if key in patch and patch[key] not in (None, ""):
+            if key == "camera_crop_percent":
+                continue  # validated + clamped below, not stored raw
             stored[key] = patch[key]
     # Exposure is settable AND clearable (null/"" = back to auto-search).
     # Garbage is a 400, matching _exposure_of — never a 500, never silent.
@@ -136,6 +141,22 @@ def save_config(patch: dict) -> dict:
                 stored["camera_exposure"] = float(raw)
             except (TypeError, ValueError):
                 raise HTTPException(400, "camera_exposure must be a number or empty (auto)")
+    # Crop is validated + clamped to the slider range (0..30, default 15).
+    # Garbage (incl. NaN/inf) is a 400, matching _crop_of — never a 500,
+    # never silent.
+    if "camera_crop_percent" in patch:
+        raw = patch["camera_crop_percent"]
+        if raw in (None, ""):
+            stored["camera_crop_percent"] = DEFAULT_CROP_PERCENT
+        else:
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "camera_crop_percent must be a number 0..30")
+            if not math.isfinite(value):
+                raise HTTPException(400, "camera_crop_percent must be a number 0..30")
+            stored["camera_crop_percent"] = max(
+                CROP_MIN, min(CROP_MAX, value))
     _atomic_write_json(config_path(), stored)
     return load_config()
 
@@ -374,7 +395,8 @@ class Harness:
                     cam_lock_held = True
                     cam = Camera(int(cfg.get("camera_index", 0)),
                                  brightness=float(cfg.get("camera_brightness", 50)),
-                                 exposure=_exposure_of(None, "camera_exposure", cfg))
+                                 exposure=_exposure_of(None, "camera_exposure", cfg),
+                                 crop_percent=_crop_of(None, "camera_crop_percent", cfg))
                     cam.open()
                     try:
                         diag = cam.check_camera()
@@ -514,6 +536,26 @@ def _exposure_of(source: dict | None, key: str, cfg: dict) -> float | None:
         raise HTTPException(400, f"{key} must be a number or empty (auto)")
 
 
+def _crop_of(source: dict | None, key: str, cfg: dict) -> float:
+    """Top/bottom crop percent from a request body or the saved config.
+
+    Clamped to the slider range (CROP_MIN..CROP_MAX); missing or
+    empty means the default. Garbage (incl. NaN/inf) is a 400 — a
+    mistyped value must not silently change the framing.
+    """
+    raw = (source or {}).get(key, cfg.get("camera_crop_percent",
+                                          DEFAULT_CROP_PERCENT))
+    if raw in (None, ""):
+        return DEFAULT_CROP_PERCENT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{key} must be a number 0..30")
+    if not math.isfinite(value):
+        raise HTTPException(400, f"{key} must be a number 0..30")
+    return max(CROP_MIN, min(CROP_MAX, value))
+
+
 @app.post("/api/check-camera")
 def check_camera(body: dict | None = None):
     cfg = load_config()
@@ -523,11 +565,13 @@ def check_camera(body: dict | None = None):
     brightness = float((body or {}).get("camera_brightness",
                                         cfg.get("camera_brightness", 50)))
     exposure = _exposure_of(body, "camera_exposure", cfg)
+    crop_percent = _crop_of(body, "camera_crop_percent", cfg)
     # Brief bounded wait: an in-flight live-view poll releases the device
     # within ~2 s. Never open the camera concurrently with anyone.
     if not _camera_lock.acquire(timeout=_CHECK_LOCK_WAIT_S):
         raise HTTPException(409, "camera busy: live view or run holds it")
-    cam = Camera(index, brightness=brightness, exposure=exposure)
+    cam = Camera(index, brightness=brightness, exposure=exposure,
+                 crop_percent=crop_percent)
     try:
         cam.open()
         diag = cam.check_camera()
@@ -541,7 +585,7 @@ def check_camera(body: dict | None = None):
 
 @app.get("/api/camera/frame")
 def camera_frame(camera_index: int | None = None, brightness: float | None = None,
-                 exposure: str | None = None):
+                 exposure: str | None = None, crop_percent: str | None = None):
     """Single live JPEG frame for the UI preview (no run needed).
 
     Opens the camera, grabs one frame with a short warm-up
@@ -565,9 +609,20 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
         # Auto: let the driver's AE run (None = no manual override). The
         # AE result beats any manual value on drivers whose AE adds gain.
         exposure_val = None
+    if crop_percent is not None and crop_percent.strip().lower() not in ("", "auto"):
+        try:
+            crop_val = float(crop_percent)
+        except ValueError:
+            raise HTTPException(400, "crop_percent must be a number 0..30")
+        if not math.isfinite(crop_val):
+            raise HTTPException(400, "crop_percent must be a number 0..30")
+        crop_val = max(CROP_MIN, min(CROP_MAX, crop_val))
+    else:
+        crop_val = _crop_of(None, "camera_crop_percent", cfg)
     if not _camera_lock.acquire(blocking=False):
         raise HTTPException(409, "camera busy: check or run holds it")
-    cam = Camera(index, brightness=float(brightness), exposure=exposure_val)
+    cam = Camera(index, brightness=float(brightness), exposure=exposure_val,
+                 crop_percent=crop_val)
     try:
         cam.open(quick=True)
         frame = cam.capture()

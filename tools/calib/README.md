@@ -43,7 +43,10 @@ Configure (display host, camera, phase 1–4, dwell, identity threshold),
 then Start. A live camera view (toggle, on by default) at the bottom of
 the Configure card helps frame the display before starting, with a
 brightness slider (0–100, best-effort depending on camera backend)
-that also applies to runs and checks. The UI streams the run log, every camera photo with
+that also applies to runs and checks. A top/bottom crop slider (0–30%,
+default 15%) trims x% off the top AND bottom of every captured image —
+live view included — before exposure metering (auto or manual), so
+bright ceilings/floors never skew the exposure search or the check. The UI streams the run log, every camera photo with
 per-module verdict chips (click to inspect vs the expected frame), the
 template bank, and the final `report.json`. Abort and pre-run snapshot
 restore included. State lives in `./calib-ui-data` (`CALIB_DATA`

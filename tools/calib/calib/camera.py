@@ -16,6 +16,15 @@ class CameraError(RuntimeError):
     pass
 
 
+# Symmetric top/bottom crop bounds: percent of frame height removed from
+# EACH end (0 = off). The UI slider spans this range. Module-level (not
+# class attributes) so server code can reference them even when the
+# Camera class itself is monkeypatched out in tests.
+CROP_MIN = 0.0
+CROP_MAX = 30.0
+DEFAULT_CROP_PERCENT = 15.0
+
+
 class Camera:
     # Drift gate: mean frame-to-frame abs diff (0..255) on a static scene
     # must stay at or below this. check_camera() enforces it; open() uses
@@ -48,7 +57,8 @@ class Camera:
     AUTO_STEP = 1.0
 
     def __init__(self, index: int = 0, width: int = 1280, height: int = 720,
-                 brightness: float = 50.0, exposure: float | None = None):
+                 brightness: float = 50.0, exposure: float | None = None,
+                 crop_percent: float = 0.0):
         self.index = index
         self.width = width
         self.height = height
@@ -63,6 +73,11 @@ class Camera:
         # is applied directly instead — the fix for a dark live view,
         # where software gain alone only amplifies noise.
         self.exposure = exposure
+        # Symmetric top/bottom crop, percent of frame height removed
+        # from EACH end (0..30, 0 = off). Applied to the raw frame
+        # BEFORE brightness gain, so auto-exposure metering, the camera
+        # check, runs and the live view all see the same cropped image.
+        self.crop_percent = crop_percent
         self.cap: cv2.VideoCapture | None = None
         self.backend = "unknown"
         self.auto_exposure: dict | None = None
@@ -265,6 +280,8 @@ class Camera:
             if ok and frame is not None:
                 good += 1
                 try:
+                    # Settle on the same cropped image every consumer sees.
+                    frame = self._apply_crop(frame)
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 except Exception:
                     gray = None
@@ -380,12 +397,50 @@ class Camera:
             return frame
         return cv2.convertScaleAbs(frame, alpha=factor, beta=0.0)
 
+    def _apply_crop(self, frame: np.ndarray) -> np.ndarray:
+        """Symmetric top/bottom crop, percent removed from EACH end.
+
+        Runs on the raw frame BEFORE brightness gain, so the cropped
+        pixels never influence auto-exposure metering, the camera
+        check, runs, or the live view — every consumer sees the same
+        image. Out-of-range/garbage values clamp to CROP_MIN..CROP_MAX
+        (never crash a run); a crop that would empty the frame is a
+        no-op.
+        """
+        try:
+            pct = float(self.crop_percent)
+        except (TypeError, ValueError):
+            return frame
+        try:
+            if not np.isfinite(pct):
+                return frame
+        except Exception:
+            return frame
+        pct = max(CROP_MIN, min(CROP_MAX, pct))
+        if pct <= 0.0 or frame is None:
+            return frame
+        try:
+            h = int(frame.shape[0])
+        except Exception:
+            return frame
+        if h <= 1:
+            return frame
+        top = int(h * pct / 100.0)
+        if top <= 0 or 2 * top >= h:
+            return frame
+        try:
+            return frame[top:h - top]
+        except Exception:
+            return frame
+
     def capture(self, retries: int = 3) -> np.ndarray:
         """Grab one frame, retrying transient driver hiccups.
 
         Windows drivers commonly return an empty grab when another open
         handle just closed (e.g. the UI live view polling while a check
-        runs), so retry briefly before giving up.
+        runs), so retry briefly before giving up. The top/bottom crop
+        applies first, then brightness gain — so exposure metering (via
+        _measure) and every consumer see the cropped image.
         """
         if self.cap is None:
             raise CameraError("camera not open")
@@ -397,7 +452,7 @@ class Camera:
                 last_exc = exc
                 ok, frame = False, None
             if ok and frame is not None:
-                return self._apply_brightness(frame)
+                return self._apply_brightness(self._apply_crop(frame))
             time.sleep(0.1)
         detail = f": {last_exc}" if last_exc is not None else " (camera busy elsewhere or unplugged?)"
         raise CameraError(f"frame grab failed{detail}")
@@ -441,6 +496,8 @@ class Camera:
                 "resolution": [int(frames[-1].shape[1]), int(frames[-1].shape[0])],
                 "brightness": self.brightness,
                 "exposure": self.exposure,
+                "crop_percent": float(self.crop_percent)
+                if isinstance(self.crop_percent, (int, float)) else self.crop_percent,
                 "mean_brightness": round(mean, 1),
                 "drift": round(drift, 3),
                 "saturated_frac": round(saturated, 4),

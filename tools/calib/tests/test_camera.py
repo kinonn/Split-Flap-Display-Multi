@@ -200,6 +200,49 @@ def test_manual_exposure_quick_open_applies_value(fake_cv):
     assert _sets_of(cap, cv2.CAP_PROP_EXPOSURE) == [-4.0]
 
 
+def test_crop_trims_top_and_bottom_symmetrically(fake_cv):
+    # 48px-high fake frame, 25% off EACH end: 48 - 2*12 = 24.
+    FakeCapture.values = [150]
+    cam = Camera(crop_percent=25).open()
+    assert cam.capture().shape == (24, 64, 3)
+
+
+def test_crop_defaults_to_off(fake_cv):
+    FakeCapture.values = [150]
+    cam = Camera().open()
+    assert cam.crop_percent == 0.0
+    assert cam.capture().shape == (48, 64, 3)
+
+
+def test_crop_removes_bands_before_metering():
+    # Bright ceiling/floor bands must not influence exposure metering:
+    # the crop runs on the raw frame before anything measures it.
+    frame = np.zeros((100, 10, 3), dtype=np.uint8)
+    frame[:15] = 255
+    frame[85:] = 255
+    cropped = Camera(crop_percent=15)._apply_crop(frame)
+    assert cropped.shape == (70, 10, 3)
+    assert float(np.mean(cropped)) == 0.0
+
+
+def test_crop_clamps_and_ignores_garbage(fake_cv):
+    FakeCapture.values = [150]
+    # Above the 30% max clamps to 30%: 48 - 2*14 = 20.
+    assert Camera(crop_percent=99).open().capture().shape == (20, 64, 3)
+    # Negative clamps to 0 (off); garbage is a no-op, never a crash.
+    assert Camera(crop_percent=-5).open().capture().shape == (48, 64, 3)
+    assert Camera(crop_percent="tall").open().capture().shape == (48, 64, 3)
+
+
+def test_crop_reported_in_check_diagnostics(fake_cv):
+    FakeCapture.values = [150]
+    cam = Camera(crop_percent=15).open()
+    diag = cam.check_camera()
+    assert diag["crop_percent"] == 15
+    # Resolution reflects the cropped frame the check actually scored.
+    assert diag["resolution"] == [64, 48 - 2 * int(48 * 0.15)]
+
+
 def test_manual_exposure_records_refused_driver(fake_cv):
     # Driver refuses the manual flip: recorded, no crash, no search.
     FakeCapture.values = [100]

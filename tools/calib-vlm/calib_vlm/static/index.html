@@ -9,6 +9,7 @@
   body { font-family: system-ui, sans-serif; background: #141414; color: #eee;
          margin: 0 auto; max-width: 960px; padding: 16px; }
   h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; }
   .card { background: #1f1f1f; border-radius: 10px; padding: 14px; margin: 12px 0; }
   label { display: block; margin: 8px 0 2px; font-size: .9rem; color: #bbb; }
   input, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444;
@@ -29,9 +30,8 @@
   .chip { display: inline-block; padding: 3px 9px; margin: 2px; border-radius: 12px;
           font-size: .8rem; font-family: monospace; }
   .ok { background: #1b5e20; } .half { background: #e65100; } .double { background: #b71c1c; }
-  .idout { outline: 2px solid #ce93d8; }
-  #detailTemplates img { max-width: 64px; margin: 2px; border-radius: 4px;
-                         border: 1px solid #444; background: #000; }
+  .blank { background: #37474f; } .unreadable { background: #4e342e; }
+  .chip.match { outline: 2px solid #66bb6a; } .chip.mismatch { outline: 2px solid #ef5350; }
   #report { white-space: pre-wrap; font-family: monospace; font-size: .8rem;
             background: #0d0d0d; border-radius: 6px; padding: 8px; }
   .hint { color: #999; font-size: .85rem; }
@@ -47,10 +47,13 @@
   .switch input:checked + .slider:before { transform: translateX(18px); }
   #liveview { display: none; max-width: 100%; margin-top: 8px; border-radius: 6px;
               border: 1px solid #444; }
+  #rt_photo { display: none; max-width: 100%; margin-top: 8px; border-radius: 6px;
+              border: 1px solid #444; }
+  code { font-size: .95rem; }
 </style>
 </head>
 <body>
-<h1>Split-Flap VLM Calibration</h1>
+<h1>Split-Flap VLM Calibration <span class="hint">(VLM reads the display)</span></h1>
 
 <div class="card">
   <h2>1. Configure</h2>
@@ -59,7 +62,7 @@
     <div><label>Camera index</label><input id="camera_index" type="number" min="0" /></div>
   </div>
   <div class="row">
-    <div><label>LLM provider preset</label>
+    <div><label>Reader provider preset</label>
       <select id="preset">
         <option value="https://opencode.ai/zen/go/v1">OpenCode Go</option>
         <option value="https://api.openai.com/v1">OpenAI</option>
@@ -67,13 +70,20 @@
         <option value="http://localhost:11434/v1">Ollama (local)</option>
         <option value="custom">Custom URL…</option>
       </select></div>
-    <div><label>Model (must support vision + tool calling)</label><input id="llm_model" placeholder="deepseek-v4-flash-vision-exp" /></div>
+    <div><label>Model (must support vision + tool calling)</label>
+      <input id="llm_model" placeholder="deepseek-v4-flash-vision-exp" /></div>
   </div>
   <label>Base URL</label><input id="llm_base_url" />
-  <label>API key (OpenCode Zen key for Go; stored server-side, never shown)</label>
+  <label>API key (stored server-side, never shown)</label>
   <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off" />
   <label>Reasoning effort (optional: low/medium/high — empty = provider default)</label>
   <input id="llm_reasoning_effort" placeholder="(provider default)" />
+  <div style="margin-top:8px;">
+    <label class="switch"><input id="annotate" type="checkbox" checked />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Annotate photo with module grid</span>
+    <span class="hint">— helps the reader keep leading/trailing blanks</span>
+  </div>
   <div>
     <button class="mid" onclick="save()">Save</button>
     <button class="mid" onclick="checkDisplay()">Check display</button>
@@ -92,7 +102,7 @@
       oninput="$('brightness_val').textContent = this.value" />
   </div>
   <div>
-    <label>Top/bottom crop (<span id="crop_val">15</span>%) — trims x% off the top AND bottom before exposure</label>
+    <label>Top/bottom crop (<span id="crop_val">15</span>%) — trims x% off the top AND bottom</label>
     <input id="camera_crop_percent" type="range" min="0" max="30" step="1" value="15"
       oninput="$('crop_val').textContent = this.value" />
   </div>
@@ -110,35 +120,55 @@
 </div>
 
 <div class="card">
-  <h2>2. Run</h2>
+  <h2>2. Read test</h2>
+  <p class="hint">Show a pattern and see exactly what the reader says each module
+     shows. Shorter patterns are right-padded with blanks.</p>
+  <label>Pattern (e.g. <code>HELLO</code> or <code>  AB  </code>)</label>
+  <input id="rt_frame" placeholder="HELLO" />
+  <div>
+    <button class="mid" onclick="readTest()">Show + read</button>
+  </div>
+  <p class="hint" id="rtmsg"></p>
+  <img id="rt_photo" alt="Read-test photo" />
+  <div id="rt_chips"></div>
+</div>
+
+<div class="card">
+  <h2>3. Run</h2>
   <label>Mode</label>
   <select id="run_mode">
-    <option value="dry-run">Dry run — show + photograph only, proposals in text</option>
-    <option value="preview">Preview — dry run + volatile offset nudges (nothing saved)</option>
+    <option value="dry-run">Dry run — read + propose only, touch nothing</option>
+    <option value="preview">Preview — read + volatile nudges (nothing saved)</option>
     <option value="full">Full calibration — persist offsets, converge when verified</option>
   </select>
-  <div style="margin-top:8px;">
-    <label class="switch"><input id="full_drum" type="checkbox" />
-      <span class="slider"></span></label>
-    <span style="margin-left:8px;">Exhaustive per-character sweep (slower, more motor wear)</span>
+  <label>Sweep</label>
+  <select id="sweep">
+    <option value="fast">Fast / sampled — 2 staggered passes (default)</option>
+    <option value="exhaustive">Exhaustive per-character — every drum character on every module</option>
+  </select>
+  <div class="row">
+    <div><label>Dwell ms (settle wait per frame)</label>
+      <input id="dwell_ms" type="number" min="0" max="10000" /></div>
+    <div><label>Minimum reader confidence (0..1)</label>
+      <input id="min_confidence" type="number" min="0" max="1" step="0.05" /></div>
   </div>
   <div>
-  <button class="go" id="startBtn" onclick="start()">Start calibration</button>
-  <button class="stop" onclick="abort()">Abort</button>
-  <button class="mid" onclick="restore()">Restore pre-run snapshot</button>
+    <button class="go" id="startBtn" onclick="start()">Start calibration</button>
+    <button class="stop" onclick="abort()">Abort</button>
+    <button class="mid" onclick="restore()">Restore pre-run snapshot</button>
   </div>
   <p class="hint" id="runmsg"></p>
 </div>
 
 <div class="card"><h2>Log</h2><div id="log"></div></div>
-<div class="card"><h2>Photos (click to inspect vs expected)</h2><div id="gallery"></div></div>
+<div class="card"><h2>Photos (click to inspect)</h2><div id="gallery"></div></div>
 <div class="card" id="detailCard" style="display:none">
   <h2>Inspect: <span id="detailTitle"></span></h2>
   <img id="detailImg" style="max-width:100%; border-radius:6px; border:1px solid #444;" />
-  <p>Expected frame: <code id="detailFrame" style="font-size:1.1rem;"></code></p>
+  <p>Expected frame: <code id="detailFrame"></code></p>
+  <p>Reader saw: <code id="detailRead"></code></p>
   <div id="detailChips"></div>
-  <p class="hint">Reference templates for the expected glyphs (golden/bootstrapped bank):</p>
-  <div id="detailTemplates"></div>
+  <p class="hint" id="detailWarnings"></p>
 </div>
 <div class="card"><h2>Report</h2><div id="report">–</div></div>
 
@@ -150,6 +180,21 @@ async function api(path, opts) {
   if (!r.ok) throw new Error(body.detail || r.statusText);
   return body;
 }
+function exposureOn() { return !$("exposure_auto").checked; }
+function exposure() {
+  if (!exposureOn()) return null;
+  const v = Number($("camera_exposure").value);
+  return Number.isFinite(v) ? v : null;
+}
+function brightness() {
+  const v = Number($("camera_brightness").value);
+  return Number.isFinite(v) ? v : 50;
+}
+function cropPercent() {
+  const v = Number($("camera_crop_percent").value);
+  if (!Number.isFinite(v)) return 15;
+  return Math.max(0, Math.min(30, v));
+}
 async function load() {
   const c = await api("/api/config");
   $("display_host").value = c.display_host || "";
@@ -158,7 +203,10 @@ async function load() {
   $("llm_base_url").value = c.llm_base_url || "";
   $("llm_reasoning_effort").value = c.llm_reasoning_effort || "";
   $("run_mode").value = c.mode || "full";
-  $("full_drum").checked = !!c.full_drum;
+  $("sweep").value = c.exhaustive ? "exhaustive" : "fast";
+  $("annotate").checked = c.annotate !== false;
+  $("dwell_ms").value = c.dwell_ms ?? 800;
+  $("min_confidence").value = c.min_confidence ?? 0.6;
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
   $("camera_crop_percent").value = c.camera_crop_percent ?? 15;
@@ -176,34 +224,28 @@ async function load() {
 $("preset").onchange = () => {
   if ($("preset").value !== "custom") $("llm_base_url").value = $("preset").value;
 };
-function brightness() {
-  const v = Number($("camera_brightness").value);
-  return Number.isFinite(v) ? v : 50;
-}
-function cropPercent() {
-  const v = Number($("camera_crop_percent").value);
-  if (!Number.isFinite(v)) return 15;
-  return Math.max(0, Math.min(30, v));
-}
-function exposureOn() { return !$("exposure_auto").checked; }
-function exposure() {
-  if (!exposureOn()) return null;
-  const v = Number($("camera_exposure").value);
-  return Number.isFinite(v) ? v : null;
+function cfgPayload() {
+  return {
+    display_host: $("display_host").value.trim(),
+    camera_index: Number($("camera_index").value || 0),
+    camera_brightness: brightness(),
+    camera_exposure: exposure(),
+    camera_crop_percent: cropPercent(),
+    llm_base_url: $("llm_base_url").value.trim(),
+    llm_model: $("llm_model").value.trim(),
+    llm_reasoning_effort: $("llm_reasoning_effort").value.trim(),
+    annotate: $("annotate").checked,
+    mode: $("run_mode").value,
+    exhaustive: $("sweep").value === "exhaustive",
+    dwell_ms: Number($("dwell_ms").value || 800),
+    min_confidence: Number($("min_confidence").value || 0.6),
+    llm_api_key: $("llm_api_key").value
+  };
 }
 async function save() {
   try {
     await api("/api/config", {method: "POST",
-      headers: {"Content-Type": "application/json"}, body: JSON.stringify({
-        display_host: $("display_host").value.trim(),
-        camera_index: Number($("camera_index").value || 0),
-        camera_brightness: brightness(),
-        camera_exposure: exposure(),
-        camera_crop_percent: cropPercent(),
-        llm_base_url: $("llm_base_url").value.trim(),
-        llm_model: $("llm_model").value.trim(),
-        llm_reasoning_effort: $("llm_reasoning_effort").value.trim(),
-        llm_api_key: $("llm_api_key").value })});
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfgPayload())});
     $("cfgmsg").textContent = "Saved.";
     $("llm_api_key").value = "";
   } catch (e) { $("cfgmsg").textContent = "Save failed: " + e.message; }
@@ -212,7 +254,7 @@ async function checkDisplay() {
   try {
     const s = await api("/api/display");
     $("cfgmsg").textContent = s.reachable
-      ? `Display OK: ${s.totalModules} modules, charset ${s.charset}.`
+      ? `Display OK: ${s.totalModules} modules (${s.numModules} local), charset ${s.charset}.`
       : "Display unreachable: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
 }
@@ -221,9 +263,7 @@ async function checkCamera() {
   if (camCheckBusy) return;
   camCheckBusy = true;
   $("checkCamBtn").disabled = true;
-  setLive(false); // free the device first: a live poll holding it would fail the check
-  // The check runs exposure-settle warm-up plus 3x14 stability frames
-  // server-side (~10-30 s); show liveness instead of a frozen-looking UI.
+  setLive(false);
   const t0 = Date.now();
   const ticker = setInterval(() => {
     $("cfgmsg").textContent = "Checking camera… " +
@@ -246,23 +286,61 @@ async function checkCamera() {
     camCheckBusy = false;
   }
 }
-async function start() {
+function renderChips(container, detail) {
+  container.innerHTML = "";
+  const expected = detail.frame || "";
+  for (const m of (detail.modules || [])) {
+    const el = document.createElement("span");
+    el.className = "chip " + m.condition;
+    const exp = m.expected || (expected[m.module] || "?");
+    const shows = m.char === " " ? "␣" : m.char;
+    const want = exp === " " ? "␣" : exp;
+    const match = exp === m.char && m.source === "vlm";
+    el.classList.add(match ? "match" : "mismatch");
+    el.textContent = `m${m.module} want '${want}' → '${shows}' ` +
+      `${m.condition} ${(m.confidence ?? 0).toFixed(2)}` +
+      (m.source === "inferred" ? " [inferred]" : "") +
+      (m.source === "error" ? " [error]" : "");
+    container.appendChild(el);
+  }
+}
+async function readTest() {
   try {
-    setLive(false); // stop the 800ms polls before the run takes the camera
+    setLive(false);
+    $("rtmsg").textContent = "Showing + reading…";
+    // Save first so the server reads the same camera/reader settings the
+    // sliders show (read-test uses the saved config).
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({mode: $("run_mode").value,
-                            full_drum: $("full_drum").checked})});
-    await api("/api/run/start", {method: "POST"}); $("runmsg").textContent = "Running…";
+      body: JSON.stringify(cfgPayload())});
+    const s = await api("/api/read-test", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({frame: $("rt_frame").value})});
+    $("rtmsg").textContent = `expected ${JSON.stringify(s.frame)} → read ${JSON.stringify(s.read)}` +
+      ((s.warnings || []).length ? " | " + s.warnings.join("; ") : "");
+    $("rt_photo").src = s.photo + "?t=" + Date.now();
+    $("rt_photo").style.display = "block";
+    renderChips($("rt_chips"), s);
+  } catch (e) {
+    $("rtmsg").textContent = "Read test failed: " + e.message;
   }
-  catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
+}
+async function start() {
+  try {
+    setLive(false);
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(cfgPayload())});
+    await api("/api/run/start", {method: "POST"});
+    $("runmsg").textContent = "Running…";
+  } catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
 }
 async function abort() { await api("/api/run/abort", {method: "POST"}); }
 let liveOn = false, liveTimer = null;
 function setLive(on) {
   liveOn = on;
   $("live_toggle").checked = on;
-  try { localStorage.setItem("calibAgentLiveView", on ? "1" : "0"); } catch (e) {}
+  try { localStorage.setItem("calibVlmLiveView", on ? "1" : "0"); } catch (e) {}
   $("liveview").style.display = on ? "block" : "none";
   if (on) { $("livemsg").textContent = ""; liveTick(); }
   else if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
@@ -282,8 +360,6 @@ async function liveTick() {
       return;
     }
     if (!r.ok) {
-      // Surface the server's reason (e.g. "cannot open camera index 1")
-      // instead of a bare "Bad Gateway" that hides the actual problem.
       const body = await r.json().catch(() => ({}));
       throw new Error(body.detail || r.statusText);
     }
@@ -300,7 +376,7 @@ async function liveTick() {
   liveTimer = setTimeout(liveTick, 800);
 }
 async function restore() {
-  try { const r = await api("/api/run/restore-snapshot", {method: "POST"});
+  try { await api("/api/run/restore-snapshot", {method: "POST"});
         $("runmsg").textContent = "Snapshot restored."; }
   catch (e) { $("runmsg").textContent = "Restore failed: " + e.message; }
 }
@@ -310,7 +386,7 @@ let lastRunSeq = null;
 function detailFor(photo) {
   for (let i = lastEvents.length - 1; i >= 0; i--) {
     const e = lastEvents[i];
-    if (e.photo === photo && e.detail && (e.detail.scores || e.detail.frame)) return e.detail;
+    if (e.photo === photo && e.detail && e.detail.modules) return e.detail;
   }
   return null;
 }
@@ -319,40 +395,22 @@ function inspect(photo) {
   $("detailCard").style.display = "block";
   $("detailTitle").textContent = photo;
   $("detailImg").src = "/api/photos/" + encodeURIComponent(photo);
-  const chips = $("detailChips"); chips.innerHTML = "";
-  const tpl = $("detailTemplates"); tpl.innerHTML = "";
-  if (!d || !d.frame) {
+  if (!d) {
     $("detailFrame").textContent = "(no expected frame recorded)";
+    $("detailRead").textContent = "";
+    $("detailChips").innerHTML = "";
+    $("detailWarnings").textContent = "";
     return;
   }
   $("detailFrame").textContent = d.frame;
-  const outliers = new Set(d.identity_outliers || []);
-  for (const s of (d.scores || [])) {
-    const el = document.createElement("span");
-    el.className = "chip " + s.verdict + (outliers.has(s.module) ? " idout" : "");
-    el.textContent = `m${s.module} '${d.frame[s.module] || "?"}' ${s.verdict}` +
-      (outliers.has(s.module) ? " WRONG-GLYPH?" : "");
-    chips.appendChild(el);
-  }
-  for (const g of [...new Set(d.frame)]) {
-    const wrap = document.createElement("span");
-    wrap.title = "template for '" + g + "'";
-    const img = document.createElement("img");
-    img.src = "/api/run/templates/" + encodeURIComponent(g);
-    img.alt = g;
-    img.onerror = () => wrap.remove();
-    const lab = document.createElement("div");
-    lab.textContent = g === " " ? "␣" : g;
-    lab.style.cssText = "font-size:.7rem;color:#999;text-align:center;";
-    wrap.appendChild(img); wrap.appendChild(lab);
-    tpl.appendChild(wrap);
-  }
+  $("detailRead").textContent = d.read;
+  renderChips($("detailChips"), d);
+  $("detailWarnings").textContent = (d.warnings || []).join("; ");
 }
 async function poll() {
   try {
     const s = await api("/api/run/state");
     if (lastRunSeq !== null && s.run_seq !== lastRunSeq) {
-      // New run started: clear the previous run's log, report and inspector.
       $("log").innerHTML = "";
       $("report").textContent = "–";
       $("detailCard").style.display = "none";
@@ -360,7 +418,6 @@ async function poll() {
     }
     lastRunSeq = s.run_seq;
     if (s.events.length < seenEvents) {
-      // Belt-and-braces: server restarted mid-session (run_seq reset).
       $("log").innerHTML = "";
       $("report").textContent = "–";
       seenEvents = 0;
@@ -370,7 +427,7 @@ async function poll() {
     for (const e of s.events.slice(seenEvents)) {
       const div = document.createElement("div");
       if (e.kind === "error") div.className = "err";
-      else if (e.kind === "ok" || e.kind === "tune" || e.kind === "vlm") div.className = "ok";
+      else if (e.kind === "ok" || e.kind === "tune" || e.kind === "done") div.className = "ok";
       else if (e.kind === "phase" || e.kind === "run") div.className = "phase";
       div.textContent = `[${e.t}] ${e.kind}: ${e.text}`;
       log.appendChild(div);
@@ -385,19 +442,19 @@ async function poll() {
       g.appendChild(img);
     }
     if (s.report) $("report").textContent = JSON.stringify(s.report, null, 2);
-    $("runmsg").textContent = `status: ${s.status} · mode: ${s.mode || "?"} (steps ${s.steps})`;
+    $("runmsg").textContent = `status: ${s.status} · mode: ${s.mode || "?"} ` +
+      `(frames ${s.frames ?? 0}, reader calls ${s.vlm_calls ?? 0})`;
     $("startBtn").disabled = s.status === "running" || s.status === "aborting";
   } catch (e) { /* server restarting? keep polling */ }
   setTimeout(poll, 1500);
 }
 load(); poll();
-// Live view toggle, enabled by default; preference sticks across reloads.
 $("live_toggle").onchange = (e) => setLive(e.target.checked);
 $("exposure_auto").onchange = () => {
   $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
 };
 let livePref = "1";
-try { livePref = localStorage.getItem("calibAgentLiveView") || "1"; } catch (e) {}
+try { livePref = localStorage.getItem("calibVlmLiveView") || "1"; } catch (e) {}
 setLive(livePref !== "0");
 </script>
 </body>
