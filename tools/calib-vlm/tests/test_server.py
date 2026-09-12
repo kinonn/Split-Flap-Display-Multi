@@ -32,13 +32,13 @@ def test_config_validates_mode_and_exposure(client):
 
 
 def test_config_persists_run_options(client):
-    r = client.post("/api/config", json={"mode": "preview", "exhaustive": True,
+    r = client.post("/api/config", json={"mode": "dry-run", "exhaustive": True,
                                          "min_confidence": 0.75,
                                          "dwell_ms": 500,
                                          "camera_warmup_s": 12})
     assert r.status_code == 200
     body = r.json()
-    assert body["mode"] == "preview"
+    assert body["mode"] == "dry-run"
     assert body["exhaustive"] is True
     assert body["min_confidence"] == pytest.approx(0.75)
     assert body["dwell_ms"] == 500
