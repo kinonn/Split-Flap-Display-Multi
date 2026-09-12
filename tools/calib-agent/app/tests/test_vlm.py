@@ -37,29 +37,38 @@ def test_chat_parses_tool_calls(monkeypatch):
     assert out["tool_calls"] == [{"id": "c1", "name": "hold", "arguments": {"active": True}}]
 
 
+def test_forced_tool_choice_dropped_when_provider_rejects(monkeypatch):
+    seen = []
+
+    def fake_post(self, url, json=None, headers=None, timeout=None):
+        seen.append(dict(json))
+        if "tool_choice" in json:
+            return FakeResp({"error": {"message": "Thinking mode does "
+                                        "not support this tool_choice"}},
+                            status=400)
+        return FakeResp({"choices": [{"message": {
+            "content": "ok", "tool_calls": []}}]})
+
+    monkeypatch.setattr(vlm.requests.Session, "post", fake_post)
+    client = vlm.VLMClient("https://x", "m", "k")
+    out = client.chat([{"role": "user", "content": "hi"}],
+                      tools=[{"type": "function"}])
+    assert out == {"content": "ok", "tool_calls": []}
+    assert seen[0]["tool_choice"] == "auto"
+    assert "tool_choice" not in seen[1]
+    # Sticky: later turns skip the forced choice entirely.
+    seen.clear()
+    client.chat([], tools=[{"type": "function"}])
+    assert len(seen) == 1
+    assert "tool_choice" not in seen[0]
+
+
 def test_chat_text_reply(monkeypatch):
     monkeypatch.setattr(vlm.requests.Session, "post",
                         lambda self, *a, **k: FakeResp({"choices": [{"message": {
                             "content": "done", "tool_calls": []}}]}))
     out = vlm.VLMClient("https://x", "m", "k").chat([{"role": "user", "content": "hi"}])
     assert out == {"content": "done", "tool_calls": []}
-
-
-def test_reasoning_effort_passthrough(monkeypatch):
-    seen = {}
-
-    def fake_post(self, url, json=None, headers=None, timeout=None):
-        seen.update(json or {})
-        return FakeResp({"choices": [{"message": {"content": "ok"}}]})
-
-    monkeypatch.setattr(vlm.requests.Session, "post", fake_post)
-    # Set -> forwarded to the provider.
-    vlm.VLMClient("https://x", "m", "k", reasoning_effort="low").chat([])
-    assert seen["reasoning_effort"] == "low"
-    # Unset -> key absent (provider default, as before this knob).
-    seen.clear()
-    vlm.VLMClient("https://x", "m", "k").chat([])
-    assert "reasoning_effort" not in seen
 
 
 def test_http_error_maps_to_vlm_error(monkeypatch):

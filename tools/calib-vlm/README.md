@@ -35,8 +35,11 @@ In the browser:
 
 1. **Configure** — display host (master), camera index, reader provider
    preset (OpenCode Go / OpenAI / OpenRouter / Ollama / custom), model,
-   API key (stored server-side, mode 0600, never shown back), reasoning
-   effort, camera brightness/crop/exposure, module-grid annotation.
+   API key (stored server-side, mode 0600, never shown back), camera
+   brightness/crop/exposure/start-wait, module-grid annotation. Start-wait (0..30 s, default 5) is the warm-up patience
+   for cameras whose driver opens showing all-black frames for a
+   while — raise it if the check fails with "produced only black
+   frames".
 2. **Read test** — type a pattern, show it, and see the reader's exact
    per-module transcription with expected-vs-read chips.
 3. **Run** — pick a mode and a sweep:
@@ -117,7 +120,7 @@ Every glyph is read on every module and mismatches are counted per module
 A verify pass re-reads all five glyphs and applies the same split; the
 final all-`H` check escalates any module still wrong or unreadable.
 
-### P2 — fine, per character
+### P2 — fine, per character (outliers only)
 
 Staggered sweep in drum order: `frame[i] = drumOrder[(k + i) % N]` for
 `k` advancing in steps of 6.
@@ -135,11 +138,18 @@ gives three detections:
   frames that command *different* glyphs (majority of comparisons) ->
   escalate `needs-human` (a frozen module can never converge).
 
-### P3 — drum-neighbour boundaries
+Outlier rule: modules fixed at module level in P1 re-verify first —
+each suspect frame on such a module is re-shown uniform and only
+surviving suspects are tuned, so a stale module offset never gets
+baked in twice via char cells.
+
+### P3 — drum-neighbour boundaries (outliers only)
 
 Shows frames alternating adjacent drum neighbours (e.g. `A/B`, `M/N` in
 7-step jumps) to catch binding / double-flap at character boundaries:
 wrong glyph -> per-char identity tune, `double` -> alignment tune.
+Suspects are collected first, then the same P1-fixed-module re-check
+rule as P2 applies before any char cell is touched.
 
 ### P4 — repeatability
 
@@ -159,26 +169,62 @@ end `needs-human` (preview may pass acceptance but nothing was persisted).
 ### Offset math and tuning primitives
 
 - `stepsPerChar = round(stepsPerRot / len(drum))`, read from the
-  `/settings` snapshot. Identity fixes apply
-  `drum_delta(seen, target) * stepsPerChar` forward motor steps, so a
-  one-character error is corrected in one move (not by the old ±1..8
-  step search).
-- Firmware limits are honoured exactly: the `/api/calib/preview` handler
-  rejects a single `|delta| > 32` motor steps, so larger corrections are
-  applied as a sequence of bounded preview calls; char cells are clamped
-  to ±32, so any char-cell fix that would exceed that range is escalated
-  rather than written clamped. Module (`charIndex = -1`) cells are
-  unconstrained and absorb whole-drum corrections.
+  `/settings` snapshot. Identity fixes apply the **signed-minimal** drum
+  distance (`(index(target) - index(seen))` wrapped to ±half the drum) in
+  motor steps: one char ahead is −1 char, not a near-full revolution
+  forward. An offset correction re-anchors the firmware's character
+  table (then re-homes) — it is not a drum move, so the drum's
+  forward-only rule does not apply.
+- Module-cell corrections are **negated**. A per-char offset shifts that
+  character forward for positive steps, but a module offset re-anchors
+  the homing magnet reference (`position = magnetPos + moduleOffset` on
+  magnet detection, then forward-only steps to `charPosition`), so a
+  positive module offset shows an *earlier* drum character. Getting this
+  backwards makes the tune walk the drum away from the target.
+- Firmware limits are honoured exactly: char-cell previews are chunked to
+  `|delta| <= 32` and char cells are clamped to ±32, so any char-cell fix
+  that would exceed that range is escalated rather than written clamped.
+  Module (`charIndex = -1`) offsets are unbounded (up to a full
+  revolution per call), so a whole-character module correction is sent as
+  **one** preview that re-homes the module once instead of once per 32
+  steps.
+- Tune reads are closed-loop: the settle wait scales with the move size
+  (the firmware reports idle when the command drains, but flaps can
+  still be travelling), consecutive reads must agree within one drum
+  position (a mid-travel flap reads as a random glyph — never correct a
+  transient), and two successive non-improving iterations escalate
+  instead of burning the preview budget.
 - Alignment fixes search `+4, -4, +2, -2, +8, -8, +1, -1` motor steps,
   each candidate applied from the base (not compounded).
 - Cost per reading: wrong character, then condition rank
   (`clean`/`blank` < `half` < `double` < `stuck` < `unreadable`), then
   confidence.
+- P1 runs a **parallel sub-pitch module trim** before any per-character
+  cell is touched: a module wrong on only a few glyphs is usually a
+  boundary/phase problem, so candidates `0.75/0.5/0.25/0.125` of one
+  character are tried on the module cell, scored by the target glyphs
+  plus spread "guard" glyphs (so a trim that fixes the boundary by
+  breaking the neighbours is rejected). Suspect modules are independent,
+  so each applies its own candidate in the same mixed frames/reads and
+  `POST /api/calib/preview-batch` applies them all and re-homes the
+  touched modules in **one** pass — cost is `rounds x frames`, not
+  `modules x rounds x frames`. Batches with `scope: 2..6` are forwarded by
+  the master over ESP-NOW and applied RAM-only on the remote group (no NVS
+  write; the group acks when homing finishes), and a winning remote trim is
+  persisted once via `/api/calib/offsets`.
 - Local group (1): volatile `/api/calib/preview` nudges, re-read, then
   persist the verified absolute value via `/api/calib/offsets`.
-- Remote groups: no preview in firmware, so persist-verify-revert per
-  cell. Absolute bases come from the master's `rModOffs` / `rChrOff0..4`
-  settings (the `status` endpoint only exposes local live offsets).
+- Remote groups: volatile fleet preview (above) for the trim; other cell
+  work uses persist-verify-revert. Absolute bases come from the master's
+  `rModOffs` / `rChrOff0..4` settings (the `status` endpoint only exposes
+  local live offsets).
+- Baseline hygiene: every run starts with `POST /api/calib/reload`, which
+  reverts any RAM-only preview residue from earlier runs; `full` mode does
+  the same on the way out (persisted winners remain, ghost residue on
+  escalated cells is dropped). Without this, live offsets from an
+  aborted/preview run are read as the baseline and the tuner chases
+  corrections that do not exist (the settings rollback is a no-op because
+  it only reloads on an actual change).
 
 ### Fleet, modes and budgets
 

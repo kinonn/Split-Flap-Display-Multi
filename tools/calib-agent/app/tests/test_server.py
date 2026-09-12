@@ -71,18 +71,18 @@ def test_exposure_config_roundtrip_and_validation(tmp_path, monkeypatch):
 def test_crop_config_roundtrip_clamp_and_validation(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIB_AGENT_DATA", str(tmp_path))
     client = TestClient(server.app)
-    # Default backfills to 15 for fresh configs.
-    assert client.get("/api/config").json()["camera_crop_percent"] == 15.0
+    # Default backfills to 30 for fresh configs.
+    assert client.get("/api/config").json()["camera_crop_percent"] == 30.0
     assert client.post("/api/config", json={"camera_crop_percent": 10}).status_code == 200
     assert client.get("/api/config").json()["camera_crop_percent"] == 10.0
     # Out-of-range clamps to the slider bounds, never stored raw.
     assert client.post("/api/config", json={"camera_crop_percent": 99}).status_code == 200
-    assert client.get("/api/config").json()["camera_crop_percent"] == 30.0
+    assert client.get("/api/config").json()["camera_crop_percent"] == 40.0
     assert client.post("/api/config", json={"camera_crop_percent": -5}).status_code == 200
     assert client.get("/api/config").json()["camera_crop_percent"] == 0.0
     # Empty resets to the default; garbage is a 400.
     assert client.post("/api/config", json={"camera_crop_percent": ""}).status_code == 200
-    assert client.get("/api/config").json()["camera_crop_percent"] == 15.0
+    assert client.get("/api/config").json()["camera_crop_percent"] == 30.0
     assert client.post("/api/config", json={"camera_crop_percent": "tall"}).status_code == 400
     assert client.post("/api/config", json={"camera_crop_percent": "nan"}).status_code == 400
 
@@ -184,13 +184,13 @@ def test_camera_frame_serves_jpeg(tmp_path, monkeypatch):
     # Garbage exposure is a 400, not a silent auto.
     assert client.get("/api/camera/frame?exposure=bright").status_code == 400
     # Crop query value passes through (clamped); absent means the saved
-    # config (default 15); garbage is a 400.
+    # config (default 30); garbage is a 400.
     r = client.get("/api/camera/frame?crop_percent=10")
     assert r.status_code == 200
     assert FakeCam.seen[-1].crop_percent == 10.0
     r = client.get("/api/camera/frame?crop_percent=99")
     assert r.status_code == 200
-    assert FakeCam.seen[-1].crop_percent == 30.0
+    assert FakeCam.seen[-1].crop_percent == 40.0
     assert client.post("/api/config", json={"camera_crop_percent": 5}).status_code == 200
     assert client.get("/api/camera/frame").status_code == 200
     assert FakeCam.seen[-1].crop_percent == 5.0

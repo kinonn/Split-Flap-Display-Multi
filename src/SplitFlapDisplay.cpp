@@ -629,28 +629,43 @@ int SplitFlapDisplay::getLiveCharOffset(int module, int charIndex) const {
     return charOffsets[module][charIndex];
 }
 
-bool SplitFlapDisplay::previewNudgeLocal(int module, int charIndex, int delta) {
-    if (module < 0 || module >= numModules || delta == 0) {
-        return false;
-    }
-    if (charIndex >= charSetSize) {
-        return false;
-    }
-    if (charIndex < 0) {
-        moduleOffsets[module] += delta;
-    } else {
-        charOffsets[module][charIndex] = constrain(charOffsets[module][charIndex] + delta, -32, 32);
-    }
-
-    int newMagnetOffset = magnetPosition + moduleOffsets[module] + displayOffset;
-    int rowCopy[48];
-    for (int c = 0; c < 48; c++) {
-        rowCopy[c] = charOffsets[module][c];
-    }
-    modules[module].updateOffsets(rowCopy, newMagnetOffset);
-
+bool SplitFlapDisplay::previewNudgeLocalBatch(const int *modulesIn, const int *charIndexes, const int *deltas, int count) {
     bool affectedFlags[MAX_MODULES] = {};
-    affectedFlags[module] = true;
+    bool any = false;
+    int rowCopy[48];
+    for (int k = 0; k < count; k++) {
+        int module = modulesIn[k];
+        int charIndex = charIndexes[k];
+        int delta = deltas[k];
+        if (module < 0 || module >= numModules || delta == 0) {
+            continue;
+        }
+        if (charIndex >= charSetSize) {
+            continue;
+        }
+        if (charIndex < 0) {
+            moduleOffsets[module] += delta;
+        } else {
+            charOffsets[module][charIndex] = constrain(charOffsets[module][charIndex] + delta, -32, 32);
+        }
+
+        int newMagnetOffset = magnetPosition + moduleOffsets[module] + displayOffset;
+        for (int c = 0; c < 48; c++) {
+            rowCopy[c] = charOffsets[module][c];
+        }
+        modules[module].updateOffsets(rowCopy, newMagnetOffset);
+        affectedFlags[module] = true;
+        any = true;
+    }
+    if (! any) {
+        return false;
+    }
+    // One home cycle for every touched module (concurrent under
+    // maxConcurrentMotors) instead of one per nudge.
     homeAffectedModules(affectedFlags);
     return true;
+}
+
+bool SplitFlapDisplay::previewNudgeLocal(int module, int charIndex, int delta) {
+    return previewNudgeLocalBatch(&module, &charIndex, &delta, 1);
 }

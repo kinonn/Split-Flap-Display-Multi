@@ -31,15 +31,11 @@ def text_part(text: str) -> dict:
 class VLMClient:
     def __init__(self, base_url: str, model: str, api_key: str,
                  timeout_s: float = 180.0, extra_headers: dict | None = None,
-                 session_id: str | None = None,
-                 reasoning_effort: str | None = None):
+                 session_id: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout_s = timeout_s
-        # OpenAI-compatible thinking control (e.g. low/medium/high); None
-        # = provider default. Directly caps turns that used to run 99 s.
-        self.reasoning_effort = reasoning_effort
         self.extra_headers = extra_headers or {}
         # OpenCode Go asks clients to identify themselves and send an
         # x-opencode-session header (prompt-cache optimization, abuse
@@ -49,6 +45,10 @@ class VLMClient:
         # performs a fresh TCP+TLS handshake per call, which adds up over
         # dozens of turns.
         self.session = requests.Session()
+        # Some providers (thinking models) reject a forced tool_choice
+        # with "Thinking mode does not support this tool_choice": the
+        # first such rejection drops it for the rest of the client's life.
+        self._allow_forced_tool_choice = True
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """Returns the assistant message: {"content": str|None,
@@ -56,11 +56,10 @@ class VLMClient:
         import json
 
         payload: dict = {"model": self.model, "messages": messages}
-        if self.reasoning_effort:
-            payload["reasoning_effort"] = self.reasoning_effort
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            if self._allow_forced_tool_choice:
+                payload["tool_choice"] = "auto"
         headers = {"Authorization": f"Bearer {self.api_key}",
                    "User-Agent": USER_AGENT}
         if "opencode.ai" in self.base_url:
@@ -71,6 +70,18 @@ class VLMClient:
                                      headers=headers, timeout=self.timeout_s)
         except requests.RequestException as exc:
             raise VLMError(f"LLM request failed: {exc}") from exc
+        if resp.status_code == 400 and "tool_choice" in resp.text.lower():
+            # Thinking-mode provider rejected the forced choice: retry
+            # once without it and remember, so later turns go straight
+            # through (the tool schema still guides the model).
+            self._allow_forced_tool_choice = False
+            payload.pop("tool_choice", None)
+            try:
+                resp = self.session.post(self.base_url + "/chat/completions",
+                                         json=payload, headers=headers,
+                                         timeout=self.timeout_s)
+            except requests.RequestException as exc:
+                raise VLMError(f"LLM request failed: {exc}") from exc
         if resp.status_code != 200:
             raise VLMError(f"LLM HTTP {resp.status_code}: {resp.text[:300]}")
         try:

@@ -24,6 +24,8 @@
          padding: 8px; font-family: monospace; font-size: .8rem; }
   #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
   #log .phase { color: #82b1ff; }
+  #gallery { max-height: 320px; overflow-y: auto; background: #0d0d0d;
+             border-radius: 6px; padding: 6px; }
   #gallery img { max-width: 220px; margin: 4px; border-radius: 6px; border: 1px solid #444;
                 cursor: pointer; }
   #gallery img:hover { border-color: #888; }
@@ -76,8 +78,6 @@
   <label>Base URL</label><input id="llm_base_url" />
   <label>API key (stored server-side, never shown)</label>
   <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off" />
-  <label>Reasoning effort (optional: low/medium/high — empty = provider default)</label>
-  <input id="llm_reasoning_effort" placeholder="(provider default)" />
   <div style="margin-top:8px;">
     <label class="switch"><input id="annotate" type="checkbox" checked />
       <span class="slider"></span></label>
@@ -102,9 +102,14 @@
       oninput="$('brightness_val').textContent = this.value" />
   </div>
   <div>
-    <label>Top/bottom crop (<span id="crop_val">15</span>%) — trims x% off the top AND bottom</label>
-    <input id="camera_crop_percent" type="range" min="0" max="30" step="1" value="15"
+    <label>Top/bottom crop (<span id="crop_val">30</span>%) — trims x% off the top AND bottom</label>
+    <input id="camera_crop_percent" type="range" min="0" max="40" step="1" value="30"
       oninput="$('crop_val').textContent = this.value" />
+  </div>
+  <div>
+    <label>Camera start wait (<span id="warmup_val">5</span>s) — patience for cameras that open showing black frames</label>
+    <input id="camera_warmup_s" type="range" min="0" max="30" step="1" value="5"
+      oninput="$('warmup_val').textContent = this.value" />
   </div>
   <div>
     <label>Sensor exposure (<span id="exposure_val">auto</span>)</label>
@@ -192,8 +197,12 @@ function brightness() {
 }
 function cropPercent() {
   const v = Number($("camera_crop_percent").value);
-  if (!Number.isFinite(v)) return 15;
-  return Math.max(0, Math.min(30, v));
+  if (!Number.isFinite(v)) return 30;
+  return Math.max(0, Math.min(40, v));
+}
+function warmupSeconds() {
+  const v = Number($("camera_warmup_s").value);
+  return Number.isFinite(v) ? v : 5;
 }
 async function load() {
   const c = await api("/api/config");
@@ -201,7 +210,6 @@ async function load() {
   $("camera_index").value = c.camera_index ?? 0;
   $("llm_model").value = c.llm_model || "";
   $("llm_base_url").value = c.llm_base_url || "";
-  $("llm_reasoning_effort").value = c.llm_reasoning_effort || "";
   $("run_mode").value = c.mode || "full";
   $("sweep").value = c.exhaustive ? "exhaustive" : "fast";
   $("annotate").checked = c.annotate !== false;
@@ -209,8 +217,10 @@ async function load() {
   $("min_confidence").value = c.min_confidence ?? 0.6;
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
-  $("camera_crop_percent").value = c.camera_crop_percent ?? 15;
-  $("crop_val").textContent = c.camera_crop_percent ?? 15;
+  $("camera_crop_percent").value = c.camera_crop_percent ?? 30;
+  $("crop_val").textContent = c.camera_crop_percent ?? 30;
+  $("camera_warmup_s").value = c.camera_warmup_s ?? 5;
+  $("warmup_val").textContent = c.camera_warmup_s ?? 5;
   if (c.camera_exposure === null || c.camera_exposure === undefined || c.camera_exposure === "") {
     $("exposure_auto").checked = true;
   } else {
@@ -231,9 +241,9 @@ function cfgPayload() {
     camera_brightness: brightness(),
     camera_exposure: exposure(),
     camera_crop_percent: cropPercent(),
+    camera_warmup_s: warmupSeconds(),
     llm_base_url: $("llm_base_url").value.trim(),
     llm_model: $("llm_model").value.trim(),
-    llm_reasoning_effort: $("llm_reasoning_effort").value.trim(),
     annotate: $("annotate").checked,
     mode: $("run_mode").value,
     exhaustive: $("sweep").value === "exhaustive",
@@ -276,7 +286,8 @@ async function checkCamera() {
       body: JSON.stringify({camera_index: Number($("camera_index").value || 0),
                             camera_brightness: brightness(),
                             camera_exposure: exposure(),
-                            camera_crop_percent: cropPercent()})});
+                            camera_crop_percent: cropPercent(),
+                            camera_warmup_s: warmupSeconds()})});
     $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
                                    : "Camera problem: " + s.error;
   } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }

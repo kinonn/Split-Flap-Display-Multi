@@ -81,6 +81,29 @@ def test_no_tool_call_raises():
                     drum=CHARSET)
 
 
+def test_prose_json_content_fallback():
+    # Thinking providers may drop forced tool_choice and answer in prose
+    # content: a JSON {"modules": [...]} object there is still a valid
+    # reading (not a degraded all-unreadable one).
+    entries = [entry(ch, module=i) for i, ch in enumerate("AB  ")]
+    payload = ('```json\n{"modules": '
+               + str(entries).replace("'", '"') + '}\n```')
+    reader, _ = make_reader([{"content": payload, "tool_calls": []}])
+    reading = reader.read(b"j", total=4, expected="AB  ", charset=CHARSET,
+                          drum=CHARSET)
+    assert reading.text == "AB  "
+    assert not reading.realigned
+    assert all(m.source == "vlm" for m in reading.modules)
+    # Prose without valid JSON modules still degrades to a retry/error.
+    reader, _ = make_reader([{"content": "the display shows letters",
+                              "tool_calls": []},
+                             {"content": "still nothing usable",
+                              "tool_calls": []}])
+    with pytest.raises(ReaderError):
+        reader.read(b"j", total=4, expected="    ", charset=CHARSET,
+                    drum=CHARSET)
+
+
 def test_condition_and_char_normalization():
     entries = [entry("h", "OK", 80), entry("space", "empty", 150),
                entry("~", "weird", 0.3), entry("H", "half-flap", 0.5)]

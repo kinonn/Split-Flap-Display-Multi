@@ -92,19 +92,18 @@ def load_config() -> dict:
         pass
     env_map = {"display_host": "DISPLAY_HOST", "llm_base_url": "LLM_BASE_URL",
                "llm_model": "LLM_MODEL", "llm_api_key": "LLM_API_KEY",
-               "camera_index": "CAMERA_INDEX",
-               "llm_reasoning_effort": "LLM_REASONING_EFFORT"}
+               "camera_index": "CAMERA_INDEX"}
     for key, env in env_map.items():
         if env in os.environ and os.environ[env]:
             cfg[key] = os.environ[env]
     cfg.setdefault("display_host", "splitflap.local")
     cfg.setdefault("llm_base_url", "https://opencode.ai/zen/go/v1")
     cfg.setdefault("llm_model", "deepseek-v4-flash-vision-exp")
-    cfg.setdefault("llm_reasoning_effort", "")
     cfg.setdefault("camera_index", 0)
     cfg.setdefault("camera_brightness", 50)
     cfg.setdefault("camera_exposure", None)
     cfg.setdefault("camera_crop_percent", DEFAULT_CROP_PERCENT)
+    cfg.setdefault("camera_warmup_s", 5.0)
     cfg.setdefault("mode", "full")
     cfg.setdefault("exhaustive", False)
     cfg.setdefault("annotate", True)
@@ -137,6 +136,16 @@ def save_config(patch: dict) -> dict:
             if not math.isfinite(value):
                 raise HTTPException(400, f"{key} must be a number")
             stored[key] = int(value) if key == "dwell_ms" else value
+    # Start-wait (warm-up budget for cameras that open black) validates
+    # and clamps to 0..30 s.
+    if "camera_warmup_s" in patch and patch["camera_warmup_s"] not in (None, ""):
+        try:
+            value = float(patch["camera_warmup_s"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "camera_warmup_s must be a number 0..30")
+        if not math.isfinite(value):
+            raise HTTPException(400, "camera_warmup_s must be a number 0..30")
+        stored["camera_warmup_s"] = max(0.0, min(30.0, value))
     if "mode" in patch and patch["mode"] not in ("dry-run", "preview", "full"):
         raise HTTPException(400, "mode must be dry-run, preview or full")
     # Exposure is settable AND clearable (null/"" = back to auto-search).
@@ -151,7 +160,7 @@ def save_config(patch: dict) -> dict:
             except (TypeError, ValueError):
                 raise HTTPException(400, "camera_exposure must be a number "
                                          "or empty (auto)")
-    # Crop is validated + clamped to the slider range (0..30, default 15).
+    # Crop is validated + clamped to the slider range (0..40, default 30).
     if "camera_crop_percent" in patch:
         raw = patch["camera_crop_percent"]
         if raw in (None, ""):
@@ -161,14 +170,11 @@ def save_config(patch: dict) -> dict:
                 value = float(raw)
             except (TypeError, ValueError):
                 raise HTTPException(400, "camera_crop_percent must be a "
-                                         "number 0..30")
+                                         "number 0..40")
             if not math.isfinite(value):
                 raise HTTPException(400, "camera_crop_percent must be a "
-                                         "number 0..30")
+                                         "number 0..40")
             stored["camera_crop_percent"] = max(CROP_MIN, min(CROP_MAX, value))
-    if "llm_reasoning_effort" in patch:
-        stored["llm_reasoning_effort"] = str(
-            patch["llm_reasoning_effort"] or "").strip()
     if patch.get("llm_api_key"):
         stored["llm_api_key"] = patch["llm_api_key"]
     if not stored.get("mode"):
@@ -216,10 +222,24 @@ def _crop_of(source: dict | None, key: str, cfg: dict) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
+        raise HTTPException(400, f"{key} must be a number 0..40")
+    if not math.isfinite(value):
+        raise HTTPException(400, f"{key} must be a number 0..40")
+    return max(CROP_MIN, min(CROP_MAX, value))
+
+
+def _warmup_of(source: dict | None, key: str, cfg: dict) -> float:
+    """Warm-up budget override (start-wait slider), default 5 s."""
+    raw = (source or {}).get(key, cfg.get("camera_warmup_s", 5.0))
+    if raw in (None, ""):
+        return 5.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
         raise HTTPException(400, f"{key} must be a number 0..30")
     if not math.isfinite(value):
         raise HTTPException(400, f"{key} must be a number 0..30")
-    return max(CROP_MIN, min(CROP_MAX, value))
+    return max(0.0, min(30.0, value))
 
 
 class Harness:
@@ -309,7 +329,8 @@ class Harness:
                         int(cfg.get("camera_index", 0)),
                         brightness=float(cfg.get("camera_brightness", 50)),
                         exposure=_exposure_of(None, "camera_exposure", cfg),
-                        crop_percent=_crop_of(None, "camera_crop_percent", cfg))
+                        crop_percent=_crop_of(None, "camera_crop_percent", cfg),
+                        warmup_s=_warmup_of(None, "camera_warmup_s", cfg))
                     camera.open()
                     try:
                         camera.check_camera()
@@ -325,8 +346,7 @@ class Harness:
                         return
                     vlm = VLMClient(
                         cfg["llm_base_url"], cfg["llm_model"],
-                        cfg["llm_api_key"], session_id=vlm_session_id(cfg),
-                        reasoning_effort=cfg.get("llm_reasoning_effort") or None)
+                        cfg["llm_api_key"], session_id=vlm_session_id(cfg))
                     reader = VlmReader(vlm,
                                        annotate=bool(cfg.get("annotate", True)))
                     calib = VlmCalibrator(
@@ -431,10 +451,11 @@ def check_camera(body: dict | None = None):
                                         cfg.get("camera_brightness", 50)))
     exposure = _exposure_of(body, "camera_exposure", cfg)
     crop_percent = _crop_of(body, "camera_crop_percent", cfg)
+    warmup_s = _warmup_of(body, "camera_warmup_s", cfg)
     if not _camera_lock.acquire(timeout=_CHECK_LOCK_WAIT_S):
         raise HTTPException(409, "camera busy: live view or run holds it")
     cam = Camera(index, brightness=brightness, exposure=exposure,
-                 crop_percent=crop_percent)
+                 crop_percent=crop_percent, warmup_s=warmup_s)
     try:
         cam.open()
         diag = cam.check_camera()
@@ -470,9 +491,9 @@ def camera_frame(camera_index: int | None = None,
         try:
             crop_val = float(crop_percent)
         except ValueError:
-            raise HTTPException(400, "crop_percent must be a number 0..30")
+            raise HTTPException(400, "crop_percent must be a number 0..40")
         if not math.isfinite(crop_val):
-            raise HTTPException(400, "crop_percent must be a number 0..30")
+            raise HTTPException(400, "crop_percent must be a number 0..40")
         crop_val = max(CROP_MIN, min(CROP_MAX, crop_val))
     else:
         crop_val = _crop_of(None, "camera_crop_percent", cfg)
@@ -522,8 +543,7 @@ def _reader_from_config(cfg: dict) -> VlmReader:
                                  "(not needed for local base URLs)")
     vlm = VLMClient(cfg["llm_base_url"], cfg["llm_model"],
                     cfg.get("llm_api_key", ""),
-                    session_id=vlm_session_id(cfg),
-                    reasoning_effort=cfg.get("llm_reasoning_effort") or None)
+                    session_id=vlm_session_id(cfg))
     return VlmReader(vlm, annotate=bool(cfg.get("annotate", True)))
 
 
@@ -540,7 +560,8 @@ def read_test(body: dict | None = None):
     cam = Camera(int(cfg.get("camera_index", 0)),
                  brightness=float(cfg.get("camera_brightness", 50)),
                  exposure=_exposure_of(body, "camera_exposure", cfg),
-                 crop_percent=_crop_of(body, "camera_crop_percent", cfg))
+                 crop_percent=_crop_of(body, "camera_crop_percent", cfg),
+                 warmup_s=_warmup_of(body, "camera_warmup_s", cfg))
     display = Display(cfg["display_host"])
     engaged = False
     try:

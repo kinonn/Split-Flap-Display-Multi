@@ -28,18 +28,24 @@ def test_config_masks_key(client):
 def test_config_validates_mode_and_exposure(client):
     assert client.post("/api/config", json={"camera_exposure": "nope"}).status_code == 400
     assert client.post("/api/config", json={"mode": "sideways"}).status_code == 400
+    assert client.post("/api/config", json={"camera_warmup_s": "nope"}).status_code == 400
 
 
 def test_config_persists_run_options(client):
     r = client.post("/api/config", json={"mode": "preview", "exhaustive": True,
                                          "min_confidence": 0.75,
-                                         "dwell_ms": 500})
+                                         "dwell_ms": 500,
+                                         "camera_warmup_s": 12})
     assert r.status_code == 200
     body = r.json()
     assert body["mode"] == "preview"
     assert body["exhaustive"] is True
     assert body["min_confidence"] == pytest.approx(0.75)
     assert body["dwell_ms"] == 500
+    # Start-wait clamps to the slider range 0..30 s.
+    assert body["camera_warmup_s"] == 12
+    assert client.post("/api/config",
+                       json={"camera_warmup_s": 99}).json()["camera_warmup_s"] == 30
 
 
 def test_read_test_roundtrip(client, monkeypatch):

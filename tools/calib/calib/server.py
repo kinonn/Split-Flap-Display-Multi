@@ -97,7 +97,7 @@ DEFAULTS = {
     "camera_index": 0,
     "camera_brightness": 50,
     "camera_exposure": None,  # None = driver AE; a value fixes the sensor
-    "camera_crop_percent": DEFAULT_CROP_PERCENT,  # % trimmed top AND bottom (0..30)
+    "camera_crop_percent": DEFAULT_CROP_PERCENT,  # % trimmed top AND bottom (0..40)
     "phase": 4,
     "dwell_ms": 800,
     "timeout_s": 60.0,
@@ -141,7 +141,7 @@ def save_config(patch: dict) -> dict:
                 stored["camera_exposure"] = float(raw)
             except (TypeError, ValueError):
                 raise HTTPException(400, "camera_exposure must be a number or empty (auto)")
-    # Crop is validated + clamped to the slider range (0..30, default 15).
+    # Crop is validated + clamped to the slider range (0..40, default 30).
     # Garbage (incl. NaN/inf) is a 400, matching _crop_of — never a 500,
     # never silent.
     if "camera_crop_percent" in patch:
@@ -152,9 +152,9 @@ def save_config(patch: dict) -> dict:
             try:
                 value = float(raw)
             except (TypeError, ValueError):
-                raise HTTPException(400, "camera_crop_percent must be a number 0..30")
+                raise HTTPException(400, "camera_crop_percent must be a number 0..40")
             if not math.isfinite(value):
-                raise HTTPException(400, "camera_crop_percent must be a number 0..30")
+                raise HTTPException(400, "camera_crop_percent must be a number 0..40")
             stored["camera_crop_percent"] = max(
                 CROP_MIN, min(CROP_MAX, value))
     _atomic_write_json(config_path(), stored)
@@ -550,9 +550,9 @@ def _crop_of(source: dict | None, key: str, cfg: dict) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        raise HTTPException(400, f"{key} must be a number 0..30")
+        raise HTTPException(400, f"{key} must be a number 0..40")
     if not math.isfinite(value):
-        raise HTTPException(400, f"{key} must be a number 0..30")
+        raise HTTPException(400, f"{key} must be a number 0..40")
     return max(CROP_MIN, min(CROP_MAX, value))
 
 
@@ -613,9 +613,9 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
         try:
             crop_val = float(crop_percent)
         except ValueError:
-            raise HTTPException(400, "crop_percent must be a number 0..30")
+            raise HTTPException(400, "crop_percent must be a number 0..40")
         if not math.isfinite(crop_val):
-            raise HTTPException(400, "crop_percent must be a number 0..30")
+            raise HTTPException(400, "crop_percent must be a number 0..40")
         crop_val = max(CROP_MIN, min(CROP_MAX, crop_val))
     else:
         crop_val = _crop_of(None, "camera_crop_percent", cfg)

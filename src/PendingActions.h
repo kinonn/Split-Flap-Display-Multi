@@ -47,6 +47,7 @@ class PendingActions {
         int module = 0;    // local module index 0..7
         int charIndex = 0; // drum index 0..charset-1, or -1 = coarse module offset
         int delta = 0;     // relative nudge in motor steps
+        int scope = 1;     // 1 = local controller, 2..6 = remote group (batch only)
     };
 
     void requestCalibShow(const std::string &frame, int frameId) {
@@ -96,6 +97,39 @@ class PendingActions {
         return true;
     }
 
+    // Batch preview: several module nudges drained in ONE loop-task pass.
+    // Modules are independent, so the display applies every nudge and then
+    // re-homes all affected modules together (the scheduler runs them
+    // concurrently) instead of one homing cycle per nudge. Latest wins.
+    struct CalibBatchPreview
+    {
+        // Fleet-wide: up to 6 groups x 8 modules in one request.
+        static const int MAX_NUDGES = 48;
+        int count = 0;
+        CalibPreview nudges[MAX_NUDGES];
+    };
+
+    void requestCalibBatchPreview(const CalibBatchPreview &batch) {
+        std::lock_guard<std::mutex> lock(calibMutex_);
+        calibBatchPending_ = true;
+        calibBatch_ = batch;
+    }
+
+    bool takeCalibBatchPreview(CalibBatchPreview &batchOut) {
+        std::lock_guard<std::mutex> lock(calibMutex_);
+        if (! calibBatchPending_) {
+            return false;
+        }
+        calibBatchPending_ = false;
+        batchOut = calibBatch_;
+        return true;
+    }
+
+    bool hasCalibBatchPreviewPending() {
+        std::lock_guard<std::mutex> lock(calibMutex_);
+        return calibBatchPending_;
+    }
+
   private:
     std::atomic<bool> reloadOffsets_{false};
     std::atomic<bool> reportOffsets_{false};
@@ -107,4 +141,6 @@ class PendingActions {
     int calibShowFrameId_ = 0;
     bool calibPreviewPending_ = false;
     CalibPreview calibPreview_;
+    bool calibBatchPending_ = false;
+    CalibBatchPreview calibBatch_;
 };

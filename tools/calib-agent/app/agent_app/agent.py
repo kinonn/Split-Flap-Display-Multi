@@ -209,7 +209,11 @@ class Agent:
 
     # -- tool implementations -------------------------------------------------
     def _photo_record(self, frame: str, tag: str) -> dict:
-        img = self.calib.camera.capture()
+        # Drain stale buffered frames first: the first grab after a show
+        # can be a frame exposed BEFORE the move (one-frame lag).
+        capture = getattr(self.calib.camera, "capture_fresh",
+                          self.calib.camera.capture)
+        img = capture()
         path = os.path.join(self.calib.photo_dir, f"{safe_tag(tag)}.png")
         if not cv2.imwrite(path, img):
             raise CalibError(f"failed to write photo {os.path.basename(path)}")
