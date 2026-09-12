@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Split-Flap VLM Calibration</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #141414; color: #eee;
+         margin: 0 auto; max-width: 960px; padding: 16px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; }
+  .card { background: #1f1f1f; border-radius: 10px; padding: 14px; margin: 12px 0; }
+  label { display: block; margin: 8px 0 2px; font-size: .9rem; color: #bbb; }
+  input, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444;
+                  background: #111; color: #eee; box-sizing: border-box; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button { padding: 9px 14px; border: 0; border-radius: 6px; margin: 6px 6px 0 0;
+           cursor: pointer; font-weight: 600; }
+  .go { background: #2e7d32; color: #fff; } .stop { background: #b3261e; color: #fff; }
+  .mid { background: #455a64; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  #log { height: 260px; overflow-y: auto; background: #0d0d0d; border-radius: 6px;
+         padding: 8px; font-family: monospace; font-size: .8rem; }
+  #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
+  #log .phase { color: #82b1ff; }
+  #gallery { max-height: 320px; overflow-y: auto; background: #0d0d0d;
+             border-radius: 6px; padding: 6px; }
+  #gallery img { max-width: 220px; margin: 4px; border-radius: 6px; border: 1px solid #444;
+                cursor: pointer; }
+  #gallery img:hover { border-color: #888; }
+  .chip { display: inline-block; padding: 3px 9px; margin: 2px; border-radius: 12px;
+          font-size: .8rem; font-family: monospace; }
+  .ok { background: #1b5e20; } .half { background: #e65100; } .double { background: #b71c1c; }
+  .blank { background: #37474f; } .unreadable { background: #4e342e; }
+  .chip.match { outline: 2px solid #66bb6a; } .chip.mismatch { outline: 2px solid #ef5350; }
+  #report { white-space: pre-wrap; font-family: monospace; font-size: .8rem;
+            background: #0d0d0d; border-radius: 6px; padding: 8px; }
+  .hint { color: #999; font-size: .85rem; }
+  .switch { position: relative; display: inline-block; width: 40px; height: 22px;
+            vertical-align: middle; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; border-radius: 22px; background: #444;
+            transition: .2s; }
+  .slider:before { content: ""; position: absolute; height: 16px; width: 16px;
+                   left: 3px; top: 3px; border-radius: 50%; background: #eee;
+                   transition: .2s; }
+  .switch input:checked + .slider { background: #2e7d32; }
+  .switch input:checked + .slider:before { transform: translateX(18px); }
+  #liveview { display: none; max-width: 100%; margin-top: 8px; border-radius: 6px;
+              border: 1px solid #444; }
+  #rt_photo { display: none; max-width: 100%; margin-top: 8px; border-radius: 6px;
+              border: 1px solid #444; }
+  code { font-size: .95rem; }
+</style>
+</head>
+<body>
+<h1>Split-Flap VLM Calibration <span class="hint">(VLM reads the display)</span></h1>
+
+<div class="card">
+  <h2>1. Configure</h2>
+  <div class="row">
+    <div><label>Display host / IP (master)</label><input id="display_host" /></div>
+    <div><label>Camera index</label><input id="camera_index" type="number" min="0" /></div>
+  </div>
+  <div class="row">
+    <div><label>Reader provider preset</label>
+      <select id="preset">
+        <option value="https://opencode.ai/zen/go/v1">OpenCode Go</option>
+        <option value="https://api.openai.com/v1">OpenAI</option>
+        <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+        <option value="http://localhost:11434/v1">Ollama (local)</option>
+        <option value="custom">Custom URL…</option>
+      </select></div>
+    <div><label>Model (must support vision + tool calling)</label>
+      <input id="llm_model" placeholder="deepseek-v4-flash-vision-exp" /></div>
+  </div>
+  <label>Base URL</label><input id="llm_base_url" />
+  <label>API key (stored server-side, never shown)</label>
+  <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off" />
+  <div style="margin-top:8px;">
+    <label class="switch"><input id="annotate" type="checkbox" checked />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Annotate photo with module grid</span>
+    <span class="hint">— helps the reader keep leading/trailing blanks</span>
+  </div>
+  <div>
+    <button class="mid" onclick="save()">Save</button>
+    <button class="mid" onclick="checkDisplay()">Check display</button>
+    <button class="mid" id="checkCamBtn" onclick="checkCamera()">Check camera</button>
+  </div>
+  <p class="hint" id="cfgmsg"></p>
+  <div>
+    <label class="switch"><input id="live_toggle" type="checkbox" checked />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Live camera view</span>
+    <span class="hint" id="livemsg"></span>
+  </div>
+  <div>
+    <label>Camera brightness (<span id="brightness_val">50</span>)</label>
+    <input id="camera_brightness" type="range" min="0" max="100" step="1" value="50"
+      oninput="$('brightness_val').textContent = this.value" />
+  </div>
+  <div>
+    <label>Top/bottom crop (<span id="crop_val">30</span>%) — trims x% off the top AND bottom</label>
+    <input id="camera_crop_percent" type="range" min="0" max="40" step="1" value="30"
+      oninput="$('crop_val').textContent = this.value" />
+  </div>
+  <div>
+    <label>Camera start wait (<span id="warmup_val">5</span>s) — patience for cameras that open showing black frames</label>
+    <input id="camera_warmup_s" type="range" min="0" max="30" step="1" value="5"
+      oninput="$('warmup_val').textContent = this.value" />
+  </div>
+  <div>
+    <label>Sensor exposure (<span id="exposure_val">auto</span>)</label>
+    <input id="camera_exposure" type="range" min="-13" max="0" step="1" value="-7"
+      oninput="$('exposure_val').textContent = exposureOn() ? this.value : 'auto'" />
+    <div>
+      <label class="switch"><input id="exposure_auto" type="checkbox" checked />
+        <span class="slider"></span></label>
+      <span style="margin-left:8px;">Auto exposure</span>
+    </div>
+  </div>
+  <img id="liveview" alt="Live camera view" />
+</div>
+
+<div class="card">
+  <h2>2. Read test</h2>
+  <p class="hint">Show a pattern and see exactly what the reader says each module
+     shows. Shorter patterns are right-padded with blanks.</p>
+  <label>Pattern (e.g. <code>HELLO</code> or <code>  AB  </code>)</label>
+  <input id="rt_frame" placeholder="HELLO" />
+  <div>
+    <button class="mid" onclick="readTest()">Show + read</button>
+  </div>
+  <p class="hint" id="rtmsg"></p>
+  <img id="rt_photo" alt="Read-test photo" />
+  <div id="rt_chips"></div>
+</div>
+
+<div class="card">
+  <h2>3. Run</h2>
+  <label>Mode</label>
+  <select id="run_mode">
+    <option value="dry-run">Dry run — reverse sweep + shift/purity table, touch nothing</option>
+    <option value="full">Full calibration — tune module + character offsets, commit per phase</option>
+  </select>
+  <label>Sweep</label>
+  <select id="sweep">
+    <option value="fast">Fast / sampled — 2 staggered passes (default)</option>
+    <option value="exhaustive">Exhaustive per-character — every drum character on every module</option>
+  </select>
+  <div class="row">
+    <div><label>Dwell ms (settle wait per frame)</label>
+      <input id="dwell_ms" type="number" min="0" max="10000" /></div>
+    <div><label>Minimum reader confidence (0..1)</label>
+      <input id="min_confidence" type="number" min="0" max="1" step="0.05" /></div>
+  </div>
+  <div>
+    <button class="go" id="startBtn" onclick="start()">Start calibration</button>
+    <button class="stop" onclick="abort()">Abort</button>
+    <button class="mid" onclick="restore()">Restore pre-run snapshot</button>
+  </div>
+  <p class="hint" id="runmsg"></p>
+</div>
+
+<div class="card"><h2>Log</h2><div id="log"></div></div>
+<div class="card"><h2>Photos (click to inspect)</h2><div id="gallery"></div></div>
+<div class="card" id="detailCard" style="display:none">
+  <h2>Inspect: <span id="detailTitle"></span></h2>
+  <img id="detailImg" style="max-width:100%; border-radius:6px; border:1px solid #444;" />
+  <p>Expected frame: <code id="detailFrame"></code></p>
+  <p>Reader saw: <code id="detailRead"></code></p>
+  <div id="detailChips"></div>
+  <p class="hint" id="detailWarnings"></p>
+</div>
+<div class="card"><h2>Report</h2><div id="report">–</div></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+function exposureOn() { return !$("exposure_auto").checked; }
+function exposure() {
+  if (!exposureOn()) return null;
+  const v = Number($("camera_exposure").value);
+  return Number.isFinite(v) ? v : null;
+}
+function brightness() {
+  const v = Number($("camera_brightness").value);
+  return Number.isFinite(v) ? v : 50;
+}
+function cropPercent() {
+  const v = Number($("camera_crop_percent").value);
+  if (!Number.isFinite(v)) return 30;
+  return Math.max(0, Math.min(40, v));
+}
+function warmupSeconds() {
+  const v = Number($("camera_warmup_s").value);
+  return Number.isFinite(v) ? v : 5;
+}
+async function load() {
+  const c = await api("/api/config");
+  $("display_host").value = c.display_host || "";
+  $("camera_index").value = c.camera_index ?? 0;
+  $("llm_model").value = c.llm_model || "";
+  $("llm_base_url").value = c.llm_base_url || "";
+  $("run_mode").value = c.mode || "full";
+  $("sweep").value = c.exhaustive ? "exhaustive" : "fast";
+  $("annotate").checked = c.annotate !== false;
+  $("dwell_ms").value = c.dwell_ms ?? 800;
+  $("min_confidence").value = c.min_confidence ?? 0.6;
+  $("camera_brightness").value = c.camera_brightness ?? 50;
+  $("brightness_val").textContent = c.camera_brightness ?? 50;
+  $("camera_crop_percent").value = c.camera_crop_percent ?? 30;
+  $("crop_val").textContent = c.camera_crop_percent ?? 30;
+  $("camera_warmup_s").value = c.camera_warmup_s ?? 5;
+  $("warmup_val").textContent = c.camera_warmup_s ?? 5;
+  if (c.camera_exposure === null || c.camera_exposure === undefined || c.camera_exposure === "") {
+    $("exposure_auto").checked = true;
+  } else {
+    $("exposure_auto").checked = false;
+    $("camera_exposure").value = c.camera_exposure;
+  }
+  $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
+  const known = [...$("preset").options].map(o => o.value);
+  $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
+}
+$("preset").onchange = () => {
+  if ($("preset").value !== "custom") $("llm_base_url").value = $("preset").value;
+};
+function cfgPayload() {
+  return {
+    display_host: $("display_host").value.trim(),
+    camera_index: Number($("camera_index").value || 0),
+    camera_brightness: brightness(),
+    camera_exposure: exposure(),
+    camera_crop_percent: cropPercent(),
+    camera_warmup_s: warmupSeconds(),
+    llm_base_url: $("llm_base_url").value.trim(),
+    llm_model: $("llm_model").value.trim(),
+    annotate: $("annotate").checked,
+    mode: $("run_mode").value,
+    exhaustive: $("sweep").value === "exhaustive",
+    dwell_ms: Number($("dwell_ms").value || 800),
+    min_confidence: Number($("min_confidence").value || 0.6),
+    llm_api_key: $("llm_api_key").value
+  };
+}
+async function save() {
+  try {
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfgPayload())});
+    $("cfgmsg").textContent = "Saved.";
+    $("llm_api_key").value = "";
+  } catch (e) { $("cfgmsg").textContent = "Save failed: " + e.message; }
+}
+async function checkDisplay() {
+  try {
+    const s = await api("/api/display");
+    $("cfgmsg").textContent = s.reachable
+      ? `Display OK: ${s.totalModules} modules (${s.numModules} local), charset ${s.charset}.`
+      : "Display unreachable: " + s.error;
+  } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
+}
+let camCheckBusy = false;
+async function checkCamera() {
+  if (camCheckBusy) return;
+  camCheckBusy = true;
+  $("checkCamBtn").disabled = true;
+  setLive(false);
+  const t0 = Date.now();
+  const ticker = setInterval(() => {
+    $("cfgmsg").textContent = "Checking camera… " +
+      Math.round((Date.now() - t0) / 1000) + "s " +
+      "(exposure settle + stability frames, can take ~30 s)";
+  }, 500);
+  try {
+    const s = await api("/api/check-camera", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({camera_index: Number($("camera_index").value || 0),
+                            camera_brightness: brightness(),
+                            camera_exposure: exposure(),
+                            camera_crop_percent: cropPercent(),
+                            camera_warmup_s: warmupSeconds()})});
+    $("cfgmsg").textContent = s.ok ? "Camera OK: " + JSON.stringify(s.diagnostics)
+                                   : "Camera problem: " + s.error;
+  } catch (e) { $("cfgmsg").textContent = "Check failed: " + e.message; }
+  finally {
+    clearInterval(ticker);
+    $("checkCamBtn").disabled = false;
+    camCheckBusy = false;
+  }
+}
+function renderChips(container, detail) {
+  container.innerHTML = "";
+  const expected = detail.frame || "";
+  for (const m of (detail.modules || [])) {
+    const el = document.createElement("span");
+    el.className = "chip " + m.condition;
+    const exp = m.expected || (expected[m.module] || "?");
+    const shows = m.char === " " ? "␣" : m.char;
+    const want = exp === " " ? "␣" : exp;
+    const match = exp === m.char && m.source === "vlm";
+    el.classList.add(match ? "match" : "mismatch");
+    el.textContent = `m${m.module} want '${want}' → '${shows}' ` +
+      `${m.condition} ${(m.confidence ?? 0).toFixed(2)}` +
+      (m.source === "inferred" ? " [inferred]" : "") +
+      (m.source === "error" ? " [error]" : "");
+    container.appendChild(el);
+  }
+}
+async function readTest() {
+  try {
+    setLive(false);
+    $("rtmsg").textContent = "Showing + reading…";
+    // Save first so the server reads the same camera/reader settings the
+    // sliders show (read-test uses the saved config).
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(cfgPayload())});
+    const s = await api("/api/read-test", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({frame: $("rt_frame").value})});
+    $("rtmsg").textContent = `expected ${JSON.stringify(s.frame)} → read ${JSON.stringify(s.read)}` +
+      ((s.warnings || []).length ? " | " + s.warnings.join("; ") : "");
+    $("rt_photo").src = s.photo + "?t=" + Date.now();
+    $("rt_photo").style.display = "block";
+    renderChips($("rt_chips"), s);
+  } catch (e) {
+    $("rtmsg").textContent = "Read test failed: " + e.message;
+  }
+}
+async function start() {
+  try {
+    setLive(false);
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(cfgPayload())});
+    await api("/api/run/start", {method: "POST"});
+    $("runmsg").textContent = "Running…";
+  } catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
+}
+async function abort() { await api("/api/run/abort", {method: "POST"}); }
+let liveOn = false, liveTimer = null;
+function setLive(on) {
+  liveOn = on;
+  $("live_toggle").checked = on;
+  try { localStorage.setItem("calibVlmLiveView", on ? "1" : "0"); } catch (e) {}
+  $("liveview").style.display = on ? "block" : "none";
+  if (on) { $("livemsg").textContent = ""; liveTick(); }
+  else if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+}
+async function liveTick() {
+  if (!liveOn) return;
+  try {
+    const idx = Number($("camera_index").value || 0);
+    const exp = exposure();
+    const r = await fetch("/api/camera/frame?camera_index=" + idx +
+                          "&brightness=" + brightness() +
+                          "&crop_percent=" + cropPercent() +
+                          "&exposure=" + (exp === null ? "auto" : exp));
+    if (r.status === 409) {
+      setLive(false);
+      $("livemsg").textContent = "Camera busy — run in progress.";
+      return;
+    }
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || r.statusText);
+    }
+    const blob = await r.blob();
+    const img = $("liveview");
+    const old = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+  } catch (e) {
+    setLive(false);
+    $("livemsg").textContent = "Live view off: " + e.message;
+    return;
+  }
+  liveTimer = setTimeout(liveTick, 800);
+}
+async function restore() {
+  try { await api("/api/run/restore-snapshot", {method: "POST"});
+        $("runmsg").textContent = "Snapshot restored."; }
+  catch (e) { $("runmsg").textContent = "Restore failed: " + e.message; }
+}
+let seenEvents = 0;
+let lastEvents = [];
+let lastRunSeq = null;
+function detailFor(photo) {
+  for (let i = lastEvents.length - 1; i >= 0; i--) {
+    const e = lastEvents[i];
+    if (e.photo === photo && e.detail && e.detail.modules) return e.detail;
+  }
+  return null;
+}
+function inspect(photo) {
+  const d = detailFor(photo);
+  $("detailCard").style.display = "block";
+  $("detailTitle").textContent = photo;
+  $("detailImg").src = "/api/photos/" + encodeURIComponent(photo);
+  if (!d) {
+    $("detailFrame").textContent = "(no expected frame recorded)";
+    $("detailRead").textContent = "";
+    $("detailChips").innerHTML = "";
+    $("detailWarnings").textContent = "";
+    return;
+  }
+  $("detailFrame").textContent = d.frame;
+  $("detailRead").textContent = d.read;
+  renderChips($("detailChips"), d);
+  $("detailWarnings").textContent = (d.warnings || []).join("; ");
+}
+async function poll() {
+  try {
+    const s = await api("/api/run/state");
+    if (lastRunSeq !== null && s.run_seq !== lastRunSeq) {
+      $("log").innerHTML = "";
+      $("report").textContent = "–";
+      $("detailCard").style.display = "none";
+      seenEvents = 0;
+    }
+    lastRunSeq = s.run_seq;
+    if (s.events.length < seenEvents) {
+      $("log").innerHTML = "";
+      $("report").textContent = "–";
+      seenEvents = 0;
+    }
+    lastEvents = s.events;
+    const log = $("log");
+    for (const e of s.events.slice(seenEvents)) {
+      const div = document.createElement("div");
+      if (e.kind === "error") div.className = "err";
+      else if (e.kind === "ok" || e.kind === "tune" || e.kind === "done") div.className = "ok";
+      else if (e.kind === "phase" || e.kind === "run") div.className = "phase";
+      div.textContent = `[${e.t}] ${e.kind}: ${e.text}`;
+      log.appendChild(div);
+    }
+    seenEvents = s.events.length;
+    log.scrollTop = log.scrollHeight;
+    const g = $("gallery"); g.innerHTML = "";
+    for (const p of s.photos.slice(-8)) {
+      const img = document.createElement("img");
+      img.src = "/api/photos/" + encodeURIComponent(p); img.loading = "lazy";
+      img.onclick = () => inspect(p);
+      g.appendChild(img);
+    }
+    if (s.report) $("report").textContent = JSON.stringify(s.report, null, 2);
+    $("runmsg").textContent = `status: ${s.status} · mode: ${s.mode || "?"} ` +
+      `(frames ${s.frames ?? 0}, reader calls ${s.vlm_calls ?? 0})`;
+    $("startBtn").disabled = s.status === "running" || s.status === "aborting";
+  } catch (e) { /* server restarting? keep polling */ }
+  setTimeout(poll, 1500);
+}
+load(); poll();
+$("live_toggle").onchange = (e) => setLive(e.target.checked);
+$("exposure_auto").onchange = () => {
+  $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
+};
+let livePref = "1";
+try { livePref = localStorage.getItem("calibVlmLiveView") || "1"; } catch (e) {}
+setLive(livePref !== "0");
+</script>
+</body>
+</html>

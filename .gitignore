@@ -4,4 +4,12 @@
 .vscode
 node_modules/
 build/web/*
+tools/calib/.venv/
+tools/calib-agent/app/.venv/
+tools/calib-vlm/.venv/
+tools/calib-vlm/data/
+tools/calib-vlm/.pytest_cache/
+__pycache__/
 .idea
+calib-ui-data/
+tools/calib-agent/app/data/

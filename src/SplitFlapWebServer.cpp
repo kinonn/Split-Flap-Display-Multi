@@ -1,8 +1,10 @@
 #include "SplitFlapWebServer.h"
 
+#include "CalibApi.h"
 #include "CalibrationTriggers.h"
 #include "CsvUtils.h"
 #include "SplitFlapEspNow.h"
+#include "SplitFlapModule.h"
 
 #include <ArduinoJson.h>
 #include <AsyncJson.h>
@@ -238,6 +240,522 @@ void SplitFlapWebServer::startMDNS() {
     }
 
     Serial.println("mDNS: http://" + settings.getString("mdns") + ".local");
+}
+
+String SplitFlapWebServer::getCalibLastFrame() {
+    std::lock_guard<std::mutex> lock(calibMutex_);
+    return calibLastFrame_;
+}
+
+void SplitFlapWebServer::setCalibLastFrame(const String &frame, int frameId) {
+    std::lock_guard<std::mutex> lock(calibMutex_);
+    calibLastFrame_ = frame;
+    calibLastFrameId_ = frameId;
+}
+
+int SplitFlapWebServer::getCalibLastFrameId() {
+    std::lock_guard<std::mutex> lock(calibMutex_);
+    return calibLastFrameId_;
+}
+
+int SplitFlapWebServer::getCalibTotalModules() {
+    if (espNow && isMultiDisplayMasterEnabled()) {
+        return espNow->getTotalModuleCount();
+    }
+    return display.getNumModules();
+}
+
+bool SplitFlapWebServer::isCalibBusy() {
+    if (getCalibBusy() || pendingActions_.hasCalibShowPending() || pendingActions_.hasCalibPreviewPending() ||
+        pendingActions_.hasCalibBatchPreviewPending() || pendingActions_.hasReloadOffsets() ||
+        pendingActions_.hasPushOffsets()) {
+        return true;
+    }
+    // Outstanding remote push acks (master only; null-safe elsewhere).
+    if (espNow && (espNow->hasPushAcksPending() || espNow->hasPreviewAcksPending())) {
+        return true;
+    }
+    return false;
+}
+
+void SplitFlapWebServer::registerCalibRoutes() {
+    // Read-only status for the vision agent: fleet geometry, drum order,
+    // live offsets (including uncommitted previews) and show progress.
+    server.on("/api/calib/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        JsonDocument response;
+        int charset = display.getCharsetSize();
+        int drumLen = 0;
+        const char *drum = SplitFlapModule::drumOrder(charset, drumLen);
+        String drumStr = "";
+        for (int i = 0; i < drumLen; i++) {
+            drumStr += drum[i];
+        }
+
+        int localModules = display.getNumModules();
+        response["contractVersion"] = CALIB_CONTRACT_VERSION;
+        response["schemaVersion"] = SETTINGS_SCHEMA_VERSION;
+        response["mode"] = settings.getInt("mode");
+        response["holdActive"] = settings.getInt("mode") == CALIB_HOLD_MODE;
+        // Busy covers queued work too: the loop task sets the flag only
+        // while executing, so a status poll landing between queueing and
+        // pickup used to see busy==false with a stale frame — the tool
+        // then aborted the whole run with a spurious "never reported
+        // settled" (seen on a 12-module fleet at frame 63).
+        response["busy"] = isCalibBusy();
+        response["frameId"] = getCalibFrameId();
+        {
+            std::lock_guard<std::mutex> lock(calibMutex_);
+            response["lastFrameId"] = calibLastFrameId_;
+            response["lastFrame"] = calibLastFrame_;
+        }
+        response["numModules"] = localModules;
+        response["totalModules"] = getCalibTotalModules();
+        // Group count must come from settings, not total/local: integer
+        // division truncates (12 modules / 8 local = 1), which made the
+        // calibration tool treat remote modules as local and preview
+        // out-of-range indices (firmware 400 "expected 0..7").
+        response["groupCount"] = isMultiDisplayMasterEnabled()
+                                     ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
+                                     : 1;
+        response["charset"] = charset;
+        response["drumOrder"] = drumStr;
+        response["displayOffset"] = display.getLiveDisplayOffset();
+        JsonArray modOffs = response["moduleOffsets"].to<JsonArray>();
+        for (int i = 0; i < localModules; i++) {
+            modOffs.add(display.getLiveModuleOffset(i));
+        }
+        // Live per-char offsets (including uncommitted previews) so the
+        // calibration tool can seed its absolute persist base instead of
+        // assuming 0 (issue kinonn-bot#24). One row per local module,
+        // `charset` entries each; absent on older firmware (tool falls back).
+        JsonArray charOffs = response["charOffsets"].to<JsonArray>();
+        for (int i = 0; i < localModules; i++) {
+            JsonArray row = charOffs.add<JsonArray>();
+            for (int c = 0; c < charset; c++) {
+                row.add(display.getLiveCharOffset(i, c));
+            }
+        }
+        response["previewNote"] = "live offsets include uncommitted previews; reload reverts";
+        request->send(200, "application/json", response.as<String>());
+    });
+
+    // Enter/leave calibration hold (mode 4): suspends date/time/random/scroll
+    // writes so the agent owns the display. Fleet: call on each controller.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/hold",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        if (! json["active"].is<bool>()) {
+            JsonDocument response;
+            response["message"] = "Invalid active flag (expected boolean)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int previousMode = settings.getInt("mode");
+        bool active = json["active"].as<bool>();
+        JsonDocument response;
+        int writeMode;
+        {
+            // Hold mode save/restore lives in CalibHoldTracker (issue
+            // kinonn-bot#35); the mutex guards the tracker state.
+            std::lock_guard<std::mutex> lock(calibMutex_);
+            if (active) {
+                writeMode = calibHold_.engage(previousMode);
+            } else {
+                writeMode = calibHold_.release();
+                response["restoredMode"] = writeMode;
+            }
+        }
+        settings.putInt("mode", writeMode);
+        response["message"] = active ? "Calibration hold engaged" : "Calibration hold released";
+        response["type"] = "success";
+        response["holdActive"] = active;
+        response["previousMode"] = previousMode;
+        request->send(200, "application/json", response.as<String>());
+    }
+    ));
+
+    // Deterministic exact-width show: no centering, no scroll. On the master,
+    // a fleet-width frame (length == total modules) is distributed across all
+    // ESP-NOW groups left-to-right; a local-width frame shows locally only.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/show",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        if (! json["frame"].is<String>()) {
+            response["message"] = "Invalid frame (expected string)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        String frame = json["frame"].as<String>();
+        int dwellMs = json["dwellMs"].is<int>() ? json["dwellMs"].as<int>() : 800;
+        if (dwellMs < 0 || dwellMs > 10000) {
+            response["message"] = "Invalid dwellMs (expected 0..10000)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int localModules = display.getNumModules();
+        int totalModules = getCalibTotalModules();
+        bool fleetFrame = (totalModules != localModules && frame.length() == (unsigned int) totalModules);
+        if (! fleetFrame && frame.length() != (unsigned int) localModules) {
+            response["message"] = "Frame width must equal numModules (" + String(localModules) + ")" +
+                (totalModules != localModules ? " or totalModules (" + String(totalModules) + ")" : "");
+            response["type"] = "error";
+            response["numModules"] = localModules;
+            response["totalModules"] = totalModules;
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (getCalibBusy() || pendingActions_.hasCalibShowPending()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        int frameId = nextCalibFrameId();
+        pendingActions_.requestCalibShow(frame.c_str(), frameId);
+        response["message"] = "Show queued";
+        response["type"] = "success";
+        response["frameId"] = frameId;
+        response["fleetFrame"] = fleetFrame;
+        response["dwellMs"] = dwellMs;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Ground truth for a shown frame so the camera has expected glyphs.
+    server.on("/api/calib/frame", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        JsonDocument response;
+        if (! request->hasParam("frameId")) {
+            response["message"] = "Missing frameId query parameter";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int wanted = request->getParam("frameId")->value().toInt();
+        std::lock_guard<std::mutex> lock(calibMutex_);
+        if (wanted != calibLastFrameId_ && wanted != calibFrameId_.load()) {
+            response["message"] = "Unknown frameId";
+            response["type"] = "error";
+            return request->send(404, "application/json", response.as<String>());
+        }
+        response["frameId"] = wanted;
+        response["frame"] = (wanted == calibLastFrameId_) ? calibLastFrame_ : "";
+        response["busy"] = isCalibBusy();
+        // settled is per-frame ground truth: frame N stays settled even if a
+        // later frame (new monotonic frameId) is queued or executing.
+        response["settled"] = (wanted == calibLastFrameId_) && ! calibBusy_.load();
+        request->send(200, "application/json", response.as<String>());
+    });
+
+    // Volatile preview nudge (Phase 2 dry run): RAM-only, single local
+    // module, no NVS write. For fleets, call each controller directly.
+    // charIndex -1 = coarse module offset, else drum index 0..charset-1.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/preview",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        int module = json["module"].is<int>() ? json["module"].as<int>() : -1;
+        int charIndex = json["charIndex"].is<int>() ? json["charIndex"].as<int>() : -1;
+        int delta = json["delta"].is<int>() ? json["delta"].as<int>() : 0;
+        int localModules = display.getNumModules();
+        int charset = display.getCharsetSize();
+        if (module < 0 || module >= localModules) {
+            response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (charIndex < -1 || charIndex >= charset) {
+            response["message"] = "Invalid charIndex (expected -1.." + String(charset - 1) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        // Char cells are clamped to ±32 (CALIB_CHAR_OFFSET_MAX), but a
+        // module offset re-anchors the whole drum and is unbounded: allow a
+        // full revolution so the calibration tool can apply a whole-character
+        // correction in ONE call and the module re-homes once instead of
+        // once per 32 steps.
+        int maxDelta = (charIndex < 0) ? display.getStepsPerRot() : CALIB_CHAR_OFFSET_MAX;
+        if (delta == 0 || delta < -maxDelta || delta > maxDelta) {
+            response["message"] = "Invalid delta (expected -" + String(maxDelta) + ".." + String(maxDelta) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (getCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        PendingActions::CalibPreview preview;
+        preview.module = module;
+        preview.charIndex = charIndex;
+        preview.delta = delta;
+        pendingActions_.requestCalibPreview(preview);
+        response["message"] = "Preview queued (volatile, reload reverts)";
+        response["type"] = "success";
+        response["module"] = module;
+        response["charIndex"] = charIndex;
+        response["delta"] = delta;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Batch form of /api/calib/preview: {"nudges":[{module,charIndex,delta}...]}
+    // All nudges are applied and the touched modules re-homed in ONE pass so
+    // N independent modules cost one homing cycle (parallel trim phase).
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/preview-batch",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        if (! json["nudges"].is<JsonArray>()) {
+            response["message"] = "Invalid nudges (expected array)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        JsonArray nudges = json["nudges"].as<JsonArray>();
+        int localModules = display.getNumModules();
+        int charset = display.getCharsetSize();
+        int maxDelta = display.getStepsPerRot();
+        if (nudges.size() == 0 || nudges.size() > PendingActions::CalibBatchPreview::MAX_NUDGES) {
+            response["message"] = "Invalid nudges count (expected 1.." +
+                                  String(PendingActions::CalibBatchPreview::MAX_NUDGES) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        PendingActions::CalibBatchPreview batch;
+        int groupCount = isMultiDisplayMasterEnabled()
+                             ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
+                             : 1;
+        for (JsonVariant nudge : nudges) {
+            int scope = nudge["scope"].is<int>() ? nudge["scope"].as<int>() : 1;
+            int module = nudge["module"].is<int>() ? nudge["module"].as<int>() : -1;
+            int charIndex = nudge["charIndex"].is<int>() ? nudge["charIndex"].as<int>() : -1;
+            int delta = nudge["delta"].is<int>() ? nudge["delta"].as<int>() : 0;
+            if (scope < 1 || scope > groupCount) {
+                response["message"] = "Invalid scope (expected 1.." + String(groupCount) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int maxModule = (scope == 1) ? localModules : CALIB_MAX_MODULES;
+            if (module < 0 || module >= maxModule) {
+                response["message"] = "Invalid module (expected 0.." + String(maxModule - 1) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            if (charIndex < -1 || charIndex >= charset) {
+                response["message"] = "Invalid charIndex (expected -1.." + String(charset - 1) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            if (delta == 0 || delta < -maxDelta || delta > maxDelta) {
+                response["message"] = "Invalid delta (expected -" + String(maxDelta) + ".." + String(maxDelta) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            batch.nudges[batch.count].scope = scope;
+            batch.nudges[batch.count].module = module;
+            batch.nudges[batch.count].charIndex = charIndex;
+            batch.nudges[batch.count].delta = delta;
+            batch.count++;
+        }
+        if (getCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        pendingActions_.requestCalibBatchPreview(batch);
+        response["message"] = "Batch preview queued (volatile, reload reverts)";
+        response["type"] = "success";
+        response["count"] = batch.count;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Force a reload from NVS, reverting every volatile preview nudge. The
+    // settings POST only queues a reload when a calibration value actually
+    // changes (CalibrationTriggers.h), so rolling back by re-POSTing identical
+    // settings is a no-op and RAM-only preview residue would otherwise survive
+    // across runs and corrupt the next run's baseline.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/reload",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        (void) json;
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        if (getCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        pendingActions_.requestReloadOffsets();
+        // Remote volatile previews live on the groups: an offsets push makes
+        // each one read NVS again and discard them (no dedicated revert packet).
+        if (isMultiDisplayMasterEnabled() && espNow) {
+            pendingActions_.requestPushOffsets();
+        }
+        response["message"] = "Reload queued (volatile previews reverted)";
+        response["type"] = "success";
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Scoped persist (Phase 3): writes ONE offset cell to NVS, then queues
+    // the existing reload/push paths. scope 1 (or "local") = local group,
+    // 2..6 = remote group on the master.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/offsets",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        int group = 1;
+        if (json["scope"].is<int>()) {
+            group = json["scope"].as<int>();
+        } else if (json["scope"].is<String>()) {
+            String scope = json["scope"].as<String>();
+            scope.toLowerCase();
+            group = (scope == "local" || scope == "1") ? 1 : scope.toInt();
+        } else if (! json["scope"].isNull()) {
+            response["message"] = "Invalid scope (expected \"local\" or group 1..6)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        int groupCount = isMultiDisplayMasterEnabled() ? settings.getInt("masterGroupCount") : 1;
+        groupCount = constrain(groupCount, 1, CALIB_MAX_GROUPS);
+        if (group < 1 || group > groupCount) {
+            response["message"] = "Invalid scope (expected \"local\" or group 1.." + String(groupCount) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        if (! json["kind"].is<String>()) {
+            response["message"] = "Invalid kind (expected char, module or display)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        String kind = json["kind"].as<String>();
+        kind.toLowerCase();
+        bool isLocal = (group == 1);
+        int localModules = display.getNumModules();
+        int charset = display.getCharsetSize();
+
+        // F1: a persist re-homes motors via the loop drain. Refuse when a
+        // show/preview/reload/push is still in flight — persisting under a
+        // settling frame corrupts both the frame and the verify photo.
+        if (isCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+
+        if (kind == "display") {
+            if (! json["value"].is<int>()) {
+                response["message"] = "Invalid value for display offset";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int value = json["value"].as<int>();
+            if (isLocal) {
+                settings.putInt("displayOffset", value);
+                pendingActions_.requestReloadOffsets();
+                if (! isMultiDisplayMasterEnabled() && espNow) {
+                    pendingActions_.requestReportOffsets();
+                }
+            } else {
+                auto dispOffs = settings.getIntVector("rDispOffs");
+                while ((int) dispOffs.size() < group - 1) dispOffs.push_back(0);
+                dispOffs[group - 2] = value;
+                settings.putIntVector("rDispOffs", dispOffs);
+                pendingActions_.requestPushOffsets();
+            }
+        } else if (kind == "module") {
+            int module = json["module"].is<int>() ? json["module"].as<int>() : -1;
+            if (! json["value"].is<int>() || module < 0 || module >= CALIB_MAX_MODULES) {
+                response["message"] = "Invalid module/value for module offset";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int value = json["value"].as<int>();
+            if (isLocal) {
+                if (module >= localModules) {
+                    response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
+                    response["type"] = "error";
+                    return request->send(400, "application/json", response.as<String>());
+                }
+                auto modOffs = settings.getIntVector("moduleOffsets");
+                while ((int) modOffs.size() < localModules) modOffs.push_back(0);
+                modOffs[module] = value;
+                settings.putIntVector("moduleOffsets", modOffs);
+                pendingActions_.requestReloadOffsets();
+                if (! isMultiDisplayMasterEnabled() && espNow) {
+                    pendingActions_.requestReportOffsets();
+                }
+            } else {
+                auto modOffs = settings.getIntMatrix("rModOffs");
+                int row = group - 2;
+                while ((int) modOffs.size() <= row) modOffs.push_back(std::vector<int>(8, 0));
+                if ((int) modOffs[row].size() < 8) modOffs[row].resize(8, 0);
+                modOffs[row][module] = value;
+                settings.putIntMatrix("rModOffs", modOffs);
+                pendingActions_.requestPushOffsets();
+            }
+        } else if (kind == "char") {
+            int module = json["module"].is<int>() ? json["module"].as<int>() : -1;
+            int charIndex = json["charIndex"].is<int>() ? json["charIndex"].as<int>() : -1;
+            if (! json["value"].is<int>() || module < 0 || module >= CALIB_MAX_MODULES || charIndex < 0 ||
+                charIndex >= charset) {
+                response["message"] = "Invalid module/charIndex/value for char offset";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int value = constrain(json["value"].as<int>(), CALIB_CHAR_OFFSET_MIN, CALIB_CHAR_OFFSET_MAX);
+            if (isLocal) {
+                if (module >= localModules) {
+                    response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
+                    response["type"] = "error";
+                    return request->send(400, "application/json", response.as<String>());
+                }
+                auto chrOffs = settings.getIntMatrix("charOffsets");
+                while ((int) chrOffs.size() < localModules) chrOffs.push_back(std::vector<int>(48, 0));
+                if ((int) chrOffs[module].size() < 48) chrOffs[module].resize(48, 0);
+                chrOffs[module][charIndex] = value;
+                settings.putIntMatrix("charOffsets", chrOffs);
+                pendingActions_.requestReloadOffsets();
+                if (! isMultiDisplayMasterEnabled() && espNow) {
+                    pendingActions_.requestReportOffsets();
+                }
+            } else {
+                String key = "rChrOff" + String(group - 2);
+                auto chrOffs = settings.getIntMatrix(key.c_str());
+                while ((int) chrOffs.size() <= module) chrOffs.push_back(std::vector<int>(48, 0));
+                if ((int) chrOffs[module].size() < 48) chrOffs[module].resize(48, 0);
+                chrOffs[module][charIndex] = value;
+                settings.putIntMatrix(key.c_str(), chrOffs);
+                pendingActions_.requestPushOffsets();
+            }
+        } else {
+            response["message"] = "Invalid kind (expected char, module or display)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+
+        response["message"] = "Offset saved, applying to display";
+        response["type"] = "success";
+        response["scope"] = group;
+        response["kind"] = kind;
+        request->send(200, "application/json", response.as<String>());
+    }
+    ));
 }
 
 void SplitFlapWebServer::startWebServer() {
@@ -538,6 +1056,8 @@ void SplitFlapWebServer::startWebServer() {
     }));
 
     server.onNotFound(fourOhFour);
+
+    registerCalibRoutes();
 
     server.begin();
 }

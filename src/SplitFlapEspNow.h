@@ -15,8 +15,13 @@
 #define ESP_NOW_ANNOUNCE_VERSION 0xFE
 #define ESP_NOW_OFFSETS_PUSH 0xFC
 #define ESP_NOW_OFFSETS_REPORT 0xFB
+#define ESP_NOW_PREVIEW_NUDGE 0xFA
+#define ESP_NOW_PREVIEW_ACK 0xF9
 #define OFFSET_RELOAD_SETTLE_MS 250
 #define OFFSET_PACKET_SPACING_MS 10
+// How long the master waits for pushed groups to report back after a
+// push before the settle fence expires (remotes re-home for seconds).
+#define PUSH_ACK_TIMEOUT_MS 30000
 
 struct SplitFlapEspNowMessage
 {
@@ -80,6 +85,28 @@ struct SplitFlapCharOffsetsReportMessage
     int8_t charOffsets[48];
 };
 
+// Volatile fleet preview: master -> remote group. RAM-only nudges (no NVS
+// write); a later offsets push/reload reverts them. The remote answers with
+// a PreviewAck so the master's busy signal covers remote homing.
+struct SplitFlapPreviewNudgeMessage
+{
+    uint8_t version;
+    uint8_t groupIndex;
+    uint8_t count;
+    struct Nudge
+    {
+        uint8_t module;   // local module on the target group
+        int8_t charIndex; // -1 = coarse module offset
+        int16_t delta;
+    } nudges[8];
+};
+
+struct SplitFlapPreviewAckMessage
+{
+    uint8_t version;
+    uint8_t groupIndex;
+};
+
 struct DiscoveredPeer
 {
     uint8_t mac[6];
@@ -100,6 +127,24 @@ class SplitFlapEspNow {
     bool isMacAssigned(const String &mac);
     void pushOffsetsToGroup(int groupIndex);
     void reportOffsetsToMaster();
+    // Settle fence for pushed groups (F2): after the master pushes, each
+    // pushed group reports back once it applied + reloaded (remotes call
+    // reportOffsetsToMaster() after applying). expectPushAcks arms groups
+    // 1..getGroupCount()-1 with a deadline; a group's module-offset report
+    // clears its bit; hasPushAcksPending (expiry-aware, never sticks)
+    // feeds the HTTP busy signal via SplitFlapWebServer::isCalibBusy().
+    void expectPushAcks();
+    bool hasPushAcksPending();
+    // Volatile fleet preview (calibration trim): forwards RAM-only nudges to
+    // one remote group and arms an ack fence for it. No NVS write on the
+    // remote; the next offsets push/reload reverts the preview.
+    bool pushPreviewNudges(int groupIndex, const uint8_t *modules,
+                           const int8_t *charIndexes, const int16_t *deltas, int count);
+    bool hasPreviewAcksPending();
+    // Trust-on-first-use pin for offset pushes (F3): the first push sender
+    // becomes the pinned master; later pushes from any other MAC are
+    // dropped. Returns true when a pin exists and mac differs from it.
+    bool isPinnedMasterMismatch(const uint8_t mac[6]);
     void processPendingOffsetPackets();
     void distributeMessage(
         const String &message, bool centering = true, unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
@@ -141,6 +186,17 @@ class SplitFlapEspNow {
     SplitFlapCharOffsetsPushMessage pendingCharOffsetsPkts[MAX_MODULES];
     bool offsetDataDirty;
     unsigned long lastOffsetRxMs;
+    // F2 ack fence state (master side only): bit i = group i owes a report.
+    portMUX_TYPE pushAckMux = portMUX_INITIALIZER_UNLOCKED;
+    uint8_t pushAckPendingMask = 0;
+    unsigned long pushAckDeadlineMs = 0;
+    // Volatile preview state: queued nudge packet (remote side) and the ack
+    // fence (master side).
+    volatile bool pendingPreviewNudge = false;
+    SplitFlapPreviewNudgeMessage pendingPreviewNudgePkt;
+    portMUX_TYPE previewAckMux = portMUX_INITIALIZER_UNLOCKED;
+    uint8_t previewAckPendingMask = 0;
+    unsigned long previewAckDeadlineMs = 0;
 
     bool ensureInitialized();
     int getGroupCount();
@@ -157,6 +213,8 @@ class SplitFlapEspNow {
     void processAnnouncement(const uint8_t *mac, const SplitFlapAnnounceMessage *pkt);
     void applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt);
     void applyCharOffsetsPush(const SplitFlapCharOffsetsPushMessage *pkt);
+    void applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt);
+    void processPreviewAck(const uint8_t mac[6], const SplitFlapPreviewAckMessage *pkt);
     void processOffsetsReport(const uint8_t *mac, const SplitFlapOffsetsReportMessage *pkt);
     void processCharOffsetsReport(const uint8_t *mac, const SplitFlapCharOffsetsReportMessage *pkt);
     int groupIndexForMac(const uint8_t mac[6]);

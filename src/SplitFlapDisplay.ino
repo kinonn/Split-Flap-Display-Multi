@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <WiFiClient.h>
+#include <string>
 
 // clang-format off
 JsonSettings settings = JsonSettings("config", {
@@ -178,7 +179,13 @@ void loop() {
     // single owner of the display (I2C) and ESP-NOW push paths, so settings
     // saves can never run display work inside the AsyncTCP task.
     if (webServer.getPendingActions().takeReloadOffsets()) {
+        // Reload re-homes affected modules (seconds of motion): hold the
+        // busy flag across it so status/frame ground truth stays false
+        // until the display actually settled (issue: persist used to read
+        // idle the moment HTTP 200 was sent).
+        webServer.setCalibBusy(true);
         display.reloadOffsets();
+        webServer.setCalibBusy(false);
     }
     if (webServer.getPendingActions().takeReportOffsets()) {
         if (splitflapEspNow) {
@@ -186,12 +193,89 @@ void loop() {
         }
     }
     if (webServer.getPendingActions().takePushOffsets()) {
+        webServer.setCalibBusy(true);
         if (splitflapEspNow) {
             int groupCount = settings.getInt("masterGroupCount");
             for (int i = 1; i < groupCount; i++) {
                 splitflapEspNow->pushOffsetsToGroup(i);
             }
+            splitflapEspNow->expectPushAcks();
         }
+        webServer.setCalibBusy(false);
+    }
+
+    // Calibration mailbox (fleet day one): exact-width shows and volatile
+    // previews run here in the loop task — the single owner of the display.
+    // Show frames at fleet width distribute across ESP-NOW groups via the
+    // master; local-width frames show on the local group only.
+    std::string calibFrame;
+    int calibFrameId = 0;
+    if (webServer.getPendingActions().takeCalibShow(calibFrame, calibFrameId)) {
+        webServer.setCalibBusy(true);
+        String frame = String(calibFrame.c_str());
+        if (splitflapEspNow && isMultiDisplayMasterEnabled() &&
+            frame.length() == (unsigned int) splitflapEspNow->getTotalModuleCount()) {
+            splitflapEspNow->distributeMessage(frame, false);
+        } else {
+            display.writeString(frame, MAX_RPM, false);
+        }
+        webServer.setWrittenString(frame);
+        webServer.setCalibLastFrame(frame, calibFrameId);
+        webServer.setCalibBusy(false);
+    }
+    PendingActions::CalibPreview preview;
+    if (webServer.getPendingActions().takeCalibPreview(preview)) {
+        webServer.setCalibBusy(true);
+        display.previewNudgeLocal(preview.module, preview.charIndex, preview.delta);
+        webServer.setCalibBusy(false);
+    }
+    PendingActions::CalibBatchPreview batch;
+    if (webServer.getPendingActions().takeCalibBatchPreview(batch)) {
+        webServer.setCalibBusy(true);
+        const int cap = PendingActions::CalibBatchPreview::MAX_NUDGES;
+        int mods[cap];
+        int chars[cap];
+        int deltas[cap];
+        int count = constrain(batch.count, 0, cap);
+        int localCount = 0;
+        for (int k = 0; k < count; k++) {
+            if (batch.nudges[k].scope <= 1) {
+                mods[localCount] = batch.nudges[k].module;
+                chars[localCount] = batch.nudges[k].charIndex;
+                deltas[localCount] = batch.nudges[k].delta;
+                localCount++;
+            }
+        }
+        if (localCount > 0) {
+            display.previewNudgeLocalBatch(mods, chars, deltas, localCount);
+        }
+        // Remote groups: forward their slices as volatile ESP-NOW nudges; the
+        // groups ack after homing so the busy fence covers them.
+        if (splitflapEspNow && isMultiDisplayMasterEnabled()) {
+            int groupCount = constrain(settings.getInt("masterGroupCount"), 1, MAX_DISPLAY_GROUPS);
+            for (int g = 2; g <= groupCount; g++) {
+                uint8_t rmods[8];
+                int8_t rchars[8];
+                int16_t rdeltas[8];
+                int rc = 0;
+                for (int k = 0; k < count && rc < 8; k++) {
+                    if (batch.nudges[k].scope == g) {
+                        rmods[rc] = (uint8_t) batch.nudges[k].module;
+                        rchars[rc] = (int8_t) batch.nudges[k].charIndex;
+                        rdeltas[rc] = (int16_t) batch.nudges[k].delta;
+                        rc++;
+                    }
+                }
+                if (rc > 0) {
+                    // pushPreviewNudges takes the firmware's 1-based remote
+                    // index (1 = first remote, same convention as
+                    // pushOffsetsToGroup / groupIndexForMac); batch scopes
+                    // are 1 = local, 2..6 = remote, so subtract one.
+                    splitflapEspNow->pushPreviewNudges(g - 1, rmods, rchars, rdeltas, rc);
+                }
+            }
+        }
+        webServer.setCalibBusy(false);
     }
 
     if (splitflapEspNow) {
@@ -205,7 +289,7 @@ void loop() {
         case 1: multiInputMode(); break;
         case 2: dateMode(); break;
         case 3: timeMode(); break;
-        case 4: break;
+        case 4: break; // calibration hold: agent owns the display via /api/calib/*
         case 5: randomTest(); break;
         case ESP_NOW_REMOTE_MODE: break;
         default: break;

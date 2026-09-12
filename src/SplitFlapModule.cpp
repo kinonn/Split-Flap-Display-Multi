@@ -125,6 +125,15 @@ int SplitFlapModule::getCharPosition(char inputChar) {
     return 0; // Character not found, return blank
 }
 
+const char *SplitFlapModule::drumOrder(int charsetSize, int &outLen) {
+    if (charsetSize == 48) {
+        outLen = 48;
+        return ExtendedChars;
+    }
+    outLen = 37;
+    return StandardChars;
+}
+
 void SplitFlapModule::stop() {
     writeIO(IdleState);
 }

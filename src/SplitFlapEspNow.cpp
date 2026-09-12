@@ -1,5 +1,6 @@
 #include "SplitFlapEspNow.h"
 
+#include "CalibApi.h"
 #include "CsvUtils.h"
 
 #include <WiFi.h>
@@ -101,6 +102,12 @@ void SplitFlapEspNow::loop() {
     int moduleCount = constrain((int) packet.moduleCount, 1, MAX_MODULES);
     packet.text[moduleCount] = '\0';
     String text = String(packet.text);
+
+    // Calibration hold owns the display: drop remote text instead of
+    // fighting the agent's show frames.
+    if (settings.getInt("mode") == CALIB_HOLD_MODE) {
+        return;
+    }
 
     if (text == lastRemoteText) {
         return;
@@ -484,6 +491,13 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
     }
 
     if (len == sizeof(SplitFlapOffsetsPushMessage) && data[0] == ESP_NOW_OFFSETS_PUSH) {
+        // F3: pushes are remote-bound by construction (the master is group
+        // 0 and never consumes them). Trust-on-first-use: the first push
+        // sender pins the master MAC; anything else afterwards is forged.
+        if (isPinnedMasterMismatch(mac)) {
+            Serial.printf("[esp-now] ignoring offsets push from unpinned %s\n", macToString(mac).c_str());
+            return;
+        }
         learnMasterMac(mac);
         portENTER_CRITICAL(&packetMux);
         memcpy(&pendingOffsetsPushPkt, data, sizeof(pendingOffsetsPushPkt));
@@ -493,6 +507,10 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
     }
 
     if (len == sizeof(SplitFlapCharOffsetsPushMessage) && data[0] == ESP_NOW_OFFSETS_PUSH) {
+        if (isPinnedMasterMismatch(mac)) {
+            Serial.printf("[esp-now] ignoring char offsets push from unpinned %s\n", macToString(mac).c_str());
+            return;
+        }
         learnMasterMac(mac);
         const SplitFlapCharOffsetsPushMessage *cpkt = (const SplitFlapCharOffsetsPushMessage *) data;
         int modIdx = constrain((int) cpkt->moduleIndex, 0, MAX_MODULES - 1);
@@ -500,6 +518,24 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         memcpy(&pendingCharOffsetsPkts[modIdx], data, sizeof(pendingCharOffsetsPkts[modIdx]));
         pendingCharOffsetsMask |= (1 << modIdx);
         portEXIT_CRITICAL(&packetMux);
+        return;
+    }
+
+    if (len == sizeof(SplitFlapPreviewNudgeMessage) && data[0] == ESP_NOW_PREVIEW_NUDGE) {
+        if (isPinnedMasterMismatch(mac)) {
+            Serial.printf("[esp-now] ignoring preview nudge from unpinned %s\n", macToString(mac).c_str());
+            return;
+        }
+        learnMasterMac(mac);
+        portENTER_CRITICAL(&packetMux);
+        memcpy(&pendingPreviewNudgePkt, data, sizeof(pendingPreviewNudgePkt));
+        pendingPreviewNudge = true;
+        portEXIT_CRITICAL(&packetMux);
+        return;
+    }
+
+    if (len == sizeof(SplitFlapPreviewAckMessage) && data[0] == ESP_NOW_PREVIEW_ACK) {
+        processPreviewAck(mac, (const SplitFlapPreviewAckMessage *) data);
         return;
     }
 
@@ -689,6 +725,94 @@ void SplitFlapEspNow::reportOffsetsToMaster() {
     Serial.println("[esp-now] reported offsets to master");
 }
 
+void SplitFlapEspNow::applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt) {
+    int count = constrain((int) pkt->count, 0, 8);
+    int mods[8] = {};
+    int chars[8] = {};
+    int deltas[8] = {};
+    for (int k = 0; k < count; k++) {
+        mods[k] = (int) pkt->nudges[k].module;
+        chars[k] = (int) pkt->nudges[k].charIndex;
+        deltas[k] = (int) pkt->nudges[k].delta;
+    }
+    if (display.previewNudgeLocalBatch(mods, chars, deltas, count)) {
+        Serial.printf("[esp-now] applied %d volatile preview nudge(s) from group %d nudge\n",
+                      count, pkt->groupIndex);
+    }
+
+    // Ack so the master's busy fence clears only after the homing finished.
+    if (masterMacKnown) {
+        SplitFlapPreviewAckMessage ack = {};
+        ack.version = ESP_NOW_PREVIEW_ACK;
+        ack.groupIndex = pkt->groupIndex;
+        esp_now_send(masterMac, (const uint8_t *) &ack, sizeof(ack));
+    }
+}
+
+bool SplitFlapEspNow::pushPreviewNudges(int groupIndex, const uint8_t *modules,
+                                        const int8_t *charIndexes, const int16_t *deltas,
+                                        int count) {
+    if (! ensureInitialized()) return false;
+    if (groupIndex < 1 || groupIndex >= getGroupCount()) return false;
+    if (count < 1) return false;
+    if (count > 8) count = 8;
+
+    String macString = getGroupMac(groupIndex);
+    uint8_t mac[6];
+    if (! parseMacAddress(macString, mac)) return false;
+
+    ensurePeer(mac);
+
+    SplitFlapPreviewNudgeMessage pkt = {};
+    pkt.version = ESP_NOW_PREVIEW_NUDGE;
+    // The packet carries the web-API scope (1 = local, 2..6 = remote) so
+    // the target group's log line matches what the master was asked for;
+    // groupIndex here is the 1-based remote index (1 = first remote).
+    pkt.groupIndex = (uint8_t) (groupIndex + 1);
+    pkt.count = (uint8_t) count;
+    for (int k = 0; k < count; k++) {
+        pkt.nudges[k].module = modules[k];
+        pkt.nudges[k].charIndex = charIndexes[k];
+        pkt.nudges[k].delta = deltas[k];
+    }
+
+    portENTER_CRITICAL(&previewAckMux);
+    previewAckPendingMask |= (uint8_t) (1 << groupIndex);
+    previewAckDeadlineMs = millis() + PUSH_ACK_TIMEOUT_MS;
+    portEXIT_CRITICAL(&previewAckMux);
+
+    if (esp_now_send(mac, (const uint8_t *) &pkt, sizeof(pkt)) != ESP_OK) {
+        Serial.printf("[esp-now] preview nudge send failed for group %d\n", groupIndex + 1);
+        portENTER_CRITICAL(&previewAckMux);
+        previewAckPendingMask &= (uint8_t) ~(1 << groupIndex);
+        portEXIT_CRITICAL(&previewAckMux);
+        return false;
+    }
+    delay(OFFSET_PACKET_SPACING_MS);
+    return true;
+}
+
+bool SplitFlapEspNow::hasPreviewAcksPending() {
+    portENTER_CRITICAL(&previewAckMux);
+    if (previewAckPendingMask != 0 && (long) (millis() - previewAckDeadlineMs) >= 0) {
+        previewAckPendingMask = 0; // expired: ack never came, never stick busy
+    }
+    bool pending = previewAckPendingMask != 0;
+    portEXIT_CRITICAL(&previewAckMux);
+    return pending;
+}
+
+void SplitFlapEspNow::processPreviewAck(const uint8_t mac[6], const SplitFlapPreviewAckMessage *pkt) {
+    if (! initialized || ! isMasterEnabled()) return;
+
+    int groupIdx = groupIndexForMac(mac);
+    if (groupIdx < 1) return;
+
+    portENTER_CRITICAL(&previewAckMux);
+    previewAckPendingMask &= (uint8_t) ~(1 << groupIdx);
+    portEXIT_CRITICAL(&previewAckMux);
+}
+
 void SplitFlapEspNow::applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt) {
     int moduleCount = constrain((int) pkt->moduleCount, 1, MAX_MODULES);
 
@@ -707,7 +831,9 @@ void SplitFlapEspNow::applyCharOffsetsPush(const SplitFlapCharOffsetsPushMessage
     while ((int) matrix.size() <= modIdx) matrix.push_back(std::vector<int>(48, 0));
     if ((int) matrix[modIdx].size() < 48) matrix[modIdx].resize(48, 0);
     for (int c = 0; c < 48; c++) {
-        matrix[modIdx][c] = pkt->charOffsets[c];
+        // F3: clamp like the HTTP endpoint — never store a value the API
+        // itself would refuse (±127 fits int8_t but is out of range).
+        matrix[modIdx][c] = constrain(pkt->charOffsets[c], CALIB_CHAR_OFFSET_MIN, CALIB_CHAR_OFFSET_MAX);
     }
     settings.putIntMatrix("charOffsets", matrix);
 
@@ -720,6 +846,11 @@ void SplitFlapEspNow::processOffsetsReport(const uint8_t *mac, const SplitFlapOf
     int groupIdx = groupIndexForMac(mac);
     if (groupIdx < 1) return;
     int row = groupIdx - 1;
+
+    // F2: a module-offset report doubles as the push ack for this group.
+    portENTER_CRITICAL(&pushAckMux);
+    pushAckPendingMask &= (uint8_t) ~(1 << groupIdx);
+    portEXIT_CRITICAL(&pushAckMux);
 
     int moduleCount = constrain((int) pkt->moduleCount, 1, MAX_MODULES);
 
@@ -795,6 +926,36 @@ void SplitFlapEspNow::ensurePeer(const uint8_t mac[6]) {
     }
 }
 
+bool SplitFlapEspNow::isPinnedMasterMismatch(const uint8_t mac[6]) {
+    bool known;
+    uint8_t pinned[6];
+    portENTER_CRITICAL(&packetMux);
+    known = masterMacKnown;
+    if (known) memcpy(pinned, masterMac, 6);
+    portEXIT_CRITICAL(&packetMux);
+    return known && memcmp(mac, pinned, 6) != 0;
+}
+
+void SplitFlapEspNow::expectPushAcks() {
+    if (! isMasterEnabled()) return;
+    uint8_t mask = 0;
+    for (int i = 1; i < getGroupCount(); i++) mask |= (uint8_t) (1 << i);
+    portENTER_CRITICAL(&pushAckMux);
+    pushAckPendingMask = mask;
+    pushAckDeadlineMs = millis() + PUSH_ACK_TIMEOUT_MS;
+    portEXIT_CRITICAL(&pushAckMux);
+}
+
+bool SplitFlapEspNow::hasPushAcksPending() {
+    portENTER_CRITICAL(&pushAckMux);
+    if (pushAckPendingMask != 0 && (long) (millis() - pushAckDeadlineMs) >= 0) {
+        pushAckPendingMask = 0; // expired: report never came, never stick busy
+    }
+    bool pending = pushAckPendingMask != 0;
+    portEXIT_CRITICAL(&pushAckMux);
+    return pending;
+}
+
 void SplitFlapEspNow::learnMasterMac(const uint8_t mac[6]) {
     if (! masterMacKnown) {
         portENTER_CRITICAL(&packetMux);
@@ -820,6 +981,8 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
     SplitFlapOffsetsPushMessage offsetsPkt = {};
     uint8_t charMask = 0;
     SplitFlapCharOffsetsPushMessage charPkts[MAX_MODULES];
+    bool gotPreviewNudge = false;
+    SplitFlapPreviewNudgeMessage previewPkt = {};
 
     portENTER_CRITICAL(&packetMux);
     gotOffsetsPush = pendingOffsetsPush;
@@ -836,9 +999,22 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
         }
         pendingCharOffsetsMask = 0;
     }
+    gotPreviewNudge = pendingPreviewNudge;
+    if (gotPreviewNudge) {
+        memcpy(&previewPkt, &pendingPreviewNudgePkt, sizeof(previewPkt));
+        pendingPreviewNudge = false;
+    }
     portEXIT_CRITICAL(&packetMux);
 
     bool processedAny = false;
+
+    if ((gotOffsetsPush || charMask) && isMasterEnabled()) {
+        // F3: pushes are remote-bound; the master is group 0 and never
+        // consumes them. Anything arriving here is forged or misrouted.
+        Serial.println("[esp-now] ignoring offsets push on master");
+        gotOffsetsPush = false;
+        charMask = 0;
+    }
 
     if (gotOffsetsPush) {
         applyOffsetsPush(&offsetsPkt);
@@ -857,9 +1033,18 @@ void SplitFlapEspNow::processPendingOffsetPackets() {
         lastOffsetRxMs = millis();
     }
 
+    if (gotPreviewNudge && ! isMasterEnabled()) {
+        // RAM-only nudge on top of the live offsets; the next reload (offset
+        // push or reboot) reads NVS again and discards it.
+        applyPreviewNudges(&previewPkt);
+    }
+
     if (offsetDataDirty && millis() - lastOffsetRxMs >= OFFSET_RELOAD_SETTLE_MS) {
         offsetDataDirty = false;
         Serial.println("[esp-now] applying pushed offsets to display");
         display.reloadOffsets();
+        // F2: report back so the master's ack fence clears. The pin was
+        // learned when the push was queued, so the master MAC is known.
+        reportOffsetsToMaster();
     }
 }
