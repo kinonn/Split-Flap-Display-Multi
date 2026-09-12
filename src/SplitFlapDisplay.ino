@@ -229,6 +229,54 @@ void loop() {
         display.previewNudgeLocal(preview.module, preview.charIndex, preview.delta);
         webServer.setCalibBusy(false);
     }
+    PendingActions::CalibBatchPreview batch;
+    if (webServer.getPendingActions().takeCalibBatchPreview(batch)) {
+        webServer.setCalibBusy(true);
+        const int cap = PendingActions::CalibBatchPreview::MAX_NUDGES;
+        int mods[cap];
+        int chars[cap];
+        int deltas[cap];
+        int count = constrain(batch.count, 0, cap);
+        int localCount = 0;
+        for (int k = 0; k < count; k++) {
+            if (batch.nudges[k].scope <= 1) {
+                mods[localCount] = batch.nudges[k].module;
+                chars[localCount] = batch.nudges[k].charIndex;
+                deltas[localCount] = batch.nudges[k].delta;
+                localCount++;
+            }
+        }
+        if (localCount > 0) {
+            display.previewNudgeLocalBatch(mods, chars, deltas, localCount);
+        }
+        // Remote groups: forward their slices as volatile ESP-NOW nudges; the
+        // groups ack after homing so the busy fence covers them.
+        if (splitflapEspNow && isMultiDisplayMasterEnabled()) {
+            int groupCount = constrain(settings.getInt("masterGroupCount"), 1, MAX_DISPLAY_GROUPS);
+            for (int g = 2; g <= groupCount; g++) {
+                uint8_t rmods[8];
+                int8_t rchars[8];
+                int16_t rdeltas[8];
+                int rc = 0;
+                for (int k = 0; k < count && rc < 8; k++) {
+                    if (batch.nudges[k].scope == g) {
+                        rmods[rc] = (uint8_t) batch.nudges[k].module;
+                        rchars[rc] = (int8_t) batch.nudges[k].charIndex;
+                        rdeltas[rc] = (int16_t) batch.nudges[k].delta;
+                        rc++;
+                    }
+                }
+                if (rc > 0) {
+                    // pushPreviewNudges takes the firmware's 1-based remote
+                    // index (1 = first remote, same convention as
+                    // pushOffsetsToGroup / groupIndexForMac); batch scopes
+                    // are 1 = local, 2..6 = remote, so subtract one.
+                    splitflapEspNow->pushPreviewNudges(g - 1, rmods, rchars, rdeltas, rc);
+                }
+            }
+        }
+        webServer.setCalibBusy(false);
+    }
 
     if (splitflapEspNow) {
         splitflapEspNow->loop();

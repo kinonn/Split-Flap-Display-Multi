@@ -104,7 +104,11 @@ class Calibrator:
         """Show a frame, settle, photograph, split into crops. Returns record."""
         info = self._show_and_settle(frame)
         time.sleep(self.dwell_ms / 1000.0)
-        img = self.camera.capture()
+        # Drain stale buffered frames first: the first grab after a show
+        # can be a frame exposed BEFORE the move (one-frame lag).
+        capture = getattr(self.camera, "capture_fresh",
+                          self.camera.capture)
+        img = capture()
         path = os.path.join(self.photo_dir, f"{tag}_f{info['frameId']}.png")
         cv2.imwrite(path, img)
         gray = vision.to_gray(img)

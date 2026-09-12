@@ -108,8 +108,7 @@ def load_config() -> dict:
         pass
     env_map = {"display_host": "DISPLAY_HOST", "llm_base_url": "LLM_BASE_URL",
                "llm_model": "LLM_MODEL", "llm_api_key": "LLM_API_KEY",
-               "camera_index": "CAMERA_INDEX",
-               "llm_reasoning_effort": "LLM_REASONING_EFFORT"}
+               "camera_index": "CAMERA_INDEX"}
     for key, env in env_map.items():
         if env in os.environ and os.environ[env]:
             cfg[key] = os.environ[env]
@@ -119,8 +118,7 @@ def load_config() -> dict:
     cfg.setdefault("camera_index", 0)
     cfg.setdefault("camera_brightness", 50)
     cfg.setdefault("camera_exposure", None)  # None = driver AE; a value fixes the sensor
-    cfg.setdefault("camera_crop_percent", DEFAULT_CROP_PERCENT)  # % trimmed top AND bottom (0..30)
-    cfg.setdefault("llm_reasoning_effort", "")
+    cfg.setdefault("camera_crop_percent", DEFAULT_CROP_PERCENT)  # % trimmed top AND bottom (0..40)
     cfg.setdefault("mode", "full")
     cfg.setdefault("full_drum", False)
     return cfg
@@ -152,7 +150,7 @@ def save_config(patch: dict) -> dict:
                 stored["camera_exposure"] = float(raw)
             except (TypeError, ValueError):
                 raise HTTPException(400, "camera_exposure must be a number or empty (auto)")
-    # Crop is validated + clamped to the slider range (0..30, default 15).
+    # Crop is validated + clamped to the slider range (0..40, default 30).
     # Garbage (incl. NaN/inf) is a 400, matching _crop_of — never a 500,
     # never silent.
     if "camera_crop_percent" in patch:
@@ -163,14 +161,11 @@ def save_config(patch: dict) -> dict:
             try:
                 value = float(raw)
             except (TypeError, ValueError):
-                raise HTTPException(400, "camera_crop_percent must be a number 0..30")
+                raise HTTPException(400, "camera_crop_percent must be a number 0..40")
             if not math.isfinite(value):
-                raise HTTPException(400, "camera_crop_percent must be a number 0..30")
+                raise HTTPException(400, "camera_crop_percent must be a number 0..40")
             stored["camera_crop_percent"] = max(
                 CROP_MIN, min(CROP_MAX, value))
-    # Effort is settable AND clearable (empty string = provider default).
-    if "llm_reasoning_effort" in patch:
-        stored["llm_reasoning_effort"] = str(patch["llm_reasoning_effort"] or "").strip()
     if patch.get("llm_api_key"):
         stored["llm_api_key"] = patch["llm_api_key"]
     if "mode" in patch:
@@ -314,8 +309,7 @@ class Harness:
                         return
                     vlm = VLMClient(cfg["llm_base_url"], cfg["llm_model"],
                                     cfg["llm_api_key"],
-                                    session_id=vlm_session_id(cfg),
-                                    reasoning_effort=cfg.get("llm_reasoning_effort") or None)
+                                    session_id=vlm_session_id(cfg))
                     calib = Calibrator(display, camera, photo_dir=run_dir,
                                        identity_thresh=float(cfg.get("identity_thresh", 0.85)),
                                        full=bool(cfg.get("full_drum", False)))
@@ -438,9 +432,9 @@ def _crop_of(source: dict | None, key: str, cfg: dict) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        raise HTTPException(400, f"{key} must be a number 0..30")
+        raise HTTPException(400, f"{key} must be a number 0..40")
     if not math.isfinite(value):
-        raise HTTPException(400, f"{key} must be a number 0..30")
+        raise HTTPException(400, f"{key} must be a number 0..40")
     return max(CROP_MIN, min(CROP_MAX, value))
 
 
@@ -501,9 +495,9 @@ def camera_frame(camera_index: int | None = None, brightness: float | None = Non
         try:
             crop_val = float(crop_percent)
         except ValueError:
-            raise HTTPException(400, "crop_percent must be a number 0..30")
+            raise HTTPException(400, "crop_percent must be a number 0..40")
         if not math.isfinite(crop_val):
-            raise HTTPException(400, "crop_percent must be a number 0..30")
+            raise HTTPException(400, "crop_percent must be a number 0..40")
         crop_val = max(CROP_MIN, min(CROP_MAX, crop_val))
     else:
         crop_val = _crop_of(None, "camera_crop_percent", cfg)

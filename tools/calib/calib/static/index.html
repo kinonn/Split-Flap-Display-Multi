@@ -92,8 +92,8 @@
       oninput="$('brightness_val').textContent = this.value" />
   </div>
   <div>
-    <label>Top/bottom crop (<span id="crop_val">15</span>%) — trims x% off the top AND bottom before exposure</label>
-    <input id="camera_crop_percent" type="range" min="0" max="30" step="1" value="15"
+    <label>Top/bottom crop (<span id="crop_val">30</span>%) — trims x% off the top AND bottom before exposure</label>
+    <input id="camera_crop_percent" type="range" min="0" max="40" step="1" value="30"
       oninput="$('crop_val').textContent = this.value" />
   </div>
   <div>
@@ -151,8 +151,8 @@ async function load() {
   $("relearn_templates").checked = !!c.relearn_templates;
   $("camera_brightness").value = c.camera_brightness ?? 50;
   $("brightness_val").textContent = c.camera_brightness ?? 50;
-  $("camera_crop_percent").value = c.camera_crop_percent ?? 15;
-  $("crop_val").textContent = c.camera_crop_percent ?? 15;
+  $("camera_crop_percent").value = c.camera_crop_percent ?? 30;
+  $("crop_val").textContent = c.camera_crop_percent ?? 30;
   if (c.camera_exposure === null || c.camera_exposure === undefined || c.camera_exposure === "") {
     $("exposure_auto").checked = true;
   } else {
@@ -173,8 +173,8 @@ function brightness() {
 }
 function cropPercent() {
   const v = Number($("camera_crop_percent").value);
-  if (!Number.isFinite(v)) return 15;
-  return Math.max(0, Math.min(30, v));
+  if (!Number.isFinite(v)) return 30;
+  return Math.max(0, Math.min(40, v));
 }
 function cfg() {
   return {

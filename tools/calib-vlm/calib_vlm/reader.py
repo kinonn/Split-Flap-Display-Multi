@@ -10,6 +10,8 @@ inferred position is flagged, never silently trusted.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 
 import cv2
@@ -179,6 +181,43 @@ class VlmReader:
             return entries or None
         return None
 
+    @staticmethod
+    def _content_entries(reply: dict) -> list[tuple[str, str, float]] | None:
+        """Prose fallback: a JSON {"modules": [...]} object in the reply
+        content is as good as a tool call.
+
+        Needed because thinking-mode providers ignore forced tool_choice
+        (they answer in content); without this every such frame would be
+        an unreadable degraded read instead of a real reading.
+        """
+        content = reply.get("content")
+        if not isinstance(content, str):
+            return None
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text)
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if not match:
+                return None
+            try:
+                parsed = json.loads(match.group(0))
+            except ValueError:
+                return None
+        if not isinstance(parsed, dict):
+            return None
+        raw = parsed.get("modules")
+        if not isinstance(raw, list) or not raw:
+            return None
+        entries = []
+        for item in raw:
+            if isinstance(item, dict):
+                entries.append((item.get("char"), item.get("condition"),
+                                item.get("confidence")))
+        return entries or None
+
     # -- public ---------------------------------------------------------------
     def read(self, jpeg: bytes, total: int, expected: str = "",
              charset: str = "", drum: str = "") -> Reading:
@@ -205,6 +244,10 @@ class VlmReader:
             except VLMError as exc:
                 raise ReaderError(str(exc)) from exc
             entries = self._extract(reply)
+            if entries is None:
+                # Prose fallback: with tool_choice dropped, thinking
+                # models often answer as JSON content instead of a call.
+                entries = self._content_entries(reply)
             if entries is None:
                 last_problem = "model did not call report_reading"
                 continue

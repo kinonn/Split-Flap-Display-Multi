@@ -267,11 +267,12 @@ int SplitFlapWebServer::getCalibTotalModules() {
 
 bool SplitFlapWebServer::isCalibBusy() {
     if (getCalibBusy() || pendingActions_.hasCalibShowPending() || pendingActions_.hasCalibPreviewPending() ||
-        pendingActions_.hasReloadOffsets() || pendingActions_.hasPushOffsets()) {
+        pendingActions_.hasCalibBatchPreviewPending() || pendingActions_.hasReloadOffsets() ||
+        pendingActions_.hasPushOffsets()) {
         return true;
     }
     // Outstanding remote push acks (master only; null-safe elsewhere).
-    if (espNow && espNow->hasPushAcksPending()) {
+    if (espNow && (espNow->hasPushAcksPending() || espNow->hasPreviewAcksPending())) {
         return true;
     }
     return false;
@@ -474,8 +475,14 @@ void SplitFlapWebServer::registerCalibRoutes() {
             response["type"] = "error";
             return request->send(400, "application/json", response.as<String>());
         }
-        if (delta == 0 || delta < -32 || delta > 32) {
-            response["message"] = "Invalid delta (expected -32..32, non-zero)";
+        // Char cells are clamped to ±32 (CALIB_CHAR_OFFSET_MAX), but a
+        // module offset re-anchors the whole drum and is unbounded: allow a
+        // full revolution so the calibration tool can apply a whole-character
+        // correction in ONE call and the module re-homes once instead of
+        // once per 32 steps.
+        int maxDelta = (charIndex < 0) ? display.getStepsPerRot() : CALIB_CHAR_OFFSET_MAX;
+        if (delta == 0 || delta < -maxDelta || delta > maxDelta) {
+            response["message"] = "Invalid delta (expected -" + String(maxDelta) + ".." + String(maxDelta) + ")";
             response["type"] = "error";
             return request->send(400, "application/json", response.as<String>());
         }
@@ -494,6 +501,110 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["module"] = module;
         response["charIndex"] = charIndex;
         response["delta"] = delta;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Batch form of /api/calib/preview: {"nudges":[{module,charIndex,delta}...]}
+    // All nudges are applied and the touched modules re-homed in ONE pass so
+    // N independent modules cost one homing cycle (parallel trim phase).
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/preview-batch",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        if (! json["nudges"].is<JsonArray>()) {
+            response["message"] = "Invalid nudges (expected array)";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        JsonArray nudges = json["nudges"].as<JsonArray>();
+        int localModules = display.getNumModules();
+        int charset = display.getCharsetSize();
+        int maxDelta = display.getStepsPerRot();
+        if (nudges.size() == 0 || nudges.size() > PendingActions::CalibBatchPreview::MAX_NUDGES) {
+            response["message"] = "Invalid nudges count (expected 1.." +
+                                  String(PendingActions::CalibBatchPreview::MAX_NUDGES) + ")";
+            response["type"] = "error";
+            return request->send(400, "application/json", response.as<String>());
+        }
+        PendingActions::CalibBatchPreview batch;
+        int groupCount = isMultiDisplayMasterEnabled()
+                             ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
+                             : 1;
+        for (JsonVariant nudge : nudges) {
+            int scope = nudge["scope"].is<int>() ? nudge["scope"].as<int>() : 1;
+            int module = nudge["module"].is<int>() ? nudge["module"].as<int>() : -1;
+            int charIndex = nudge["charIndex"].is<int>() ? nudge["charIndex"].as<int>() : -1;
+            int delta = nudge["delta"].is<int>() ? nudge["delta"].as<int>() : 0;
+            if (scope < 1 || scope > groupCount) {
+                response["message"] = "Invalid scope (expected 1.." + String(groupCount) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            int maxModule = (scope == 1) ? localModules : CALIB_MAX_MODULES;
+            if (module < 0 || module >= maxModule) {
+                response["message"] = "Invalid module (expected 0.." + String(maxModule - 1) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            if (charIndex < -1 || charIndex >= charset) {
+                response["message"] = "Invalid charIndex (expected -1.." + String(charset - 1) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            if (delta == 0 || delta < -maxDelta || delta > maxDelta) {
+                response["message"] = "Invalid delta (expected -" + String(maxDelta) + ".." + String(maxDelta) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            batch.nudges[batch.count].scope = scope;
+            batch.nudges[batch.count].module = module;
+            batch.nudges[batch.count].charIndex = charIndex;
+            batch.nudges[batch.count].delta = delta;
+            batch.count++;
+        }
+        if (getCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        pendingActions_.requestCalibBatchPreview(batch);
+        response["message"] = "Batch preview queued (volatile, reload reverts)";
+        response["type"] = "success";
+        response["count"] = batch.count;
+        request->send(202, "application/json", response.as<String>());
+    }
+    ));
+
+    // Force a reload from NVS, reverting every volatile preview nudge. The
+    // settings POST only queues a reload when a calibration value actually
+    // changes (CalibrationTriggers.h), so rolling back by re-POSTing identical
+    // settings is a no-op and RAM-only preview residue would otherwise survive
+    // across runs and corrupt the next run's baseline.
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/reload",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        (void) json;
+        if (request->method() != HTTP_POST) {
+            return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+        }
+        JsonDocument response;
+        if (getCalibBusy()) {
+            response["message"] = "Display busy, poll status until busy==false";
+            response["type"] = "error";
+            return request->send(409, "application/json", response.as<String>());
+        }
+        pendingActions_.requestReloadOffsets();
+        // Remote volatile previews live on the groups: an offsets push makes
+        // each one read NVS again and discard them (no dedicated revert packet).
+        if (isMultiDisplayMasterEnabled() && espNow) {
+            pendingActions_.requestPushOffsets();
+        }
+        response["message"] = "Reload queued (volatile previews reverted)";
+        response["type"] = "success";
         request->send(202, "application/json", response.as<String>());
     }
     ));

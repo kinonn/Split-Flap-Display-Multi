@@ -46,6 +46,37 @@ class Display:
             raise CalibError(f"POST {path} -> HTTP {resp.status_code}: {resp.text[:300]}")
         return resp.json()
 
+    def _post_wait_busy(self, path: str, payload: dict,
+                        timeout_s: float | None = None) -> dict:
+        """POST a volatile-mutating endpoint, honoring the 409 contract.
+
+        The firmware rejects a show/preview/reload with 409 while the
+        display is busy and documents the remedy as back off and poll
+        (PHASE2_PREVIEW.md). A single transient busy window used to kill
+        the whole run (seen as 'POST /api/calib/preview-batch -> HTTP
+        409' aborting a P1 trim). Poll status between retries until the
+        display settles, then retry; give up only past the settle
+        deadline.
+        """
+        deadline = time.monotonic() + (self.settle_timeout_s
+                                       if timeout_s is None else timeout_s)
+        while True:
+            try:
+                return self._post(path, payload)
+            except CalibError as exc:
+                if "HTTP 409" not in str(exc):
+                    raise
+                if time.monotonic() > deadline:
+                    raise
+                try:
+                    self.wait_settled(timeout_s=max(1.0, deadline
+                                                    - time.monotonic()))
+                except CalibError:
+                    pass  # settle poll failed; retry the POST anyway
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.5)
+
     # -- calibration endpoints ------------------------------------------------
     def status(self) -> dict:
         return self._get("/api/calib/status")
@@ -57,16 +88,32 @@ class Display:
         return self._post("/api/calib/hold", {"active": bool(active)})
 
     def show(self, frame: str, dwell_ms: int = 800) -> dict:
-        return self._post("/api/calib/show", {"frame": frame, "dwellMs": dwell_ms})
+        return self._post_wait_busy("/api/calib/show",
+                                    {"frame": frame, "dwellMs": dwell_ms})
 
     def frame_info(self, frame_id: int) -> dict:
         return self._get("/api/calib/frame", params={"frameId": frame_id})
 
     def preview(self, module: int, char_index: int, delta: int) -> dict:
-        return self._post(
+        return self._post_wait_busy(
             "/api/calib/preview",
             {"module": module, "charIndex": char_index, "delta": delta},
         )
+
+    def preview_batch(self, nudges: list[dict]) -> dict:
+        """Apply several preview nudges and re-home the touched modules in
+        ONE firmware pass (modules are independent, so they home in
+        parallel). `nudges` is a list of {module, charIndex, delta}."""
+        return self._post_wait_busy("/api/calib/preview-batch", {"nudges": nudges})
+
+    def reload(self) -> dict:
+        """Force a reload from NVS, reverting all RAM-only preview nudges.
+
+        Needed because POST /settings only re-applies offsets when a
+        calibration value actually changes, so rolling back with identical
+        settings leaves volatile previews in place.
+        """
+        return self._post_wait_busy("/api/calib/reload", {})
 
     def persist(self, scope, kind: str, value: int, module: int = 0, char_index: int = 0) -> dict:
         payload: dict = {"scope": scope, "kind": kind, "value": value}

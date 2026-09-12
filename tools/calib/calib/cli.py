@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "backend-dependent); omit for auto-search")
     parser.add_argument("--camera-crop-percent", type=float, default=DEFAULT_CROP_PERCENT,
                         help="Crop x% off the top AND bottom of every frame "
-                             "before exposure metering (0..30, default 15)")
+                             "before exposure metering (0..40, default 30)")
     parser.add_argument("--photo-dir", default="./calib-photos")
     parser.add_argument("--phase", type=int, choices=(1, 2, 3, 4), default=4,
                         help="1=read-only proposals, 2=+volatile previews, "

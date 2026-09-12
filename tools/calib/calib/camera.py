@@ -21,8 +21,8 @@ class CameraError(RuntimeError):
 # class attributes) so server code can reference them even when the
 # Camera class itself is monkeypatched out in tests.
 CROP_MIN = 0.0
-CROP_MAX = 30.0
-DEFAULT_CROP_PERCENT = 15.0
+CROP_MAX = 40.0
+DEFAULT_CROP_PERCENT = 30.0
 
 
 class Camera:
@@ -40,6 +40,21 @@ class Camera:
     # Measurement attempts per check_camera() call: one unlucky window no
     # longer fails the whole check.
     CHECK_ATTEMPTS = 3
+    # Sleep between check_camera() attempts (they share one open handle).
+    # Some drivers deliver valid-but-all-black frames for a few seconds
+    # after open (stream starting / AE not converged); spacing the
+    # attempts gives the device total patience instead of burning all
+    # attempts back to back on the black startup window.
+    CHECK_ATTEMPT_GAP_S = 2.0
+    # A stream is "still black" while its mean stays at or below this
+    # (raw, pre-brightness-gain). All-black frames are trivially static,
+    # so warm-up must never settle on them, and the exposure search must
+    # not flip to manual on them (on AE-with-gain drivers manual caps
+    # DARKER than the AE result).
+    BLACK_MEAN_MIN = 8.0
+    BLACK_STREAM_MEAN = 5.0
+    BLACK_STREAM_WAIT_S = 1.5
+    BLACK_STREAM_POLL_S = 0.25
     # Opening can transiently fail right after another handle released
     # the device (Windows MSMF reports "busy" for a short while), so
     # open() retries a few times before declaring the camera gone.
@@ -58,10 +73,19 @@ class Camera:
 
     def __init__(self, index: int = 0, width: int = 1280, height: int = 720,
                  brightness: float = 50.0, exposure: float | None = None,
-                 crop_percent: float = 0.0):
+                 crop_percent: float = 0.0, warmup_s: float | None = None):
         self.index = index
         self.width = width
         self.height = height
+        # Per-instance warm-up budget (seconds), for cameras that hand
+        # back all-black frames for a while after open (start-wait
+        # slider). None = class default (WARMUP_SETTLE_S); out-of-range
+        # or garbage values clamp to 0..30 (never crash a run).
+        try:
+            self.warmup_s = (None if warmup_s is None
+                             else max(0.0, min(30.0, float(warmup_s))))
+        except (TypeError, ValueError):
+            self.warmup_s = None
         # UI slider scale 0..100, 50 = neutral. Applied in software to
         # every frame capture() delivers: the driver property
         # (CAP_PROP_BRIGHTNESS) is unreliable — many backends ignore it
@@ -74,7 +98,7 @@ class Camera:
         # where software gain alone only amplifies noise.
         self.exposure = exposure
         # Symmetric top/bottom crop, percent of frame height removed
-        # from EACH end (0..30, 0 = off). Applied to the raw frame
+        # from EACH end (0..40, 0 = off). Applied to the raw frame
         # BEFORE brightness gain, so auto-exposure metering, the camera
         # check, runs and the live view all see the same cropped image.
         self.crop_percent = crop_percent
@@ -197,9 +221,22 @@ class Camera:
                       "locked": False, "driver_refused": False, "mode": "auto"}
         self.auto_exposure = diag
         mean = self._measure()
+        # A stream can start as valid-but-all-black frames (some drivers
+        # need seconds after open). That is not a lighting problem: give
+        # it a moment, and never flip to manual on a black stream — on
+        # AE-with-gain drivers manual caps DARKER than the AE result.
+        deadline = time.monotonic() + self.BLACK_STREAM_WAIT_S
+        while (mean is not None and mean <= self.BLACK_STREAM_MEAN
+               and time.monotonic() < deadline):
+            time.sleep(self.BLACK_STREAM_POLL_S)
+            mean = self._measure()
         if mean is None:
             return
         diag["mean_before"] = diag["mean_after"] = round(mean, 1)
+        if mean <= self.BLACK_STREAM_MEAN:
+            diag["note"] = ("stream still black after open (wrong camera "
+                            "index, lens cap, or driver still starting?)")
+            return
         if 30.0 <= mean <= 225.0:  # the check's own gates: AE is good enough
             diag["locked"] = True
             return
@@ -260,16 +297,24 @@ class Camera:
 
         Minimum 5 reads (first frames are often dark/partial), then keep
         going while consecutive gray frames disagree by more than
-        DRIFT_OK. Raises CameraError when the device opened but never
-        produced a single frame — without this open() would "succeed"
-        and the failure resurface later as a confusing frame-grab error.
+        DRIFT_OK — but a frame only counts as a picture when it is
+        brighter than BLACK_MEAN_MIN, because all-black frames are
+        trivially static. Raises CameraError when the device opened but
+        never produced a single frame, or produced only all-black
+        frames (some drivers hand those back for seconds after open) —
+        without this open() would "succeed" and the failure resurface
+        later as a confusing frame-grab or check error.
         """
         cap = self.cap
         assert cap is not None
         prev = None
         reads = 0
         good = 0
-        deadline = time.monotonic() + self.WARMUP_SETTLE_S
+        seen_picture = False  # any frame brighter than BLACK_MEAN_MIN
+        # Per-instance override wins (start-wait slider); None = default.
+        settle_s = (self.warmup_s if self.warmup_s is not None
+                    else self.WARMUP_SETTLE_S)
+        deadline = time.monotonic() + settle_s
         while True:
             try:
                 ok, frame = cap.read()
@@ -285,12 +330,25 @@ class Camera:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 except Exception:
                     gray = None
-            if gray is not None and prev is not None and reads > 5:
+            mean = None
+            if gray is not None:
                 try:
-                    settled = float(np.mean(np.abs(gray - prev))) < self.DRIFT_OK
+                    mean = float(np.mean(gray))
                 except Exception:
-                    settled = False
-                if settled:
+                    mean = None
+                if mean is not None and mean > self.BLACK_MEAN_MIN:
+                    seen_picture = True
+            if gray is not None and prev is not None and reads > 5 \
+                    and mean is not None:
+                try:
+                    drift = float(np.mean(np.abs(gray - prev)))
+                except Exception:
+                    drift = None
+                # All-black frames are trivially static: identical black
+                # frames must NOT count as settled, or the check below
+                # samples a stream that has not produced a picture yet.
+                if (drift is not None and drift < self.DRIFT_OK
+                        and mean > self.BLACK_MEAN_MIN):
                     return
             if gray is not None:
                 prev = gray
@@ -298,8 +356,13 @@ class Camera:
                 if good == 0:
                     raise CameraError(
                         "camera opened but returned no frames within "
-                        f"{self.WARMUP_SETTLE_S:.0f}s "
+                        f"{settle_s:.0f}s "
                         "(busy elsewhere or unplugged?)")
+                if not seen_picture:
+                    raise CameraError(
+                        "camera opened but produced only black frames within "
+                        f"{settle_s:.0f}s (wrong camera index, lens cap, no "
+                        "light, or raise the camera start-wait slider)")
                 return
 
     def _open_backend(self) -> "cv2.VideoCapture | None":
@@ -457,6 +520,27 @@ class Camera:
         detail = f": {last_exc}" if last_exc is not None else " (camera busy elsewhere or unplugged?)"
         raise CameraError(f"frame grab failed{detail}")
 
+    def capture_fresh(self, drain: int = 2, retries: int = 3) -> np.ndarray:
+        """Capture after discarding `drain` buffered frames.
+
+        USB drivers buffer frames, so the first grab after a display
+        show can be a frame exposed BEFORE the move — the calibration
+        then scores the previous frame's text (a systematic one-frame
+        lag: every read shows the prior frame). Draining a couple of
+        frames before the real capture keeps the photo in sync with
+        the just-settled frame. Duck-type tolerant: fakes without a
+        raw `cap` just capture().
+        """
+        cap = getattr(self, "cap", None)
+        if cap is None:
+            return self.capture(retries=retries)
+        for _ in range(max(0, drain)):
+            try:
+                cap.read()
+            except Exception:
+                pass
+        return self.capture(retries=retries)
+
     def close(self):
         if self.cap is not None:
             self.cap.release()
@@ -474,13 +558,23 @@ class Camera:
         The first CHECK_SETTLE_DISCARD frames of each batch are discarded
         (the camera may still be converging when the check starts), drift
         is measured on the trailing `stable_frames`, and the measurement
-        retries up to CHECK_ATTEMPTS times before giving up. Returns
-        diagnostics; raises CameraError when unusable.
+        retries up to CHECK_ATTEMPTS times (spaced by
+        CHECK_ATTEMPT_GAP_S) before giving up. Returns diagnostics;
+        raises CameraError when unusable. A large near-black fraction
+        (background margins around a lit display strip) is reported in
+        the `warnings` key, not failed — the brightness gate here and
+        the reader's P0 registration catch a genuinely missing display.
         """
         drifts: list[float] = []
         diag: dict = {}
         problems: list[str] = []
+        warnings: list[str] = []
         for attempt in range(1, self.CHECK_ATTEMPTS + 1):
+            if attempt > 1:
+                # A fresh open can start all-black (drivers take seconds
+                # to stream / converge AE): spacing the attempts covers
+                # that instead of burning them in the first second.
+                time.sleep(self.CHECK_ATTEMPT_GAP_S)
             frames = [self.capture()
                       for _ in range(self.CHECK_SETTLE_DISCARD + stable_frames)]
             frames = frames[self.CHECK_SETTLE_DISCARD:]
@@ -492,6 +586,8 @@ class Camera:
             drifts.append(drift)
             saturated = float(np.mean(grays[-1] >= 250))
             dark = float(np.mean(grays[-1] <= 5))
+            problems = []
+            warnings = []
             diag = {
                 "resolution": [int(frames[-1].shape[1]), int(frames[-1].shape[0])],
                 "brightness": self.brightness,
@@ -506,16 +602,24 @@ class Camera:
                 "auto_exposure": dict(self.auto_exposure) if self.auto_exposure else None,
                 "attempts": attempt,
                 "drift_history": [round(d, 3) for d in drifts],
+                "warnings": warnings,
             }
-            problems = []
             if not 30 <= mean <= 225:
                 problems.append(f"mean brightness {mean:.0f} outside 30..225 (fix lighting/exposure)")
             if drift > self.DRIFT_OK:
                 problems.append(f"frame drift {drift:.2f} too high (camera moving or auto-exposure hunting)")
             if saturated > 0.05:
                 problems.append("over 5% pixels saturated (reduce exposure/light)")
+            # Near-black area is a warning, not a failure: a properly lit
+            # display strip in a wide camera view has black margins that
+            # the vertical crop cannot remove, and a genuinely missing or
+            # unlit display fails the brightness gate here or P0's strict
+            # index-strip registration in the calibrator anyway.
             if dark > 0.5:
-                problems.append("over 50% pixels near black (display out of frame or no light)")
+                warnings.append(f"over 50% pixels near black ({dark:.0%}; "
+                                "display out of frame or no light?)")
+            if not problems:
+                return diag
             if not problems:
                 return diag
         raise CameraError("; ".join(problems) + f" (after {self.CHECK_ATTEMPTS} attempts)")

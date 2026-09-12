@@ -124,7 +124,8 @@ def test_check_discards_settling_frames(fake_cv):
     assert diag["backend"] == "V4L2"
 
 
-def test_check_retries_transient_then_passes(fake_cv):
+def test_check_retries_transient_then_passes(fake_cv, monkeypatch):
+    monkeypatch.setattr(Camera, "CHECK_ATTEMPT_GAP_S", 0.01)
     FakeCapture.values = [150] * 6 + [150, 160] * 7 + [150] * 14
     cam = Camera().open()
     diag = cam.check_camera()
@@ -135,6 +136,7 @@ def test_check_retries_transient_then_passes(fake_cv):
 
 def test_check_raises_after_attempts(fake_cv, monkeypatch):
     monkeypatch.setattr(Camera, "WARMUP_SETTLE_S", 0.05)
+    monkeypatch.setattr(Camera, "CHECK_ATTEMPT_GAP_S", 0.01)
     FakeCapture.values = [150, 160] * 40
     cam = Camera().open()
     with pytest.raises(CameraError, match=r"frame drift.*after 3 attempts"):
@@ -227,8 +229,8 @@ def test_crop_removes_bands_before_metering():
 
 def test_crop_clamps_and_ignores_garbage(fake_cv):
     FakeCapture.values = [150]
-    # Above the 30% max clamps to 30%: 48 - 2*14 = 20.
-    assert Camera(crop_percent=99).open().capture().shape == (20, 64, 3)
+    # Above the 40% max clamps to 40%: 48 - 2*19 = 10.
+    assert Camera(crop_percent=99).open().capture().shape == (10, 64, 3)
     # Negative clamps to 0 (off); garbage is a no-op, never a crash.
     assert Camera(crop_percent=-5).open().capture().shape == (48, 64, 3)
     assert Camera(crop_percent="tall").open().capture().shape == (48, 64, 3)
@@ -405,3 +407,84 @@ def test_auto_exposure_restores_auto_when_search_fails(fake_cv):
     diag = cam.auto_exposure
     assert diag["locked"] is False and diag["mode"] == "auto"
     assert _sets_of(cap, cv2.CAP_PROP_AUTO_EXPOSURE) == [1.0, 3.0]
+
+
+def test_open_raises_on_all_black_stream(fake_cv, monkeypatch):
+    # Some drivers hand back valid-but-all-black frames while starting
+    # up (they are trivially static, so the old warm-up settled on them
+    # instantly and the check then failed with a confusing "mean
+    # brightness 0"). Warm-up must wait for a real picture and fail with
+    # a clear reason; a black stream is not a lighting problem, so the
+    # exposure search must leave the driver's AE untouched.
+    monkeypatch.setattr(Camera, "WARMUP_SETTLE_S", 0.05)
+    monkeypatch.setattr(Camera, "BLACK_STREAM_WAIT_S", 0.01)
+    monkeypatch.setattr(Camera, "BLACK_STREAM_POLL_S", 0.01)
+    FakeCapture.values = [0]
+    with pytest.raises(CameraError, match="only black frames"):
+        Camera().open()
+    cap = FakeCapture.instances[-1]
+    assert _sets_of(cap, cv2.CAP_PROP_AUTO_EXPOSURE) == []
+    assert _sets_of(cap, cv2.CAP_PROP_EXPOSURE) == []
+
+
+def test_warmup_ignores_black_startup_frames(fake_cv, monkeypatch):
+    # A camera that starts all-black then produces the scene: warm-up
+    # waits through the black frames instead of settling on them.
+    monkeypatch.setattr(Camera, "WARMUP_SETTLE_S", 0.3)
+    monkeypatch.setattr(Camera, "BLACK_STREAM_WAIT_S", 0.01)
+    monkeypatch.setattr(Camera, "BLACK_STREAM_POLL_S", 0.01)
+    FakeCapture.values = [0] * 20 + [150] * 100
+    cam = Camera().open()
+    assert float(np.mean(cam.capture())) == 150.0
+
+
+def test_capture_fresh_drains_stale_buffered_frames(fake_cv):
+    # USB drivers buffer frames: the first grab after a show can be a
+    # frame exposed BEFORE the move. capture_fresh discards `drain`
+    # raw frames, then captures normally (crop + gain still applied).
+    FakeCapture.values = [10, 20, 150]
+    cam = Camera(brightness=50).open()
+    assert float(np.mean(cam.capture_fresh(drain=2))) == 150.0
+    # Duck-type tolerant: a camera without a raw `cap` just captures.
+    cam.cap = None
+    with pytest.raises(CameraError, match="camera not open"):
+        cam.capture_fresh()
+
+
+def test_warmup_s_constructor_override(fake_cv, monkeypatch):    # The start-wait slider maps to a per-instance warm-up budget that
+    # replaces the class default: the raise reports the REAL value, and
+    # a longer budget lets a late picture through without monkeypatching.
+    monkeypatch.setattr(Camera, "BLACK_STREAM_WAIT_S", 0.01)
+    monkeypatch.setattr(Camera, "BLACK_STREAM_POLL_S", 0.01)
+    FakeCapture.values = [0]
+    with pytest.raises(CameraError, match=r"within 2s"):
+        Camera(warmup_s=2.0).open()
+    FakeCapture.values = [0] * 30 + [150] * 100
+    cam = Camera(warmup_s=0.3).open()
+    assert float(np.mean(cam.capture())) == 150.0
+    # Out-of-range / garbage values clamp instead of crashing.
+    assert Camera(warmup_s=99).warmup_s == 30.0
+    assert Camera(warmup_s="late").warmup_s is None
+
+
+def test_dark_background_warns_but_does_not_fail(fake_cv, monkeypatch):
+    # A properly lit display in a wide camera view has large black
+    # margins the vertical crop cannot remove: the near-black fraction
+    # is a diagnostics warning, not a fatal gate (the brightness gate
+    # and the reader's P0 registration catch a missing display).
+    class HalfDark(FakeCapture):
+        def read(self):
+            if FakeCapture.fail_reads > 0:
+                FakeCapture.fail_reads -= 1
+                return False, None
+            frame = np.zeros((48, 64, 3), dtype=np.uint8)
+            frame[36:] = 200
+            self.reads += 1
+            return True, frame
+
+    monkeypatch.setattr(cv2, "VideoCapture", HalfDark)
+    cam = Camera().open()
+    diag = cam.check_camera()
+    assert diag["mean_brightness"] == 50.0
+    assert diag["dark_frac"] == 0.75
+    assert any("near black" in w for w in diag["warnings"])

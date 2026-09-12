@@ -43,6 +43,8 @@
         "show": "POST /api/calib/show {frame:string, dwellMs?:int}",
         "frame": "GET /api/calib/frame?frameId=N",
         "preview": "POST /api/calib/preview {module:int, charIndex:int(-1=coarse), delta:int}",
+        "previewBatch": "POST /api/calib/preview-batch {nudges:[{scope?:1..6, module, charIndex, delta},...]} (one home pass; scope>1 forwarded RAM-only over ESP-NOW)",
+        "reload": "POST /api/calib/reload {} (revert volatile previews to NVS)",
         "offsets": "POST /api/calib/offsets {scope:\"local\"|1..6, kind:\"char\"|\"module\"|\"display\", module?, charIndex?, value:int}"
     }
 }
