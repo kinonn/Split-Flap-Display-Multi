@@ -42,12 +42,11 @@ In the browser:
    frames".
 2. **Read test** — type a pattern, show it, and see the reader's exact
    per-module transcription with expected-vs-read chips.
-3. **Run** — pick a mode and a sweep:
-   - Mode: `dry-run` (read + propose), `preview` (volatile nudges),
-     `full` (persist offsets, converge when verified).
-   - Sweep: **Fast / sampled** (default, two staggered passes) or
-     **Exhaustive per-character** (every drum character on every module;
-     slower, more motor wear).
+3. **Run** — pick a mode:
+   - `dry-run`: P0 + one reverse uniform sweep, then the per-module
+     shift/purity table (no writes).
+   - `full`: the whole flow (coarse module offsets -> fine char cells ->
+     verify/acceptance), committing each phase after it verifies.
 4. **Report** — `converged` or `needs-human` with reasons, per-module
    deltas/readings and `report.json` in the run dir.
 
@@ -79,8 +78,10 @@ an all-`unreadable` reading so the phase can escalate instead of crash.
 ## Calibration steps
 
 The run is a deterministic state machine (`calib_vlm/calibrate.py`):
-P0 -> P1 -> P2 -> P3 -> P4 -> acceptance, all under preview/persist
-budgets. Before any write a full `/settings` snapshot is saved; hold is
+P0 -> reverse uniform sweep (P1 coarse) -> P2 fine -> P4 verify -> acceptance.
+Fixes are applied as volatile previews, verified, then committed **per phase**
+(module offsets once P1 confirms them, char cells once P2 confirms). A full
+`/settings` snapshot is saved first (manual rollback via the UI), and hold is
 engaged at the start and released in a `finally`.
 
 ### P0 — registration
@@ -95,76 +96,64 @@ engaged at the start and released in a `finally`.
 Purpose: prove the camera maps left-to-right to module 0..N-1 and that
 the display is readable before anything is tuned.
 
-### P1 — coarse, module level first
+### P1 — coarse: reverse uniform sweep -> module offsets
 
-Shows one uniform frame per test glyph. The set starts from the
-easy-to-read `E H O 0 -` and expands with an even spread across the drum
-until it covers at least **25% of the character set** (10 glyphs on the
-37-char drum, 12 on the 48-char drum; blanks are skipped because a blank
-flap carries no identity information).
+One uniform frame per character (`c * total`), walking the drum **backwards**
+(`%`, `#`, `@`, ... `A`, `space`). Each step is ~a full revolution, so every
+frame passes the magnet and re-homes: every sample is independent. Because all
+modules are commanded the same character, a module that disagrees is either
+misaligned or misread.
 
-Every glyph is read on every module and mismatches are counted per module
-(trusted reads only). Faults are routed by vote:
+Per module, build the histogram of the signed shift
+`s = drumIndex(seen) - drumIndex(commanded)` (trusted reads only; confusable
+pairs excluded):
 
-- **>= 2 wrong glyphs** = a whole-drum fault -> tune the **module
-  offset** (`charIndex = -1`, coarse).
-- **exactly 1 wrong glyph** = a per-character fault -> tune that
-  character's **char cell** (`charIndex = drum index of the glyph`).
-  Tuning a running drum coarse for a single-glyph fault would break the
-  module's other characters. If the needed correction does not fit the
-  firmware's ±32-step char-offset range (a whole-character fix is
-  `stepsPerChar` motor steps, 55 at the default settings), the module
-  escalates `needs-human` instead — a clamped, wrong cell value would
-  leave the display worse than before.
+- **mode >= 80% of >= 24 trusted samples** -> one-shot whole-character module
+  fix `delta = mode * stepsPerChar`.
+- **worse than that** -> the reads are unreliable: re-read the deviant frames
+  once, then escalate `needs-human` (reader/hardware), never "correct" noise.
+- **a few same-sign +/-1 residuals** (a minority of the module's characters)
+  -> a **sub-pitch module trim**: candidates `P/2, P/4, P/8, P/16`
+  (`P = stepsPerChar`), cumulative in the outlier direction, scored on the
+  outlier characters plus spread guard characters; the smallest shift that
+  clears every outlier without breaking a guard wins.
+- **several `half`/`double` cells** -> a module-cell phase search
+  (`+/-1/2/4/8`) centres the seam.
 
-A verify pass re-reads all five glyphs and applies the same split; the
-final all-`H` check escalates any module still wrong or unreadable.
+Files still wrong or unreadable after P1 become P2 work. Whole-character fixes
+and trim winners are committed as module cells before P2 starts.
 
-### P2 — fine, per character (outliers only)
+### P2 — fine: per-character offsets
 
-Staggered sweep in drum order: `frame[i] = drumOrder[(k + i) % N]` for
-`k` advancing in steps of 6.
+Re-reads the flagged characters (identity mismatches and seam cells) at the
+committed P1 base:
 
-- **Fast / sampled (default):** two passes (`k` at offsets 0 and 3).
-- **Exhaustive per-character:** all six residue classes, so every drum
-  character lands on every module at least once.
+- **wrong glyph** (non-confusable) -> one-shot exact char-cell fix
+  `_drum_delta(seen, c) * stepsPerChar`; if the resulting absolute value would
+  exceed the firmware's +/-32 clamp, escalate as hardware.
+- **right glyph, `half`/`double`** -> the reader reports no magnitude, so scan
+  the fine ladder `+/-1/2/4/8` on the char cell (parallel across cells) and
+  keep the first clean value.
 
-For each frame the reader returns a distinct glyph per module, which
-gives three detections:
+Char-cell deltas are chunked to +/-32 within one batch pass, the flagged frames
+are re-read to verify, and the confirmed char cells are committed.
 
-- **Wrong glyph** -> per-char identity tune for that character.
-- **`half` / `double`** -> per-char alignment tune (small-step search).
-- **Stuck**: a module reads the same trusted glyph across consecutive
-  frames that command *different* glyphs (majority of comparisons) ->
-  escalate `needs-human` (a frozen module can never converge).
+### P4 — verify: repeatability + folded border check
 
-Outlier rule: modules fixed at module level in P1 re-verify first —
-each suspect frame on such a module is re-shown uniform and only
-surviving suspects are tuned, so a stale module offset never gets
-baked in twice via char cells.
-
-### P3 — drum-neighbour boundaries (outliers only)
-
-Shows frames alternating adjacent drum neighbours (e.g. `A/B`, `M/N` in
-7-step jumps) to catch binding / double-flap at character boundaries:
-wrong glyph -> per-char identity tune, `double` -> alignment tune.
-Suspects are collected first, then the same P1-fixed-module re-check
-rule as P2 applies before any char cell is touched.
-
-### P4 — repeatability
-
-Shows all-`H` three times. Any module whose character or condition
-differs between repeats is escalated as unstable (lost steps / hall
-drift).
+Repeats a few uniform frames and requires identical reads, then walks a sample
+of **short forward hops** across drum boundaries (every 7th character), checking
+character and condition — the reverse sweep only exercises near-full
+revolutions, so binding/double-flap on small moves needs this pass.
 
 ### Acceptance
 
-1. No persistent escalation may remain.
-2. Show `E`, then `H`; every module must read the commanded glyph with
-   condition `clean` and confidence at or above the configured minimum.
+A forward uniform sweep over the whole drum. Pass only when every module reads
+every non-space character with a clean flap, `space` reads blank, no escalation
+remains, and the repeats were stable. Confusable-only differences never fail
+(the glyphs are indistinguishable on the drum).
 
-`converged` is only possible in `full` mode; `dry-run`/`preview` always
-end `needs-human` (preview may pass acceptance but nothing was persisted).
+`converged` is only possible in `full` mode; `dry-run` only sweeps and reports
+the shift/purity table (no writes).
 
 ### Offset math and tuning primitives
 
@@ -230,12 +219,14 @@ end `needs-human` (preview may pass acceptance but nothing was persisted).
 
 - All shows go to the master; fleet-width frames fan out via ESP-NOW.
   Engage hold on remote controllers out-of-band before starting.
-- `dry-run` reads and records proposals only (no preview, no persist);
-  `preview` applies local volatile nudges; `full` persists.
-- Budgets (fast / exhaustive): frames 300/1200, reader calls 300/1200,
-  previews 200/800, persists 400/1600, sweeps 3/8, plus a 1-hour
-  wall-clock cap and abort checks throughout. Exceeding a budget raises
-  and rolls the display back to the pre-run snapshot.
+- `dry-run` sweeps and prints the shift/purity table only (no writes);
+  `full` applies, verifies and commits each phase.
+- Budgets: frames 300/1200, reader calls 300/1200, previews 200/800,
+  persists 400/1600, sweeps 3/8, plus a 90-minute (`max_seconds`,
+  default 5400) wall-clock cap and abort checks throughout. Exceeding a
+  budget stops the run; already-committed phases are kept (commit per
+  phase), volatile residue is reverted, and `snapshot.json` remains for
+  a manual rollback.
 
 ## Run artifacts
 
@@ -255,7 +246,7 @@ Each run writes to `data/runs/run-NNN/`:
   schema.
 - `calib_vlm/reader.py` — parsing + reconciliation to the known module
   count.
-- `calib_vlm/calibrate.py` — the P0..P4 state machine, offset math,
+- `calib_vlm/calibrate.py` — the sweep/fine/verify state machine, offset math,
   fleet semantics and budgets.
 - `calib_vlm/server.py` — FastAPI app, masked API key (0600), run
   harness, read-test endpoint.

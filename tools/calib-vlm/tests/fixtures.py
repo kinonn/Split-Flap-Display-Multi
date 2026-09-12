@@ -51,6 +51,8 @@ class FakeDisplay:
         # Remote volatile preview residue (fleet preview forwarded by the
         # master over ESP-NOW; RAM-only on the remote group).
         self.res_remote_mod = [[0] * 8 for _ in range(5)]
+        self.res_remote_char = [[[0] * 48 for _ in range(8)]
+                                for _ in range(5)]
         # Per-character mechanical landing error (steps): models a flap that
         # physically sits off its slot. A sub-pitch module trim can pull a
         # boundary flap back; `flap_window` is how far off-centre a landing
@@ -98,6 +100,7 @@ class FakeDisplay:
                     - (self.mod_off[local] + self.res_mod[local]))
         return (self.remote_char[group - 2][local][ci]
                 + self.remote_mech[group - 2][local][ci]
+                + self.res_remote_char[group - 2][local][ci]
                 - self.remote_mod[group - 2][local]
                 - self.res_remote_mod[group - 2][local])
 
@@ -219,6 +222,8 @@ class FakeDisplay:
         self.res_mod = [0] * self.local
         self.res_char = [dict() for _ in range(self.local)]
         self.res_remote_mod = [[0] * 8 for _ in range(5)]
+        self.res_remote_char = [[[0] * 48 for _ in range(8)]
+                                for _ in range(5)]
         return {"type": "success"}
 
     def preview_batch(self, nudges: list[dict]) -> dict:
@@ -236,6 +241,16 @@ class FakeDisplay:
             elif nudge["charIndex"] < 0:
                 self.res_remote_mod[scope - 2][nudge["module"]] \
                     += nudge["delta"]
+            else:
+                row = scope - 2
+                local = nudge["module"]
+                ci = nudge["charIndex"]
+                base = self.remote_char[row][local][ci]
+                live = (base + self.res_remote_char[row][local][ci]
+                        + nudge["delta"])
+                live = max(-CHAR_OFFSET_LIMIT,
+                           min(CHAR_OFFSET_LIMIT, live))
+                self.res_remote_char[row][local][ci] = live - base
         return {"type": "success", "count": len(nudges)}
 
     def persist(self, scope, kind: str, value: int, module: int = 0,
@@ -259,6 +274,7 @@ class FakeDisplay:
                 self.res_remote_mod[row][module] = 0
             elif kind == "char":
                 self.remote_char[row][module][char_index] = value
+                self.res_remote_char[row][module][char_index] = 0
         return {"type": "success"}
 
     def restore(self, snapshot: dict) -> dict:

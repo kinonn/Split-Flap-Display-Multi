@@ -105,11 +105,14 @@ def load_config() -> dict:
     cfg.setdefault("camera_crop_percent", DEFAULT_CROP_PERCENT)
     cfg.setdefault("camera_warmup_s", 5.0)
     cfg.setdefault("mode", "full")
+    if cfg.get("mode") == "preview":  # legacy mode, folded into full
+        cfg["mode"] = "full"
     cfg.setdefault("exhaustive", False)
     cfg.setdefault("annotate", True)
     cfg.setdefault("dwell_ms", 800)
     cfg.setdefault("timeout_s", 60.0)
     cfg.setdefault("min_confidence", 0.6)
+    cfg.setdefault("max_seconds", 5400.0)
     return cfg
 
 
@@ -123,11 +126,11 @@ def save_config(patch: dict) -> dict:
         pass
     for key in ("display_host", "llm_base_url", "llm_model", "camera_index",
                 "camera_brightness", "mode", "exhaustive", "annotate",
-                "dwell_ms", "timeout_s", "min_confidence"):
+                "dwell_ms", "timeout_s", "min_confidence", "max_seconds"):
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
     for key, lo, hi in (("dwell_ms", 0, 10000), ("timeout_s", 1, 3600),
-                        ("min_confidence", 0, 1)):
+                        ("min_confidence", 0, 1), ("max_seconds", 60, 36000)):
         if key in patch and patch[key] not in (None, ""):
             try:
                 value = float(patch[key])
@@ -135,7 +138,8 @@ def save_config(patch: dict) -> dict:
                 raise HTTPException(400, f"{key} must be a number")
             if not math.isfinite(value):
                 raise HTTPException(400, f"{key} must be a number")
-            stored[key] = int(value) if key == "dwell_ms" else value
+            stored[key] = int(value) if key in ("dwell_ms", "max_seconds") \
+                else value
     # Start-wait (warm-up budget for cameras that open black) validates
     # and clamps to 0..30 s.
     if "camera_warmup_s" in patch and patch["camera_warmup_s"] not in (None, ""):
@@ -146,8 +150,8 @@ def save_config(patch: dict) -> dict:
         if not math.isfinite(value):
             raise HTTPException(400, "camera_warmup_s must be a number 0..30")
         stored["camera_warmup_s"] = max(0.0, min(30.0, value))
-    if "mode" in patch and patch["mode"] not in ("dry-run", "preview", "full"):
-        raise HTTPException(400, "mode must be dry-run, preview or full")
+    if "mode" in patch and patch["mode"] not in ("dry-run", "full"):
+        raise HTTPException(400, "mode must be dry-run or full")
     # Exposure is settable AND clearable (null/"" = back to auto-search).
     if "camera_exposure" in patch:
         raw = patch["camera_exposure"]
@@ -355,7 +359,8 @@ class Harness:
                         timeout_s=float(cfg.get("timeout_s", 60.0)),
                         min_confidence=float(cfg.get("min_confidence", 0.6)),
                         exhaustive=bool(cfg.get("exhaustive", False)),
-                        mode=cfg.get("mode", "full"), on_event=self.log)
+                        mode=cfg.get("mode", "full"), on_event=self.log,
+                        max_seconds=float(cfg.get("max_seconds", 5400.0)))
                     with self.lock:
                         self.calibrator = calib
                     self.report = calib.run()
