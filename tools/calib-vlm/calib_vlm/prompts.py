@@ -64,7 +64,7 @@ def _charset_block(charset: str, drum: str) -> str:
     if punct:
         lines.append(f"Punctuation: {' '.join(punct)} "
                      f"(tiny marks — do not mistake for seams or dirt)")
-    lines.append("Lookalikes: I/1, O/0, S/5, Z/2, B/8, G/6, ./'/- — "
+    lines.append("Lookalikes: I/1, O/0, S/5, Z/2/:, B/8, G/6, ./'/- — "
                  "check carefully before choosing.")
     if drum and drum != charset:
         lines.append(f"Drum order: {drum!r}")

@@ -35,17 +35,31 @@ def test_config_persists_run_options(client):
     r = client.post("/api/config", json={"mode": "dry-run", "exhaustive": True,
                                          "min_confidence": 0.75,
                                          "dwell_ms": 500,
-                                         "camera_warmup_s": 12})
+                                         "camera_warmup_s": 12,
+                                         "skip_chars": "AB",
+                                         "skip_enabled": False})
     assert r.status_code == 200
     body = r.json()
     assert body["mode"] == "dry-run"
     assert body["exhaustive"] is True
     assert body["min_confidence"] == pytest.approx(0.75)
     assert body["dwell_ms"] == 500
+    assert body["skip_chars"] == "AB"
+    assert body["skip_enabled"] is False
     # Start-wait clamps to the slider range 0..30 s.
     assert body["camera_warmup_s"] == 12
     assert client.post("/api/config",
                        json={"camera_warmup_s": 99}).json()["camera_warmup_s"] == 30
+
+
+def test_config_skip_defaults_enabled(client):
+    # Fresh config: exclusions enabled with the punctuation defaults.
+    body = client.get("/api/config").json()
+    assert body["skip_enabled"] is True
+    assert body["skip_chars"] == ".'-"
+    # Clearing the list is allowed (skip nothing, still enabled).
+    cleared = client.post("/api/config", json={"skip_chars": ""}).json()
+    assert cleared["skip_chars"] == ""
 
 
 def test_read_test_roundtrip(client, monkeypatch):

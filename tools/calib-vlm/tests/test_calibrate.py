@@ -135,7 +135,7 @@ def test_sweep_is_reverse_drum_order(tmp_path):
     d.show_and_settle = counting
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
-                          mode="full")
+                          mode="full", skip_enabled=False)
     calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
     readings, chars = calib._sweep()
     assert chars == list(reversed(d.drum))
@@ -363,12 +363,70 @@ def test_sweep_covers_every_character_once_in_reverse(tmp_path):
     events = []
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
-                          mode="full", on_event=events.append)
+                          mode="full", on_event=events.append,
+                          skip_enabled=False)
     calib.run()
     shown = [e["text"].split(":", 1)[0] for e in events
              if e["kind"] == "read" and e["text"].startswith("sw_")]
     assert len(shown) == len(d.drum)
     assert len(set(shown)) == len(d.drum)  # no character re-shown
+
+
+def test_skip_list_excludes_default_punctuation(tmp_path):
+    # Default exclusions (".", "'", "-") are never shown: sweep, ladder
+    # frames, P2, P4 and acceptance all skip them. Enabled by default.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    assert calib.skip_enabled is True
+    assert set(calib.skip_chars) == {".", "'", "-"}
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    readings, chars = calib._sweep()
+    assert "." not in chars and "'" not in chars and "-" not in chars
+    assert len(chars) == len(d.drum) - 3
+    assert set(readings[0]) == set(chars)
+
+
+def test_skip_list_disabled_covers_full_drum(tmp_path):
+    # Exclusions off: the sweep covers every drum character again.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", skip_enabled=False)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    _, chars = calib._sweep()
+    assert len(chars) == len(d.drum)
+
+
+def test_skip_list_custom_and_ladder_filler_avoids_skipped(tmp_path):
+    # A user list replaces the default; ladder background fillers and
+    # guard fallbacks never use skipped glyphs either.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", skip_chars="AB")
+    assert set(calib.skip_chars) == {"A", "B"}
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    _, chars = calib._sweep()
+    assert "A" not in chars and "B" not in chars
+    plans = [{"module": 0, "group": 1, "local": 0, "char_index": -1,
+              "steps": [4], "absolute": True, "cap": d.spc,
+              "targets": ["E"], "guards": ["H"],
+              "state": 0, "best": 0, "best_score": 0, "label": "test"}]
+    calib._cell_ladder(plans)
+    shown = [e["frame"] for e in calib.frames
+             if e["tag"].startswith("ladder_")]
+    assert shown
+    for frame in shown:
+        # Module 3 is background in every ladder frame.
+        assert frame[3] not in {"A", "B"}
 
 
 
@@ -470,6 +528,213 @@ def test_cell_ladder_rejects_non_improving_nudge(tmp_path):
     assert plans[0]["best"] == 0
     assert not d.persists
     assert d.condition(0, "E") == "half"
+
+
+def test_ladder_filler_rotates_background_slots(tmp_path):
+    # Regression (run-003 M0): a constant "E" filler stalls a misaligned
+    # background module — target "E" physically showing "F" resolves to
+    # identical step positions, the firmware commands zero steps, and
+    # every re-read scores the same stale flap (30/30 "E"-want/"F"-saw).
+    # Background slots must change glyph on every consecutive ladder
+    # frame, on every module, so each show physically moves the drum.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    plans = [{"module": 0, "group": 1, "local": 0, "char_index": -1,
+              "steps": [4, -4], "absolute": True, "cap": d.spc,
+              "targets": ["E"], "guards": ["A", "H"],
+              "state": 0, "best": 0, "best_score": 0, "label": "test"}]
+    calib._cell_ladder(plans)
+    shown = [e["frame"] for e in calib.frames
+             if e["tag"].startswith("ladder_")]
+    assert len(shown) >= 2
+    for prev, cur in zip(shown, shown[1:]):
+        # Module 3 is background in every frame: must always move.
+        assert prev[3] != cur[3], f"background stalled: {prev!r} -> {cur!r}"
+
+
+def test_ladder_skips_reshow_when_nothing_moved(tmp_path):
+    # A plan cell whose state did not change keeps its cached score:
+    # no new frames/VLM calls are burned re-reading it.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    plans = [{"module": 0, "group": 1, "local": 0, "char_index": -1,
+              "steps": [9999], "absolute": True, "cap": d.spc,
+              "targets": ["E"], "guards": ["A"],
+              "state": 0, "best": 0, "best_score": 0, "label": "test"}]
+    # 9999 exceeds the cap, so the candidate collapses to best (no move).
+    before = calib.frames_used
+    calib._cell_ladder(plans)
+    ladder_frames = [e for e in calib.frames
+                     if e["tag"].startswith("ladder_")]
+    # Baseline only (1 target + 1 guard); the capped step adds nothing.
+    assert len(ladder_frames) == 2, [e["tag"] for e in ladder_frames]
+    assert calib.frames_used == before + 2
+
+
+def test_majority_residual_routes_to_module_fix(tmp_path):
+    # run-005 regression: a module whose reads are +1 on ~70% of the drum
+    # misses the 80% purity gate and was escalated as "unreliable"; every
+    # residual then dead-ended in P2 ("identity fix does not fit a char
+    # cell" — a whole character can never fit the ±32 clamp). A >=50%
+    # plurality single-char residual is fixed on the module cell instead.
+    d = FakeDisplay(total=4, charset=48)
+    d.seed_module_error(0, d.spc)  # whole drum one character ahead
+    # Cancel a minority (~30%) of characters so purity lands ~70%.
+    minority = list(d.drum[1:15])
+    for ch in minority:
+        d.seed_char_error(0, d.drum.index(ch), -d.spc)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append,
+                          skip_enabled=False)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_coarse()
+    # Module cell committed back to zero (fault removed), no unreliable
+    # escalation, and the majority route is named in the log.
+    assert d.mod_off[0] == 0, d.mod_off
+    assert not any("unreliable reads" in e["text"] for e in events)
+    assert any("majority shift +1" in e["text"] for e in events)
+
+
+def test_scattered_residuals_still_escalate(tmp_path):
+    # Without a majority residual, below-purity reads remain reader noise:
+    # escalate, never "fix" from a weak plurality.
+    d = FakeDisplay(total=4, charset=48)
+    for ch in list(d.drum[1:15]):
+        d.seed_char_error(0, d.drum.index(ch), d.spc)
+    for ch in list(d.drum[15:24]):
+        d.seed_char_error(0, d.drum.index(ch), -d.spc)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append,
+                          skip_enabled=False)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_coarse()
+    assert any("unreliable reads" in e["text"] for e in events)
+    assert not any("majority shift" in e["text"] for e in events)
+    assert d.mod_off[0] == 0  # nothing applied
+
+
+def test_blank_read_against_nonblank_command_is_junk(tmp_path):
+    # run-005: the ':' frame read blank fleet-wide, poisoning every module's
+    # shift histogram with a phantom ~+10 residual and dragging purities
+    # below the trust gate. A blank read against a non-blank command is a
+    # failed sampling frame -> excluded (None), not a residual.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    from calib_vlm.reader import ModuleReading
+    blank_against_colon = ModuleReading(0, " ", "blank", 0.9, "vlm", ":")
+    assert calib._shift(blank_against_colon, ":") is None
+    blank_against_blank = ModuleReading(0, " ", "clean", 0.9, "vlm", " ")
+    assert calib._shift(blank_against_blank, " ") == 0
+
+
+def test_single_flap_arc_probes_proportionate_candidate_no_fix(tmp_path):
+    # run-005 hypothesis, arc of FULL-flap-clean errors (reads the next
+    # flap cleanly): the module enters the trim ladder and the
+    # proportionate candidate round(arc/48 * stepsPerChar) IS probed, but
+    # no sub-pitch shift can centre a full-flap fault without breaking the
+    # correct majority — so nothing is committed and P2 flags the arc.
+    d = FakeDisplay(total=4, charset=48)
+    d.flap_window = int(round(d.spc * 0.4))
+    arc = list(d.drum[1:14])  # 13 chars = 27% of the drum
+    for ch in arc:
+        d.seed_char_error(0, d.drum.index(ch), d.spc)  # full flap, clean
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append,
+                          skip_enabled=False)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_coarse()
+    assert any("single-flap arc" in e["text"] for e in events)
+    assert not any("unreliable reads" in e["text"] for e in events)
+    # The proportionate candidate (round(13/48 * 43) = 12) was probed.
+    assert any(delta == 12 for _, ci, delta in d.previews if ci < 0)
+    # ...but rejected by the score: nothing committed, no persists.
+    assert d.mod_off[0] == 0
+    assert not d.persists
+
+
+def test_single_flap_arc_boundary_flap_commits_trim(tmp_path):
+    # When the arc's landings sit part-way past the flap boundary, the
+    # proportionate candidate (or the ladder's fine search) CAN pull them
+    # back into the readable window without breaking the guards — then
+    # and only then is the module offset committed.
+    d = FakeDisplay(total=4, charset=48)
+    d.flap_window = int(round(d.spc * 0.4))
+    arc = list(d.drum[1:14])  # 13 chars = 27% of the drum
+    for ch in arc:
+        # +0.72 flap: reads the NEXT character; a proportional shift can
+        # pull these back inside the readable window.
+        d.seed_char_error(0, d.drum.index(ch), int(round(d.spc * 0.72)))
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append,
+                          skip_enabled=False)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_coarse()
+    assert any("single-flap arc" in e["text"] for e in events)
+    # The ladder found a shift that cleans the arc without breaking the
+    # guards: committed on the module cell.
+    assert d.mod_off[0] != 0, d.mod_off
+    assert d.persists
+
+
+def test_ladder_exhausted_guards_rotate_and_rescore(tmp_path):
+    # A plan with fewer guards than guards_at has exhausted slots that
+    # rotate with the frame counter: the drum physically moves there, so
+    # a non-nudged plan must be scored FRESH each evaluate (the glyph
+    # sequence changed), never from the cached score.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    plans = [
+        {"module": 0, "group": 1, "local": 0, "char_index": -1,
+         "steps": [4, -4], "absolute": True, "cap": d.spc,
+         "targets": ["E"], "guards": ["A", "H", "M"],
+         "state": 0, "best": 0, "best_score": 0, "label": "mover"},
+        {"module": 1, "group": 1, "local": 1, "char_index": -1,
+         "steps": [0], "absolute": True, "cap": d.spc,
+         "targets": ["E"], "guards": ["A", "H"],
+         "state": 0, "best": 0, "best_score": 0, "label": "static"},
+    ]
+    calib._cell_ladder(plans)
+    g2 = [e["frame"] for e in calib.frames if e["tag"] == "ladder_g2"]
+    # Baseline + 2 steps, one g2 frame each.
+    assert len(g2) == 3, [e["tag"] for e in calib.frames]
+    # Module 1's exhausted slot (guard index 2) must rotate between
+    # evaluates instead of pinning guards[0].
+    assert g2[0][1] != g2[1][1], g2
+    assert g2[1][1] != g2[2][1], g2
 
 
 def test_report_written_to_disk(tmp_path):

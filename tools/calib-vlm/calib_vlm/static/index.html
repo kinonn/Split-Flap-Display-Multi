@@ -159,6 +159,16 @@
     <label style="display:inline; font-size:.85rem;"><input id="ph_accept" type="checkbox" checked style="width:auto;" /> Acceptance — forward sweep</label>
   </div>
   <p class="hint">P2 without P1 first runs a read-only sweep to find suspect characters (no commits).</p>
+  <div>
+    <label class="switch"><input id="skip_enabled" type="checkbox" checked />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Skip characters</span>
+    <span class="hint">— excluded from sweep, ladder, P2, P4 and acceptance</span>
+  </div>
+  <div>
+    <label>Characters to skip (default <code>.'-</code>)</label>
+    <input id="skip_chars" placeholder=".'-" />
+  </div>
   <div class="row">
     <div><label>Dwell ms (settle wait per frame)</label>
       <input id="dwell_ms" type="number" min="0" max="10000" /></div>
@@ -236,6 +246,8 @@ async function load() {
   $("run_mode").value = c.mode || "full";
   $("sweep").value = c.exhaustive ? "exhaustive" : "fast";
   $("annotate").checked = c.annotate !== false;
+  $("skip_enabled").checked = c.skip_enabled !== false;
+  $("skip_chars").value = c.skip_chars ?? ".'-";
   $("dwell_ms").value = c.dwell_ms ?? 800;
   $("min_confidence").value = c.min_confidence ?? 0.6;
   $("camera_brightness").value = c.camera_brightness ?? 50;
@@ -276,6 +288,8 @@ function cfgPayload() {
     llm_base_url: $("llm_base_url").value.trim(),
     llm_model: $("llm_model").value.trim(),
     annotate: $("annotate").checked,
+    skip_enabled: $("skip_enabled").checked,
+    skip_chars: $("skip_chars").value,
     mode: $("run_mode").value,
     exhaustive: $("sweep").value === "exhaustive",
     dwell_ms: Number($("dwell_ms").value || 800),
