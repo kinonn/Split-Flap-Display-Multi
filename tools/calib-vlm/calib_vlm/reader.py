@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 
 import cv2
 
-from .prompts import (READER_SYSTEM, REPORT_READING_TOOL, correction_text,
-                      reader_user_text)
+from .prompts import (REPORT_READING_TOOL, correction_text,
+                      reader_system_text, reader_user_text)
 from .vlm import VLMError, image_part, text_part
 
 CONDITIONS = ("clean", "half", "double", "blank", "unreadable")
@@ -158,7 +158,8 @@ class VlmReader:
                  image_part(jpeg)]
         if extra:
             parts.append(text_part(extra))
-        return [{"role": "system", "content": READER_SYSTEM},
+        return [{"role": "system",
+                 "content": reader_system_text(total, charset, drum)},
                 {"role": "user", "content": parts}]
 
     def _extract(self, reply: dict) -> list[tuple[str, str, float]] | None:

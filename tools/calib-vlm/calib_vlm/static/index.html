@@ -151,6 +151,14 @@
     <option value="fast">Fast / sampled — 2 staggered passes (default)</option>
     <option value="exhaustive">Exhaustive per-character — every drum character on every module</option>
   </select>
+  <label>Phases (P0 registration always runs first)</label>
+  <div>
+    <label style="display:inline; font-size:.85rem;"><input id="ph_p1" type="checkbox" checked style="width:auto;" /> P1 coarse — module offsets</label>
+    <label style="display:inline; font-size:.85rem;"><input id="ph_p2" type="checkbox" checked style="width:auto;" /> P2 fine — per-character offsets</label>
+    <label style="display:inline; font-size:.85rem;"><input id="ph_p4" type="checkbox" checked style="width:auto;" /> P4 verify — repeatability + borders</label>
+    <label style="display:inline; font-size:.85rem;"><input id="ph_accept" type="checkbox" checked style="width:auto;" /> Acceptance — forward sweep</label>
+  </div>
+  <p class="hint">P2 without P1 first runs a read-only sweep to find suspect characters (no commits).</p>
   <div class="row">
     <div><label>Dwell ms (settle wait per frame)</label>
       <input id="dwell_ms" type="number" min="0" max="10000" /></div>
@@ -249,6 +257,14 @@ async function load() {
 $("preset").onchange = () => {
   if ($("preset").value !== "custom") $("llm_base_url").value = $("preset").value;
 };
+function selectedPhases() {
+  const out = [];
+  if ($("ph_p1").checked) out.push("p1");
+  if ($("ph_p2").checked) out.push("p2");
+  if ($("ph_p4").checked) out.push("p4");
+  if ($("ph_accept").checked) out.push("acceptance");
+  return out.length ? out : ["p1", "p2", "p4", "acceptance"];
+}
 function cfgPayload() {
   return {
     display_host: $("display_host").value.trim(),
@@ -358,7 +374,9 @@ async function start() {
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(cfgPayload())});
-    await api("/api/run/start", {method: "POST"});
+    await api("/api/run/start", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({phases: selectedPhases()})});
     $("runmsg").textContent = "Running…";
   } catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
 }
@@ -416,10 +434,19 @@ function logFilter() {
           error: $("f_error").checked, phase: $("f_phase").checked,
           run: true, ok: true, done: true};
 }
+function logAtBottom() {
+  // True when the user is already viewing the tail (with a small
+  // tolerance): new events may then keep the view pinned to the bottom.
+  // When the user has scrolled up, this is false and the scroll position
+  // is left alone so reading history isn't yanked away.
+  const log = $("log");
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+}
 function rerenderLog() {
+  const stick = logAtBottom();
   $("log").innerHTML = "";
   for (const e of lastEvents.slice(-2000)) appendLogEvent(e);
-  $("log").scrollTop = $("log").scrollHeight;
+  if (stick) $("log").scrollTop = $("log").scrollHeight;
 }
 function appendLogEvent(e) {
   const f = logFilter();
@@ -549,6 +576,7 @@ async function poll() {
     }
     try {
       let off = seenEvents;
+      const stick = logAtBottom();
       for (;;) {
         const page = await api("/api/run/events?offset=" + off + "&limit=500");
         if (page.offset !== off) break;
@@ -558,9 +586,9 @@ async function poll() {
         if (off >= page.total || !page.events.length) break;
       }
       seenEvents = off;
+      if (stick) $("log").scrollTop = $("log").scrollHeight;
     } catch (e) { /* keep tail already rendered */ }
     lastEvents = lastEvents.slice(-2000);
-    $("log").scrollTop = $("log").scrollHeight;
     $("logcount").textContent = `(${seenEvents} events)`;
     const g = $("gallery"); g.innerHTML = "";
     for (const p of s.photos.slice(-8)) {
@@ -570,7 +598,9 @@ async function poll() {
       g.appendChild(img);
     }
     if (s.report) $("report").textContent = JSON.stringify(s.report, null, 2);
+    const phases = (s.phases && s.phases.length) ? s.phases.join("+") : "?";
     $("runmsg").textContent = `status: ${s.status} · mode: ${s.mode || "?"} ` +
+      `· phases: ${phases} ` +
       `(frames ${s.frames ?? 0}, reader calls ${s.vlm_calls ?? 0})`;
     $("startBtn").disabled = s.status === "running" || s.status === "aborting";
     if (prevStatus === "running" && s.status === "failed") errorSound();

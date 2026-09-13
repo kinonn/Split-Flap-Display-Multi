@@ -7,10 +7,14 @@ from calib_vlm.calibrate import VlmCalibrator
 from tests.fixtures import FakeCamera, FakeDisplay, SimReader
 
 
-def run_calib(display, tmp_path, mode="full", exhaustive=False):
+def run_calib(display, tmp_path, mode="full", exhaustive=False, phases=None):
+    kwargs = {}
+    if phases is not None:
+        kwargs["phases"] = phases
     calib = VlmCalibrator(display, FakeCamera(), SimReader(display),
                           photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
-                          min_confidence=0.5, exhaustive=exhaustive, mode=mode)
+                          min_confidence=0.5, exhaustive=exhaustive, mode=mode,
+                          **kwargs)
     return calib, calib.run()
 
 
@@ -602,3 +606,57 @@ def test_report_has_timing_context_and_traceback(tmp_path):
     assert any("P1 coarse" in p for p in phases)
     assert all(set(p) >= {"phase", "seconds", "frames", "vlmCalls",
                           "previews", "persists"} for p in report["timing"]["phases"])
+
+
+def test_phases_reject_unknown_names(tmp_path):
+    d = FakeDisplay(total=4)
+    try:
+        VlmCalibrator(d, FakeCamera(), SimReader(d),
+                      photo_dir=str(tmp_path), phases=["p1", "nope"])
+    except ValueError as exc:
+        assert "unknown phases" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unknown phase")
+
+
+def test_p1_only_skips_later_phases(tmp_path):
+    # P1-only: module offsets commit, P2/P4/acceptance never run, and the
+    # report marks them skipped with a subset verdict.
+    d = FakeDisplay(total=4)
+    d.seed_module_error(1, -d.spc)  # module 1 shows the previous char
+    calib, report = run_calib(d, tmp_path, phases=["p1"])
+    assert report["phases"] == ["p1"]
+    assert report["skipped"] == ["p2", "p4", "acceptance"]
+    assert d.mod_off[1] == 0
+    assert d.persists
+    assert report["result"] == "needs-human"
+    assert "acceptance skipped" in report["reason"]
+    assert "P2 fine" not in str(report["timing"]["phases"])
+    assert "acceptance" not in str(report["timing"]["phases"]).lower() or \
+        "acceptance skipped" in report["reason"]
+
+
+def test_p2_without_p1_derives_flagged_readonly(tmp_path):
+    # P2 without P1: a read-only sweep derives the flagged chars (no
+    # module commits), then P2 tunes the per-char cell.
+    d = FakeDisplay(total=4)
+    ci = d.drum.index("O")
+    d.seed_char_error(2, ci, -d.spc)  # only 'O' is one char behind on m2
+    calib, report = run_calib(d, tmp_path, phases=["p2"])
+    assert report["phases"] == ["p2"]
+    assert report["skipped"] == ["p1", "p4", "acceptance"]
+    assert d.char_off[2].get(ci, 0) == 0
+    # No module-cell writes: the read-only sweep must not commit.
+    assert all(x["charIndex"] >= 0 for x in report["deltas"])
+    assert d.mod_off == [0] * d.local
+
+
+def test_p4_only_is_readonly(tmp_path):
+    # P4/acceptance-only: no previews or persists, verdict escalates.
+    d = FakeDisplay(total=4)
+    calib, report = run_calib(d, tmp_path, phases=["p4"])
+    assert report["phases"] == ["p4"]
+    assert report["skipped"] == ["p1", "p2", "acceptance"]
+    assert d.previews == []
+    assert d.persists == []
+    assert report["result"] == "needs-human"

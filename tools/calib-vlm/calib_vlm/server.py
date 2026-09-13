@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 import threading
 import time
 import uuid
@@ -39,6 +38,29 @@ _camera_lock = threading.Lock()
 _CHECK_LOCK_WAIT_S = 2.5
 _RUN_LOCK_WAIT_S = 30.0
 
+# Independently selectable calibration phases (P0 registration always
+# runs as a read-only safety gate and is not selectable). Per-run only:
+# POST /api/run/start accepts {"phases": [...]}, defaulting to all.
+RUN_PHASES = ("p1", "p2", "p4", "acceptance")
+
+
+def normalize_phases(raw) -> list[str]:
+    """Validate a per-run phase selection; default to all phases."""
+    if raw in (None, ""):
+        return list(RUN_PHASES)
+    if isinstance(raw, str):
+        raw = [raw]
+    try:
+        items = [str(p).strip().lower() for p in list(raw)]
+    except TypeError:
+        raise ValueError("phases must be a list of phase names")
+    unknown = [p for p in items if p not in RUN_PHASES]
+    if unknown:
+        raise ValueError(f"unknown phases: {', '.join(unknown)} "
+                         f"(choose from {', '.join(RUN_PHASES)})")
+    # De-duplicate, keep canonical order.
+    return [p for p in RUN_PHASES if p in items] or list(RUN_PHASES)
+
 
 def data_dir() -> str:
     return os.environ.get("CALIB_VLM_DATA", os.path.join(os.getcwd(), "data"))
@@ -65,22 +87,6 @@ def vlm_session_id(cfg: dict) -> str:
     """Stable OpenCode session id derived from the API key (prompt cache)."""
     scope = str(cfg.get("llm_api_key") or cfg.get("llm_base_url") or "local")
     return uuid.uuid5(uuid.NAMESPACE_URL, "splitflap-calib-vlm:" + scope).hex
-
-
-def clear_previous_runs(runs_dir: str) -> int:
-    removed = 0
-    if os.path.isdir(runs_dir):
-        for name in os.listdir(runs_dir):
-            path = os.path.join(runs_dir, name)
-            try:
-                if os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=True)
-                else:
-                    os.remove(path)
-                removed += 1
-            except OSError:
-                pass
-    return removed
 
 
 def load_config() -> dict:
@@ -255,6 +261,7 @@ class Harness:
         self.photos: list[str] = []
         self.status = "idle"
         self.mode = "full"
+        self.phases: list[str] = list(RUN_PHASES)
         self.report: dict | None = None
         self.run_dir = ""
         self.calibrator: VlmCalibrator | None = None
@@ -284,6 +291,7 @@ class Harness:
             return {"status": self.status, "events": self.events[-200:],
                     "photos": self.photos[-24:], "report": self.report,
                     "run_dir": self.run_dir, "mode": self.mode,
+                    "phases": list(self.phases),
                     "run_seq": self.run_seq,
                     "event_count": len(self.events),
                     "frames": self.calibrator.frames_used
@@ -300,24 +308,26 @@ class Harness:
                     "events": self.events[offset:offset + limit]}
 
     def start(self, cfg: dict) -> dict:
+        try:
+            phases = normalize_phases(cfg.get("phases"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         with self.lock:
             if self.status == "running":
                 raise HTTPException(409, "run already in progress")
             self.status = "running"
             self.mode = cfg.get("mode", "full")
+            self.phases = phases
             self.events = []
             self.photos = []
             self.run_seq += 1
             self.report = None
         runs_dir = os.path.join(data_dir(), "runs")
-        cleared = clear_previous_runs(runs_dir)
+        # Previous runs are kept on disk (run-001, run-002, ...); only the
+        # UI screen resets via run_seq. alloc_run_dir is collision-proof.
         run_dir = alloc_run_dir(runs_dir)
         with self.lock:
             self.run_dir = run_dir
-        if cleared:
-            self.log({"t": "", "kind": "run",
-                      "text": f"cleared {cleared} previous run(s) "
-                              "(old logs, photos, reports)", "photo": None})
 
         def _run():
             camera: Camera | None = None
@@ -372,6 +382,7 @@ class Harness:
                         exhaustive=bool(cfg.get("exhaustive", False)),
                         mode=cfg.get("mode", "full"), on_event=self.log,
                         max_seconds=float(cfg.get("max_seconds", 5400.0)),
+                        phases=phases,
                         run_context={
                             "display_host": cfg.get("display_host"),
                             "llm_base_url": cfg.get("llm_base_url"),
@@ -644,12 +655,20 @@ def read_test_photo():
 
 
 @app.post("/api/run/start")
-def run_start():
+def run_start(body: dict | None = None):
     cfg = load_config()
     for key in ("display_host", "llm_base_url", "llm_model"):
         if not cfg.get(key):
             raise HTTPException(400, f"configure {key} first")
     _reader_from_config(cfg)  # validates provider/key like the read test
+    # Phase selection is per-run only (never persisted in config.json):
+    # {"phases": ["p1", "p2"]} runs just those phases; absent = full chain.
+    if body and body.get("phases") not in (None, ""):
+        try:
+            phases = normalize_phases(body.get("phases"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        cfg = {**cfg, "phases": phases}
     return harness.start(cfg)
 
 

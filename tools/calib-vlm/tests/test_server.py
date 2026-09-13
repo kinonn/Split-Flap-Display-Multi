@@ -69,6 +69,41 @@ def test_run_start_requires_provider_config(client):
     assert r.status_code == 400
 
 
+def test_run_start_phases_subset_and_invalid(client, monkeypatch):
+    # Phase selection is per-run: valid subsets start, unknown names 400,
+    # and the selection is exposed via /api/run/state.
+    monkeypatch.setattr(server, "_reader_from_config", lambda cfg: None)
+    started = {}
+
+    def fake_start(cfg):
+        started.update(cfg)
+        return {"status": "running", "run_dir": "x"}
+
+    monkeypatch.setattr(server.harness, "start", fake_start)
+    r = client.post("/api/run/start", json={"phases": ["p1", "p4"]})
+    assert r.status_code == 200, r.text
+    assert started["phases"] == ["p1", "p4"]
+    r = client.post("/api/run/start", json={"phases": ["sideways"]})
+    assert r.status_code == 400
+    # Empty body = full chain default.
+    started.clear()
+    r = client.post("/api/run/start")
+    assert r.status_code == 200, r.text
+    assert "phases" not in started
+
+
+def test_normalize_phases_defaults_and_rejects():
+    assert server.normalize_phases(None) == ["p1", "p2", "p4", "acceptance"]
+    assert server.normalize_phases([]) == ["p1", "p2", "p4", "acceptance"]
+    assert server.normalize_phases(["p4", "p1", "p1"]) == ["p1", "p4"]
+    try:
+        server.normalize_phases(["p1", "nope"])
+    except ValueError as exc:
+        assert "unknown phases" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unknown phase")
+
+
 def test_event_log_pages_without_truncation(client):
     # Regression: the UI only ever saw the last 100 events (state slice)
     # of a 500-capped buffer while events.jsonl kept everything. The

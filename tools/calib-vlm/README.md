@@ -42,11 +42,16 @@ In the browser:
    frames".
 2. **Read test** — type a pattern, show it, and see the reader's exact
    per-module transcription with expected-vs-read chips.
-3. **Run** — pick a mode:
+3. **Run** — pick a mode plus the phases to run (P1, P2, P4,
+   acceptance checkboxes; P0 registration always runs first):
    - `dry-run`: P0 + one reverse uniform sweep, then the per-module
      shift/purity table (no writes).
-   - `full`: the whole flow (coarse module offsets -> fine char cells ->
-     verify/acceptance), committing each phase after it verifies.
+   - `full`: the selected phases in fixed order (coarse module offsets ->
+     fine char cells -> verify/acceptance), committing each phase after
+     it verifies. P2 without P1 first runs a read-only sweep to find
+     suspect characters (no commits). Skipping acceptance can never
+     report `converged` — subset runs end `needs-human` for review.
+     Phase selection applies to `full` mode; `dry-run` always sweeps only.
 4. **Report** — `converged` or `needs-human` with reasons, per-module
    deltas/readings and `report.json` in the run dir.
 
