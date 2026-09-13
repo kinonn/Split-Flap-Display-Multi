@@ -23,7 +23,8 @@
   #log { height: 260px; overflow-y: auto; background: #0d0d0d; border-radius: 6px;
          padding: 8px; font-family: monospace; font-size: .8rem; }
   #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
-  #log .phase { color: #82b1ff; }
+  #log .phase { color: #82b1ff; } #log .api { color: #b0bec5; }
+  #log .vlm { color: #ce93d8; }
   #gallery { max-height: 320px; overflow-y: auto; background: #0d0d0d;
              border-radius: 6px; padding: 6px; }
   #gallery img { max-width: 220px; margin: 4px; border-radius: 6px; border: 1px solid #444;
@@ -161,10 +162,25 @@
     <button class="stop" onclick="abort()">Abort</button>
     <button class="mid" onclick="restore()">Restore pre-run snapshot</button>
   </div>
+  <div>
+    <label class="switch"><input id="sound_toggle" type="checkbox" checked />
+      <span class="slider"></span></label>
+    <span style="margin-left:8px;">Sound cues</span>
+    <span class="hint">— tone per phase, chime on success, buzz on failure, beep on low-confidence reads</span>
+  </div>
   <p class="hint" id="runmsg"></p>
 </div>
 
-<div class="card"><h2>Log</h2><div id="log"></div></div>
+<div class="card"><h2>Log <span class="hint" id="logcount"></span></h2>
+<div style="margin-bottom:6px;">
+  <label style="display:inline; font-size:.8rem;"><input type="checkbox" id="f_read" checked style="width:auto;" /> read</label>
+  <label style="display:inline; font-size:.8rem;"><input type="checkbox" id="f_api" checked style="width:auto;" /> api</label>
+  <label style="display:inline; font-size:.8rem;"><input type="checkbox" id="f_vlm" checked style="width:auto;" /> vlm</label>
+  <label style="display:inline; font-size:.8rem;"><input type="checkbox" id="f_tune" checked style="width:auto;" /> tune</label>
+  <label style="display:inline; font-size:.8rem;"><input type="checkbox" id="f_error" checked style="width:auto;" /> error</label>
+  <label style="display:inline; font-size:.8rem;"><input type="checkbox" id="f_phase" checked style="width:auto;" /> phase</label>
+</div>
+<div id="log"></div></div>
 <div class="card"><h2>Photos (click to inspect)</h2><div id="gallery"></div></div>
 <div class="card" id="detailCard" style="display:none">
   <h2>Inspect: <span id="detailTitle"></span></h2>
@@ -337,6 +353,7 @@ async function readTest() {
 }
 async function start() {
   try {
+    ensureAudio();
     setLive(false);
     await api("/api/config", {method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -393,6 +410,30 @@ async function restore() {
 let seenEvents = 0;
 let lastEvents = [];
 let lastRunSeq = null;
+function logFilter() {
+  return {read: $("f_read").checked, api: $("f_api").checked,
+          vlm: $("f_vlm").checked, tune: $("f_tune").checked,
+          error: $("f_error").checked, phase: $("f_phase").checked,
+          run: true, ok: true, done: true};
+}
+function rerenderLog() {
+  $("log").innerHTML = "";
+  for (const e of lastEvents.slice(-2000)) appendLogEvent(e);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function appendLogEvent(e) {
+  const f = logFilter();
+  if (f[e.kind] === false) return;
+  const log = $("log");
+  const div = document.createElement("div");
+  if (e.kind === "error") div.className = "err";
+  else if (e.kind === "ok" || e.kind === "tune" || e.kind === "done") div.className = "ok";
+  else if (e.kind === "phase" || e.kind === "run") div.className = "phase";
+  else if (e.kind === "api") div.className = "api";
+  else if (e.kind === "vlm") div.className = "vlm";
+  div.textContent = `[${e.t}${e.elapsed != null ? ` +${e.elapsed}s` : ""}] ${e.kind}: ${e.text}`;
+  log.appendChild(div);
+}
 function detailFor(photo) {
   for (let i = lastEvents.length - 1; i >= 0; i--) {
     const e = lastEvents[i];
@@ -417,6 +458,75 @@ function inspect(photo) {
   renderChips($("detailChips"), d);
   $("detailWarnings").textContent = (d.warnings || []).join("; ");
 }
+let soundOn = true;
+try { soundOn = (localStorage.getItem("calibVlmSound") || "1") !== "0"; } catch (e) {}
+let audioCtx = null;
+let prevStatus = null;
+function ensureAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (e) {}
+  return audioCtx;
+}
+function tone(freq, durMs, type, delayMs, gain) {
+  if (!soundOn) return;
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  try {
+    const t = ctx.currentTime + (delayMs || 0) / 1000;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type || "sine";
+    osc.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain || 0.2, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + durMs / 1000);
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start(t); osc.stop(t + durMs / 1000 + 0.05);
+  } catch (e) {}
+}
+function phaseTone(text) {
+  const t = (text || "").toLowerCase();
+  let f = 660;
+  if (t.includes("p0")) f = 523;
+  else if (t.includes("p1 coarse") || t.includes("reverse uniform sweep")) f = 587;
+  else if (t.includes("sub-pitch")) f = 659;
+  else if (t.includes("module phase")) f = 698;
+  else if (t.includes("whole-character")) f = 784;
+  else if (t.includes("p2 fine")) f = 880;
+  else if (t.includes("p4")) f = 988;
+  else if (t.includes("acceptance")) f = 1047;
+  else if (t.includes("parallel cell ladder")) f = 740;
+  else if (t.includes("reverted volatile")) f = 440;
+  tone(f, 500, "sine", 0);
+}
+function completionSound() {
+  [523, 659, 784, 1047].forEach((f, i) => tone(f, 500, "sine", i * 320));
+}
+function errorSound() {
+  tone(196, 500, "square", 0, 0.12);
+  tone(147, 600, "square", 350, 0.12);
+}
+function lowConfidenceBeep(e) {
+  const mods = e.detail && e.detail.modules;
+  if (!mods) return;
+  let thresh = Number($("min_confidence").value);
+  if (!Number.isFinite(thresh)) thresh = 0.6;
+  const low = mods.some((m) => m.source === "vlm" &&
+    ((m.confidence ?? 1) < thresh || m.condition === "unreadable"));
+  if (low) tone(880, 500, "square", 0, 0.1);
+}
+function soundForEvent(e) {
+  if (!soundOn || !e) return;
+  if (e.kind === "phase") phaseTone(e.text);
+  else if (e.kind === "read") lowConfidenceBeep(e);
+  else if (e.kind === "done") {
+    const t = (e.text || "").toLowerCase();
+    if (t.startsWith("converged")) completionSound();
+    else errorSound();
+  }
+}
 async function poll() {
   try {
     const s = await api("/api/run/state");
@@ -427,23 +537,31 @@ async function poll() {
       seenEvents = 0;
     }
     lastRunSeq = s.run_seq;
-    if (s.events.length < seenEvents) {
+    // Full log via /api/run/events paging: /api/run/state only carries
+    // the tail, so page forward from seenEvents until total is reached.
+    const total = s.event_count ?? s.events.length;
+    if (total < seenEvents) {
       $("log").innerHTML = "";
       $("report").textContent = "–";
+      $("detailCard").style.display = "none";
+      lastEvents = [];
       seenEvents = 0;
     }
-    lastEvents = s.events;
-    const log = $("log");
-    for (const e of s.events.slice(seenEvents)) {
-      const div = document.createElement("div");
-      if (e.kind === "error") div.className = "err";
-      else if (e.kind === "ok" || e.kind === "tune" || e.kind === "done") div.className = "ok";
-      else if (e.kind === "phase" || e.kind === "run") div.className = "phase";
-      div.textContent = `[${e.t}] ${e.kind}: ${e.text}`;
-      log.appendChild(div);
-    }
-    seenEvents = s.events.length;
-    log.scrollTop = log.scrollHeight;
+    try {
+      let off = seenEvents;
+      for (;;) {
+        const page = await api("/api/run/events?offset=" + off + "&limit=500");
+        if (page.offset !== off) break;
+        for (const e of page.events) { appendLogEvent(e); soundForEvent(e); }
+        lastEvents = lastEvents.concat(page.events);
+        off = page.offset + page.events.length;
+        if (off >= page.total || !page.events.length) break;
+      }
+      seenEvents = off;
+    } catch (e) { /* keep tail already rendered */ }
+    lastEvents = lastEvents.slice(-2000);
+    $("log").scrollTop = $("log").scrollHeight;
+    $("logcount").textContent = `(${seenEvents} events)`;
     const g = $("gallery"); g.innerHTML = "";
     for (const p of s.photos.slice(-8)) {
       const img = document.createElement("img");
@@ -455,10 +573,21 @@ async function poll() {
     $("runmsg").textContent = `status: ${s.status} · mode: ${s.mode || "?"} ` +
       `(frames ${s.frames ?? 0}, reader calls ${s.vlm_calls ?? 0})`;
     $("startBtn").disabled = s.status === "running" || s.status === "aborting";
+    if (prevStatus === "running" && s.status === "failed") errorSound();
+    prevStatus = s.status;
   } catch (e) { /* server restarting? keep polling */ }
   setTimeout(poll, 1500);
 }
 load(); poll();
+for (const id of ["f_read", "f_api", "f_vlm", "f_tune", "f_error", "f_phase"]) {
+  $(id).onchange = () => rerenderLog();
+}
+try { $("sound_toggle").checked = soundOn; } catch (e) {}
+$("sound_toggle").onchange = (e) => {
+  soundOn = e.target.checked;
+  try { localStorage.setItem("calibVlmSound", soundOn ? "1" : "0"); } catch (err) {}
+  if (soundOn) ensureAudio();
+};
 $("live_toggle").onchange = (e) => setLive(e.target.checked);
 $("exposure_auto").onchange = () => {
   $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";

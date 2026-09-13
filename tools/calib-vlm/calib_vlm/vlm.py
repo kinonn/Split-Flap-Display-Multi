@@ -50,6 +50,8 @@ class VLMClient:
         # first such rejection drops it for the rest of the client's
         # life, so the wasted round trip is paid once, not per frame.
         self._allow_forced_tool_choice = True
+        # Token usage of the last chat() call ({} when unreported).
+        self.last_usage: dict = {}
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              tool_choice: str | None = None) -> dict:
@@ -87,9 +89,19 @@ class VLMClient:
         if resp.status_code != 200:
             raise VLMError(f"LLM HTTP {resp.status_code}: {resp.text[:300]}")
         try:
-            msg = resp.json()["choices"][0]["message"]
+            body = resp.json()
+            msg = body["choices"][0]["message"]
         except (KeyError, IndexError, ValueError) as exc:
             raise VLMError(f"bad LLM response: {resp.text[:300]}") from exc
+        # Token usage for cost/speed analysis (may be absent per provider).
+        try:
+            usage = body.get("usage") or {}
+            self.last_usage = {
+                "prompt_tokens": int(usage.get("prompt_tokens", 0)),
+                "completion_tokens": int(usage.get("completion_tokens", 0)),
+            }
+        except (TypeError, ValueError):
+            self.last_usage = {}
         calls = []
         for i, call in enumerate(msg.get("tool_calls") or []):
             fn = call.get("function", {})

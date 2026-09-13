@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import traceback
 from collections import Counter
 
 import cv2
@@ -32,6 +33,10 @@ MAX_PREVIEWS = 200
 MAX_PERSISTS = 400
 MAX_SWEEPS = 3
 MAX_TUNE_ITER = 3
+# Abort when the reader cannot be trusted: more than this many
+# unreliable/unreadable escalations means camera/framing/lighting is bad
+# and continuing would burn wear/budget tuning noise.
+MAX_UNRELIABLE_READS = 5
 # Deltas tried per suspect cell (motor steps), coarse first.
 TRY_DELTAS = (4, -4, 2, -2, 8, -8, 1, -1)
 CONDITION_COST = {"clean": 0, "blank": 0, "half": 1, "double": 2,
@@ -124,11 +129,97 @@ def _parse_csv_matrix(raw, rows: int, cols: int) -> list[list[int]]:
     return out
 
 
+class _LoggingDisplay:
+    """Proxy that logs mutating display API calls as `api` events.
+
+    Read-only polls (`status`, `wait_settled`) are deliberately NOT
+    logged: `wait_settled` polls `status()` every 0.5 s and would flood
+    the log. Everything mutating (show/preview/persist/reload/hold)
+    plus one-shot reads (snapshot/contract) is logged with params and
+    result so the run log shows every display API call.
+    """
+
+    # Mutating calls wrapped with an `api` log line. Read-only polls
+    # (`status`, `wait_settled`) are NOT wrapped: `wait_settled` polls
+    # every 0.5 s and would flood the log.
+    _LOGGED = ("show", "show_and_settle", "preview", "preview_batch",
+               "persist", "reload", "hold", "snapshot", "contract",
+               "wait_settled")
+
+    def __init__(self, display, event_fn):
+        object.__setattr__(self, "_display", display)
+        object.__setattr__(self, "_event", event_fn)
+
+    def __getattr__(self, name):
+        display = object.__getattribute__(self, "_display")
+        target = getattr(display, name)  # raises AttributeError if missing
+        if name not in self._LOGGED or not callable(target):
+            return target
+        event_fn = object.__getattribute__(self, "_event")
+
+        def wrapper(*args, **kwargs):
+            t0 = time.monotonic()
+            out = target(*args, **kwargs)
+            dt = time.monotonic() - t0
+            try:
+                event_fn("api", self._describe(name, args, kwargs, out)
+                         + f" in {dt:.1f}s")
+            except Exception:
+                pass  # logging must never break a run
+            return out
+
+        return wrapper
+
+    @staticmethod
+    def _describe(name, args, kwargs, out):
+        if name == "show_and_settle":
+            frame = args[0] if args else kwargs.get("frame", "?")
+            dwell = args[1] if len(args) > 1 else kwargs.get("dwell_ms", 800)
+            fid = out.get("frameId") if isinstance(out, dict) else "?"
+            return (f"POST show frame={frame!r} dwellMs={dwell} "
+                    f"-> frameId {fid} settled")
+        if name == "show":
+            frame = args[0] if args else kwargs.get("frame", "?")
+            return f"POST show frame={frame!r}"
+        if name == "preview":
+            module, ci = args[0], args[1] if len(args) > 1 else "?"
+            delta = args[2] if len(args) > 2 else kwargs.get("delta", "?")
+            return (f"POST preview module={module} charIndex={ci} "
+                    f"delta={delta:+d}" if isinstance(delta, int)
+                    else f"POST preview module={module} charIndex={ci}")
+        if name == "preview_batch":
+            items = list(args[0]) if args else []
+            summary = ", ".join(
+                f"m{n.get('module')} c{n.get('charIndex')}:{n.get('delta'):+d}"
+                for n in items[:8])
+            more = f" +{len(items) - 8} more" if len(items) > 8 else ""
+            return f"POST preview-batch {len(items)} nudge(s): {summary}{more}"
+        if name == "persist":
+            scope = args[0] if args else kwargs.get("scope", "?")
+            kind = args[1] if len(args) > 1 else kwargs.get("kind", "?")
+            value = args[2] if len(args) > 2 else kwargs.get("value", "?")
+            return f"POST offsets scope={scope} kind={kind} value={value}"
+        if name == "reload":
+            return "POST reload -> volatile previews reverted"
+        if name == "hold":
+            active = args[0] if args else kwargs.get("active", "?")
+            return f"POST hold active={bool(active)}"
+        if name == "wait_settled":
+            return "wait settled (homing/poll)"
+        if name == "snapshot":
+            return "GET settings -> snapshot saved"
+        if name == "contract":
+            ver = out.get("contractVersion") if isinstance(out, dict) else "?"
+            return f"GET calib-contract -> version {ver}"
+        return f"{name} called"
+
+
 class VlmCalibrator:
     def __init__(self, display, camera, reader, photo_dir: str,
                  dwell_ms: int = 800, timeout_s: float = 60.0,
                  min_confidence: float = 0.6, exhaustive: bool = False,
-                 mode: str = "full", on_event=None, max_seconds: float = 3600.0):
+                 mode: str = "full", on_event=None, max_seconds: float = 3600.0,
+                 run_context: dict | None = None):
         if mode not in ("dry-run", "full"):
             raise ValueError("mode must be dry-run or full")
         self.display = display
@@ -185,16 +276,35 @@ class VlmCalibrator:
         self.remote_mod: list[list[int]] = []
         self.remote_char: list[list[list[int]]] = []
         self._reader_failures = 0
+        self._unreliable_count = 0
+        self._phase_marks: list[dict] = []
+        self._vlm_tokens = {"prompt_tokens": 0, "completion_tokens": 0}
+        self._vlm_seconds = 0.0
+        self._wall_start = 0.0
+        # Reproducibility context supplied by the server (camera/reader
+        # settings, model; never secrets). Tuner params are added in run().
+        self.run_context = dict(run_context or {})
         self._t0 = time.monotonic()
         os.makedirs(photo_dir, exist_ok=True)
+        # Log every mutating display API call as `api` events so the run
+        # log shows the full display traffic (status polls stay unlogged).
+        self.display = _LoggingDisplay(display, self.event)
 
     # -- events / abort -------------------------------------------------------
     def event(self, kind: str, text: str, photo: str | None = None,
               detail: dict | None = None):
-        evt: dict = {"t": time.strftime("%H:%M:%S"), "kind": kind,
-                     "text": text, "photo": photo}
+        evt: dict = {"t": time.strftime("%H:%M:%S"),
+                     "elapsed": round(time.monotonic() - self._t0, 2),
+                     "kind": kind, "text": text, "photo": photo}
         if detail is not None:
             evt["detail"] = detail
+        if kind == "phase":
+            # Phase boundary with budget snapshot: post-run analysis can
+            # derive per-phase seconds + frames/VLM/preview/persist cost.
+            self._phase_marks.append({
+                "name": text, "elapsed": evt["elapsed"],
+                "frames": self.frames_used, "vlmCalls": self.vlm_calls,
+                "previews": self.previews, "persists": self.persists})
         self.on_event(evt)
 
     def _abort_requested(self) -> bool:
@@ -350,6 +460,9 @@ class VlmCalibrator:
         if not cv2.imwrite(path, img):
             raise CalibError(f"failed to write photo {path}")
         send = annotate_modules(img, self.total) if self.reader.annotate else img
+        vlm = getattr(self.reader, "vlm", None)
+        model = getattr(vlm, "model", None) or "?"
+        t0 = time.monotonic()
         try:
             reading = self.reader.read(jpeg_bytes(send), total=self.total,
                                        expected=frame, charset=self.drum,
@@ -361,9 +474,25 @@ class VlmCalibrator:
             self.event("error", f"reader failed on {tag}: {exc}")
             if self._reader_failures >= 3:
                 raise CalibError(f"VLM reader failing repeatedly: {exc}") from exc
+        calls = max(1, getattr(self.reader, "last_calls", 1))
+        dt = time.monotonic() - t0
+        self._vlm_seconds += dt
+        usage = getattr(self.reader, "last_usage", None) or {}
+        try:
+            self._vlm_tokens["prompt_tokens"] += int(usage.get("prompt_tokens", 0))
+            self._vlm_tokens["completion_tokens"] += int(usage.get("completion_tokens", 0))
+        except (TypeError, ValueError):
+            pass
+        tok = ""
+        if usage.get("prompt_tokens") or usage.get("completion_tokens"):
+            tok = (f" tok {usage.get('prompt_tokens', 0)}/"
+                   f"{usage.get('completion_tokens', 0)}")
+        self.event("vlm", f"POST chat model={model} tag={tag} "
+                           f"->{calls} call(s) in {dt:.1f}s{tok}: "
+                           f"{self._read_line(frame, reading)}")
         # Account the real VLM round trips: a read may re-ask once, and
         # failed parses still consumed provider calls.
-        self._charge_vlm(max(1, getattr(self.reader, "last_calls", 1)))
+        self._charge_vlm(calls)
         rec = {"tag": tag, "frameId": frame_id, "frame": frame,
                "photo": os.path.basename(path)}
         rec.update(reading.as_dict())
@@ -587,6 +716,14 @@ class VlmCalibrator:
         if rec not in self.identity_persistent:
             self.identity_persistent.append(rec)
         self.event("error", f"escalate m{module} target {glyph!r}: {note}")
+        lowered = note.lower()
+        if "unreliable" in lowered or "unreadable" in lowered:
+            self._unreliable_count += 1
+            if self._unreliable_count > MAX_UNRELIABLE_READS:
+                raise CalibError(
+                    f"too many unreliable reads "
+                    f"({self._unreliable_count} > {MAX_UNRELIABLE_READS}); "
+                    f"aborting - check camera/framing/lighting")
 
     def _record_delta(self, module: int, char_index: int, target: str,
                       before: ModuleReading, after: ModuleReading,
@@ -1534,9 +1671,27 @@ class VlmCalibrator:
             } for i in range(self.total)],
         }
 
+    def _phase_timing(self) -> list[dict]:
+        """Per-phase seconds + budget deltas derived from phase marks."""
+        out = []
+        prev = {"elapsed": 0.0, "frames": 0, "vlmCalls": 0,
+                "previews": 0, "persists": 0}
+        for mark in self._phase_marks:
+            out.append({
+                "phase": mark["name"],
+                "seconds": round(mark["elapsed"] - prev["elapsed"], 2),
+                "frames": mark["frames"] - prev["frames"],
+                "vlmCalls": mark["vlmCalls"] - prev["vlmCalls"],
+                "previews": mark["previews"] - prev["previews"],
+                "persists": mark["persists"] - prev["persists"],
+            })
+            prev = mark
+        return out
+
     # -- main -----------------------------------------------------------------
     def run(self) -> dict:
         self._t0 = time.monotonic()
+        self._wall_start = time.time()
         status = self.display.status()
         contract = self.display.contract()
         if contract.get("contractVersion", 0) != SUPPORTED_CONTRACT:
@@ -1565,6 +1720,20 @@ class VlmCalibrator:
                       "charset": self.charset, "drumOrder": self.drum,
                       "stepsPerChar": self.steps_per_char},
             "result": "needs-human", "reason": "", "deltas": [],
+            # Reproducibility: tuner params + server-supplied context
+            # (camera/reader/model; never secrets) + firmware identity.
+            "config": {
+                "dwell_ms": self.dwell_ms, "timeout_s": self.timeout_s,
+                "min_confidence": self.min_confidence,
+                "max_seconds": self.max_seconds,
+                "stepsPerRot": steps_per_rot,
+                **self.run_context,
+            },
+            "firmware": {
+                "contractVersion": contract.get("contractVersion"),
+                "schemaVersion": status.get("schemaVersion"),
+                "mode": status.get("mode"),
+            },
         }
         with open(os.path.join(self.photo_dir, "snapshot.json"), "w",
                   encoding="utf-8") as fh:
@@ -1595,6 +1764,7 @@ class VlmCalibrator:
             report["reason"] = reason
         except CalibError as exc:
             report["reason"] = str(exc)
+            report["traceback"] = traceback.format_exc(limit=8)
             if self.aborted:
                 report["reason"] = "aborted by user"
             # Phase commits are verified and kept (commit-per-phase design):
@@ -1619,6 +1789,14 @@ class VlmCalibrator:
                                  "vlmCalls": self.vlm_calls,
                                  "previews": self.previews,
                                  "persists": self.persists}
+            report["timing"] = {
+                "wallSeconds": round(time.monotonic() - self._t0, 1),
+                "wallStart": time.strftime(
+                    "%Y-%m-%dT%H:%M:%S", time.localtime(self._wall_start)),
+                "vlmSeconds": round(self._vlm_seconds, 1),
+                "vlmTokens": dict(self._vlm_tokens),
+                "phases": self._phase_timing(),
+            }
             with open(os.path.join(self.photo_dir, "report.json"), "w",
                       encoding="utf-8") as fh:
                 json.dump(report, fh, indent=2)

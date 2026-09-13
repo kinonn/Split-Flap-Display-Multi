@@ -67,3 +67,25 @@ def test_run_start_requires_provider_config(client):
     # but no API key for a remote URL -> 400 until configured.
     r = client.post("/api/run/start")
     assert r.status_code == 400
+
+
+def test_event_log_pages_without_truncation(client):
+    # Regression: the UI only ever saw the last 100 events (state slice)
+    # of a 500-capped buffer while events.jsonl kept everything. The
+    # harness must keep the full log and page it via /api/run/events.
+    server.harness.events = []
+    server.harness.photos = []
+    for i in range(350):
+        server.harness.log({"t": "", "kind": "read", "text": f"e{i}",
+                            "photo": None})
+    state = client.get("/api/run/state").json()
+    assert state["event_count"] == 350
+    page1 = client.get("/api/run/events?offset=0&limit=200").json()
+    assert page1["total"] == 350
+    assert page1["offset"] == 0
+    assert len(page1["events"]) == 200
+    assert page1["events"][0]["text"] == "e0"
+    page2 = client.get("/api/run/events?offset=200&limit=200").json()
+    assert len(page2["events"]) == 150
+    assert page2["events"][0]["text"] == "e200"
+    assert page2["events"][-1]["text"] == "e349"
