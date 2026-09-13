@@ -67,10 +67,22 @@ PREVIEW_DELTA_MAX = 32
 # histogram of (seen - commanded) then gives the module offset in one shot.
 SWEEP_MIN_SAMPLES = 24       # trusted samples needed to judge a module
 SWEEP_TRUST_PURITY = 0.80    # dominant-shift share needed to trust it
+# Below the purity gate but still fixable: a single-character residual
+# covering at least this share of trusted samples is a systematic fault
+# fixable on the module cell, not reader noise. Escalating it would
+# dead-end every affected character in P2 — the firmware's ±32 char-cell
+# clamp can never hold a whole-character fix (run-005: +1 on ~68% of the
+# drum, 28 "does not fit a char cell" escalations, needs-human).
+SWEEP_MAJORITY_SHARE = 0.50
+# Single-flap arc fault: at least this share of the DRUM showing the same
+# ±1 residual (run-005 m0: 13 of 48 characters one flap ahead while the
+# rest read correct). Such a module enters the sub-pitch trim ladder with
+# a proportionate candidate; it is never applied blind.
+SWEEP_ARC_SHARE = 0.125
 # Glyphs that render identically on the drum: a difference between partners
 # is "no information", never evidence and never a correction.
 CONFUSABLES = {
-    "O": ("0", "D", "Q"), "0": ("O", "D", "Q"),
+    "O": ("0", "D", "Q"),"0": ("O", "D", "Q"),
     "D": ("O", "0"), "Q": ("O", "0"),
     "I": ("1",), "1": ("I",),
     "S": ("5",), "5": ("S",),
@@ -78,6 +90,23 @@ CONFUSABLES = {
     "B": ("8",), "8": ("B",),
     "G": ("6",), "6": ("G",),
 }
+# Ladder background filler rotation: non-plan modules must MOVE on every
+# ladder frame. A constant filler (old: always "E") stalls a misaligned
+# module — e.g. target "E" physically showing "F": the firmware resolves
+# the repeat to identical step positions, commands zero steps, and every
+# re-read scores the same stale flap (run-003 M0: 30/30 "E"-want/"F"-saw).
+# Cycling high-contrast, non-confusable letters spread across the drum
+# forces motion on every background slot, on every module, every frame.
+# Seven entries (prime length): an evaluate shows targets_at + guards_at
+# frames (<= 6), which never divides 7, so the filler sequence can never
+# realign to the same glyphs on the next evaluate round.
+LADDER_FILLERS = ("E", "M", "T", "K", "H", "W", "N")
+# Default character exclusion list: glyphs the operator asks to skip
+# everywhere (sweep, ladder targets/guards/fillers, P2, P4, acceptance).
+# Tiny punctuation flaps (".", "'", "-") read unreliably at camera
+# distance, so they are excluded by default; the UI can edit the list or
+# disable exclusions entirely. Enabled by default.
+DEFAULT_SKIP_CHARS = (".", "'", "-")
 # Sub-pitch cell trims (coarse -> fine, cumulative). Applied to module cells
 # for boundary residuals and to char cells for per-character faults; all
 # candidates stay below one character pitch.
@@ -101,6 +130,19 @@ def _preview_chunks(delta: int, limit: int = PREVIEW_DELTA_MAX) -> list[int]:
         step = max(-limit, min(limit, delta))
         out.append(step)
         delta -= step
+    return out
+
+
+def _parse_skip_chars(raw) -> list[str]:
+    """Normalize a user skip list to single characters (order-preserved)."""
+    if raw in (None, ""):
+        return []
+    items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    out: list[str] = []
+    for item in items:
+        for ch in str(item):
+            if ch.strip() and ch not in out:
+                out.append(ch)
     return out
 
 
@@ -220,7 +262,9 @@ class VlmCalibrator:
                  min_confidence: float = 0.6, exhaustive: bool = False,
                  mode: str = "full", on_event=None, max_seconds: float = 3600.0,
                  phases: list[str] | None = None,
-                 run_context: dict | None = None):
+                 run_context: dict | None = None,
+                 skip_chars: list[str] | str | None = None,
+                 skip_enabled: bool = True):
         if mode not in ("dry-run", "full"):
             raise ValueError("mode must be dry-run or full")
         self.display = display
@@ -232,6 +276,13 @@ class VlmCalibrator:
         self.min_confidence = min_confidence
         self.exhaustive = exhaustive
         self.mode = mode
+        # Character exclusions (default: tiny punctuation ".", "'", "-"
+        # that reads unreliably). Enabled by default; the UI can edit the
+        # list or disable exclusions entirely.
+        if skip_chars is None:
+            skip_chars = list(DEFAULT_SKIP_CHARS)
+        self.skip_chars = _parse_skip_chars(skip_chars)
+        self.skip_enabled = bool(skip_enabled)
         # Independently selectable phases (P0 always runs as a read-only
         # safety gate). Per-run only; None/empty = full chain.
         self.phases = self._normalize_phases(phases)
@@ -312,6 +363,27 @@ class VlmCalibrator:
                              f"(choose from {', '.join(order)})")
         # De-duplicate, keep canonical order.
         return [p for p in order if p in items] or list(order)
+
+    # -- character exclusions -------------------------------------------------
+    def _skipped(self) -> set[str]:
+        """Active skip set (empty when exclusions are disabled)."""
+        return set(self.skip_chars) if self.skip_enabled else set()
+
+    def _usable(self, chars) -> list[str]:
+        """Filter the active skip set out of a char sequence."""
+        skipped = self._skipped()
+        return [c for c in chars if c not in skipped]
+
+    def _pick_fallback(self, avoid: set[str]) -> str:
+        """A drum glyph outside `avoid` and the skip set (never blank)."""
+        skipped = self._skipped()
+        for cand in ("E", "H", "M", "T", "K"):
+            if cand in self.drum and cand not in avoid and cand not in skipped:
+                return cand
+        for cand in self.drum:
+            if cand != " " and cand not in avoid and cand not in skipped:
+                return cand
+        return self.drum[1] if len(self.drum) > 1 else self.drum[0]
 
     # -- events / abort -------------------------------------------------------
     def event(self, kind: str, text: str, photo: str | None = None,
@@ -1162,13 +1234,23 @@ class VlmCalibrator:
                 stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
                 guards = right[::stride][:MODULE_TRIM_GUARDS]
             else:
-                fallback = "E" if "E" in self.drum else self.drum[1]
-                if fallback in wrong_set:
-                    fallback = self.drum[1]
-                guards = [fallback]
+                guards = [self._pick_fallback(wrong_set)]
             local = self._local_index(module)
             magnitudes = [max(1, int(round(self.steps_per_char * f)))
                           for f in MODULE_TRIM_FRACTIONS]
+            # Proportionate arc candidate (run-005 hypothesis): a
+            # single-flap fault on >= 12.5% of the drum may respond to a
+            # proportional slice of the drum pitch
+            # (round(arc_count / drumLen * stepsPerChar)). Added FIRST so
+            # the ladder always evaluates it; the score decides — it is
+            # kept only when it beats the baseline without breaking a
+            # guard, and reverted otherwise. A full-flap-clean arc cannot
+            # be fixed by any sub-pitch shift, so this degrades to one
+            # extra evaluate round before the module is flagged for P2.
+            share = len(wrong) / max(1, len(self.drum))
+            prop = int(round(share * self.steps_per_char))
+            if prop:
+                magnitudes = [prop] + magnitudes
             direction = -1 if errors[0] > 0 else 1
             plans.append({
                 "module": module,
@@ -1212,45 +1294,117 @@ class VlmCalibrator:
         by_module = {p["module"]: p for p in plans}
         targets_at = max(len(p["targets"]) for p in plans)
         guards_at = max(len(p["guards"]) for p in plans)
+        frames_per_eval = targets_at + guards_at
+        # Monotonic ladder frame counter: filler rotation keys off it (one
+        # bump per shown frame). Any background/exhausted slot must show a
+        # DIFFERENT glyph every frame AND every evaluate round: a repeat
+        # resolves to identical step positions, the firmware commands zero
+        # steps, and every re-read scores the same stale flap (run-003
+        # M0: 30/30 "E"-want/"F"-saw on a constant "E" filler). The
+        # last_filler guard keeps adjacent frames distinct even when the
+        # cycle length happens to realign with frames_per_eval (the
+        # 4-cycle/4-frames case this rotation originally shipped with).
+        seq = [0]
+        last_filler = [None]
+
+        def filler_for(key: int) -> str:
+            skipped = self._skipped()
+            pool = [c for c in LADDER_FILLERS
+                    if c in self.drum and c not in skipped]
+            if len(pool) >= 2:
+                start = key % len(pool)
+                for cand in pool[start:] + pool[:start]:
+                    if cand != last_filler[0]:
+                        last_filler[0] = cand
+                        return cand
+            if pool:
+                last_filler[0] = pool[0]
+                return pool[0]
+            return self._pick_fallback(skipped)
 
         def frame_for(index: int) -> str:
+            # Filler key is the monotonic seq alone (bumped once per shown
+            # frame): consecutive frames ALWAYS differ on background slots,
+            # including across evaluate boundaries. (seq + index would
+            # realign every targets_at + guards_at frames and repeat.)
+            filler = filler_for(seq[0])
             cells = []
             for module in range(self.total):
                 p = by_module.get(module)
                 if p is None:
-                    cells.append("E")
+                    cells.append(filler)
                 elif index < len(p["targets"]):
                     cells.append(p["targets"][index])
                 elif index - targets_at < len(p["guards"]):
                     cells.append(p["guards"][index - targets_at])
+                elif len(p["guards"]) > 1:
+                    # Exhausted plan slot: rotate BY EVALUATE ROUND, not
+                    # by seq — seq advances frames_per_eval per evaluate,
+                    # which can be a multiple of len(guards) and would
+                    # realign to the same glyph every round.
+                    r = (seq[0] - 1) // max(1, frames_per_eval)
+                    slot = index - targets_at
+                    cells.append(p["guards"][(slot + r) % len(p["guards"])])
                 else:
-                    cells.append(p["guards"][0])
+                    cells.append(filler)
             return "".join(cells)
 
-        def evaluate() -> dict[int, int]:
+        def evaluate(moved: set[int] | None = None,
+                     cache: dict | None = None) -> dict[int, int]:
+            # A plan cell whose state did not change keeps the offset it
+            # was already scored under, so its score cannot have changed
+            # when its shown glyph sequence is identical to the cached
+            # one: reuse that score instead of re-reading a stale flap.
+            # Sequence check matters because exhausted-guard slots rotate
+            # with seq — there the glyph (and the drum) DID change, so
+            # the score must be taken fresh. When NOTHING moved, skip
+            # the re-show entirely.
+            if cache is not None and moved is not None and not moved:
+                return dict(cache["scores"])
+            # One seq bump per frame: the filler must rotate between
+            # consecutive frames WITHIN an evaluate, not just across
+            # evaluates (background modules must move every frame).
+            frames = []
+            for index in range(targets_at + guards_at):
+                seq[0] += 1
+                frames.append(frame_for(index))
+            readings = []
+            for index, frame in enumerate(frames):
+                tag = (f"ladder_t{index}" if index < targets_at
+                       else f"ladder_g{index - targets_at}")
+                _, reading = self._show_read(frame, tag)
+                readings.append(reading)
             scores = {p["module"]: 0 for p in plans}
-            for index in range(targets_at):
-                _, reading = self._show_read(frame_for(index),
-                                             f"ladder_t{index}")
-                for p in plans:
+            for p in plans:
+                m = p["module"]
+                cur = tuple(f[m] for f in frames)
+                if (cache is not None and moved is not None
+                        and m not in moved
+                        and cur == cache.get("seqs", {}).get(m)):
+                    scores[m] = cache["scores"].get(m, 0)
+                    continue
+                for index in range(targets_at):
                     if index >= len(p["targets"]):
                         continue
-                    entry = reading.modules[p["module"]]
-                    if self._trusted(entry) and entry.char == p["targets"][index]:
-                        scores[p["module"]] += 2
+                    entry = readings[index].modules[m]
+                    if self._trusted(entry) \
+                            and entry.char == p["targets"][index]:
+                        scores[m] += 2
                         if entry.condition in ("clean", "blank"):
-                            scores[p["module"]] += 1
-            for index in range(guards_at):
-                _, reading = self._show_read(frame_for(targets_at + index),
-                                             f"ladder_g{index}")
-                for p in plans:
-                    if index >= len(p["guards"]):
+                            scores[m] += 1
+                for gi in range(guards_at):
+                    if gi >= len(p["guards"]):
                         continue
-                    entry = reading.modules[p["module"]]
+                    entry = readings[targets_at + gi].modules[m]
                     if (not self._trusted(entry)
-                            or entry.char != p["guards"][index]
+                            or entry.char != p["guards"][gi]
                             or entry.condition not in ("clean", "blank")):
-                        scores[p["module"]] -= 6
+                        scores[m] -= 6
+            if cache is not None and moved is not None:
+                cache["seqs"] = {p["module"]: tuple(f[p["module"]]
+                                                    for f in frames)
+                                 for p in plans}
+                cache["scores"] = dict(scores)
             return scores
 
         self.event("phase", f"parallel cell ladder ({len(plans)} cells, "
@@ -1262,8 +1416,10 @@ class VlmCalibrator:
         baseline = evaluate()
         for p in plans:
             p["best_score"] = baseline.get(p["module"], 0)
+        cache: dict = {"scores": dict(baseline)}
         for index in range(steps_at):
             apply = []
+            moved: set[int] = set()
             for p in plans:
                 step = p["steps"][index] if index < len(p["steps"]) else 0
                 candidate = step if p.get("absolute") else p["best"] + step
@@ -1276,10 +1432,11 @@ class VlmCalibrator:
                 diff = candidate - p["state"]
                 p["state"] = candidate
                 if diff:
+                    moved.add(p["module"])
                     apply.append((p["group"], p["local"], p["char_index"],
                                   diff))
             self._batch_nudge(apply)
-            scores = evaluate()
+            scores = evaluate(moved, cache)
             revert = []
             for p in plans:
                 if scores[p["module"]] > p["best_score"]:
@@ -1339,9 +1496,10 @@ class VlmCalibrator:
         that disagrees is either misaligned or misread. The drum is walked
         backwards, so each step is ~a full revolution: every frame passes
         the magnet and re-homes, making each sample independent.
-        Returns {module: {char: ModuleReading}} plus the char order.
+        Skipped characters are never shown. Returns {module: {char:
+        ModuleReading}} plus the char order.
         """
-        chars = list(reversed(self.drum))
+        chars = self._usable(reversed(self.drum))
         readings: dict[int, dict[str, ModuleReading]] = \
             {m: {} for m in range(self.total)}
         for ch in chars:
@@ -1357,10 +1515,19 @@ class VlmCalibrator:
                 readings[m][ch] = entry
 
     def _shift(self, entry, ch: str) -> int | None:
-        """Signed shift (characters) between the commanded and read glyph."""
+        """Signed shift (characters) between the commanded and read glyph.
+
+        A blank flap read against a NON-blank command is a failed sampling
+        frame, not evidence of a drum shift: run-005's ':' frame read blank
+        fleet-wide and poisoned every module's histogram with a phantom
+        ~+10 residual, dragging purities below the trust gate. Return None
+        so such samples are excluded from the histogram and denominator.
+        """
         if (entry is None or not self._trusted(entry)
                 or entry.char not in self.drum or ch not in self.drum
                 or confusable(entry.char, ch)):
+            return None
+        if entry.char == " " and ch != " ":
             return None
         return -self._drum_delta(entry.char, ch)
 
@@ -1395,7 +1562,7 @@ class VlmCalibrator:
                 stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
                 guards = right[::stride][:MODULE_TRIM_GUARDS]
             else:
-                guards = ["E"]
+                guards = [self._pick_fallback(set(cells))]
             plans.append({
                 "module": m,
                 "group": self._group_of(m),
@@ -1428,6 +1595,39 @@ class VlmCalibrator:
         for m in range(self.total):
             mode, purity, total = self._mode_purity(list(shifts[m].values()))
             if total < SWEEP_MIN_SAMPLES or purity < SWEEP_TRUST_PURITY:
+                # Systematic majority fault: a single-character residual on
+                # at least half the trusted samples is fixable on the module
+                # cell even though it misses the purity gate. Escalating it
+                # dead-ends every affected char in P2 (the ±32 char-cell
+                # clamp can never hold a whole-character fix); routing it
+                # through the normal whole-character path lets the re-read
+                # pass and P2 sort out whatever remains.
+                if (total >= SWEEP_MIN_SAMPLES and mode is not None
+                        and abs(mode) == 1
+                        and purity >= SWEEP_MAJORITY_SHARE):
+                    modes[m] = mode
+                    self.event("read",
+                               f"m{m}: majority shift {mode:+d} "
+                               f"({purity:.0%} of {total}); module-cell fix")
+                    continue
+                # Single-flap arc fault: dominant state still CORRECT but a
+                # >= 12.5% same-sign ±1 arc. A whole-drum shift applied
+                # blind would trade the arc for a bigger fault on the
+                # correct majority — instead the module enters the residual
+                # map so the sub-pitch trim ladder can probe a proportionate
+                # candidate and only keep it if the score improves.
+                arc = [(ch, s) for ch, s in shifts[m].items()
+                       if s is not None and abs(s) == 1]
+                if (mode == 0 and total >= SWEEP_MIN_SAMPLES
+                        and len(arc) / max(1, len(self.drum))
+                        >= SWEEP_ARC_SHARE
+                        and len({s < 0 for _, s in arc}) == 1):
+                    modes[m] = 0
+                    self.event("read",
+                               f"m{m}: single-flap arc ({len(arc)} chars, "
+                               f"{len(arc) / len(self.drum):.0%} of drum, "
+                               f"{arc[0][1]:+d}); trim candidate")
+                    continue
                 self._escalate(m, "?",
                                f"unreliable reads ({total} samples, "
                                f"purity {purity:.0%})")
@@ -1534,10 +1734,12 @@ class VlmCalibrator:
             self._record_delta(m, -1, "?", None, None, fixed=True,
                                delta=delta)
         # Cells still wrong or unreadable are fine-phase / hardware work.
+        # Skipped characters never become P2 work.
         self._p1_flagged = sorted(
-            {ch for m in modes for ch in chars
-             if residual[m].get(ch) not in (None, 0)}
-            | {ch for cells in phase_cells.values() for ch in cells},
+            self._usable(
+                {ch for m in modes for ch in chars
+                 if residual[m].get(ch) not in (None, 0)}
+                | {ch for cells in phase_cells.values() for ch in cells}),
             key=self.drum.index)
 
     def _derive_flagged_readonly(self):
@@ -1592,9 +1794,10 @@ class VlmCalibrator:
             if cells:
                 phase_cells[m] = cells
         self._p1_flagged = sorted(
-            {ch for m in modes for ch in chars
-             if residual[m].get(ch) not in (None, 0)}
-            | {ch for cells in phase_cells.values() for ch in cells},
+            self._usable(
+                {ch for m in modes for ch in chars
+                 if residual[m].get(ch) not in (None, 0)}
+                | {ch for cells in phase_cells.values() for ch in cells}),
             key=self.drum.index)
         self.event("read", f"P2 input: {len(self._p1_flagged)} flagged "
                            f"character(s) from read-only sweep")
@@ -1617,7 +1820,7 @@ class VlmCalibrator:
 
     def _p2_fine(self):
         """P2: per-character offsets from the P1 residual map."""
-        flagged = list(getattr(self, "_p1_flagged", []))
+        flagged = self._usable(getattr(self, "_p1_flagged", []))
         if not flagged:
             return
         self.event("phase", f"P2 fine: per-character offsets "
@@ -1640,8 +1843,10 @@ class VlmCalibrator:
                 if entry.char == ch and entry.condition == "clean":
                     continue
                 ci = self.drum.index(ch)
+                skipped = self._skipped()
                 right = [g for g in self.drum
-                         if g != " " and g != ch and g != entry.char]
+                         if g != " " and g != ch and g != entry.char
+                         and g not in skipped]
                 stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
                 guards = right[::stride][:MODULE_TRIM_GUARDS]
                 if entry.char != ch:
@@ -1685,8 +1890,12 @@ class VlmCalibrator:
     def _p4_verify(self):
         """P4: repeatability plus folded border check (short forward hops)."""
         self.event("phase", "P4 repeatability + boundary check")
-        for ch in (self.drum[0], self.drum[len(self.drum) // 2],
-                   self.drum[-1]):
+        skipped = self._skipped()
+        reps = [c for c in (self.drum[0], self.drum[len(self.drum) // 2],
+                             self.drum[-1]) if c not in skipped]
+        if not reps:
+            reps = [self._pick_fallback(skipped)]
+        for ch in reps:
             _, first = self._show_read(ch * self.total, f"rep_{ord(ch)}")
             _, again = self._reread(ch * self.total, f"rep_{ord(ch)}r")
             for m, (a, b) in enumerate(zip(first.modules, again.modules)):
@@ -1697,8 +1906,11 @@ class VlmCalibrator:
         # Short FORWARD hops across a sample of drum boundaries; the reverse
         # sweep only exercises near-full revolutions, not small hops.
         n = len(self.drum)
+        skipped = self._skipped()
         for k in range(0, n - 1, 7):
             ch = self.drum[k]
+            if ch in skipped:
+                continue
             _, reading = self._show_read(ch * self.total, f"border_{k}")
             for m, entry in enumerate(reading.modules):
                 if ch == " " or not self._trusted(entry):
@@ -1715,7 +1927,8 @@ class VlmCalibrator:
             return False, f"persistent identity/read problems on modules {mods}"
         self.event("phase", "acceptance: forward sweep over the whole drum")
         bad: dict[int, list] = {}
-        for ch in self.drum:  # forward order: small consecutive hops
+        # forward order: small consecutive hops; skipped chars never shown
+        for ch in self._usable(self.drum):
             _, reading = self._show_read(ch * self.total,
                                          f"accept_{ord(ch)}")
             for m, entry in enumerate(reading.modules):
@@ -1809,11 +2022,18 @@ class VlmCalibrator:
         self.steps_per_char = max(
             1, round(steps_per_rot / max(1, len(self.drum)))) if self.drum else 1
         self._load_remote_offsets(settings)
+        skipped = sorted(self._skipped())
+        if skipped:
+            self.event("phase", f"skipping {len(skipped)} character(s): "
+                                f"{' '.join(repr(c) for c in skipped)}")
         report: dict = {
             "contractVersion": SUPPORTED_CONTRACT,
             "exhaustive": self.exhaustive,
             "mode": self.mode,
             "phases": list(self.phases),
+            "skip_chars": list(self.skip_chars),
+            "skip_enabled": bool(self.skip_enabled),
+            "skipped": skipped,
             "fleet": {"totalModules": self.total,
                       "groupWidths": self.group_widths,
                       "charset": self.charset, "drumOrder": self.drum,

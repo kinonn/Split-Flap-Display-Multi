@@ -115,6 +115,8 @@ def load_config() -> dict:
         cfg["mode"] = "full"
     cfg.setdefault("exhaustive", False)
     cfg.setdefault("annotate", True)
+    cfg.setdefault("skip_chars", ".'-")
+    cfg.setdefault("skip_enabled", True)
     cfg.setdefault("dwell_ms", 800)
     cfg.setdefault("timeout_s", 60.0)
     cfg.setdefault("min_confidence", 0.6)
@@ -132,9 +134,19 @@ def save_config(patch: dict) -> dict:
         pass
     for key in ("display_host", "llm_base_url", "llm_model", "camera_index",
                 "camera_brightness", "mode", "exhaustive", "annotate",
+                "skip_enabled",
                 "dwell_ms", "timeout_s", "min_confidence", "max_seconds"):
         if key in patch and patch[key] not in (None, ""):
             stored[key] = patch[key]
+    # Skip list is user-editable AND clearable (empty = skip nothing).
+    # Stored as a plain string; the calibrator normalizes it.
+    if "skip_chars" in patch:
+        raw = patch["skip_chars"]
+        if isinstance(raw, (list, tuple)):
+            raw = "".join(str(c) for c in raw)
+        stored["skip_chars"] = str(raw or "")
+    if "skip_enabled" in patch:
+        stored["skip_enabled"] = bool(patch["skip_enabled"])
     for key, lo, hi in (("dwell_ms", 0, 10000), ("timeout_s", 1, 3600),
                         ("min_confidence", 0, 1), ("max_seconds", 60, 36000)):
         if key in patch and patch[key] not in (None, ""):
@@ -383,6 +395,8 @@ class Harness:
                         mode=cfg.get("mode", "full"), on_event=self.log,
                         max_seconds=float(cfg.get("max_seconds", 5400.0)),
                         phases=phases,
+                        skip_chars=cfg.get("skip_chars", ".'-"),
+                        skip_enabled=bool(cfg.get("skip_enabled", True)),
                         run_context={
                             "display_host": cfg.get("display_host"),
                             "llm_base_url": cfg.get("llm_base_url"),
@@ -394,6 +408,9 @@ class Harness:
                                 "camera_crop_percent"),
                             "camera_warmup_s": cfg.get("camera_warmup_s"),
                             "annotate": bool(cfg.get("annotate", True)),
+                            "skip_chars": cfg.get("skip_chars", ".'-"),
+                            "skip_enabled": bool(cfg.get("skip_enabled",
+                                                         True)),
                         })
                     with self.lock:
                         self.calibrator = calib

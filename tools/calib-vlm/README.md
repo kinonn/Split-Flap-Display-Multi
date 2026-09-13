@@ -115,6 +115,17 @@ pairs excluded):
 
 - **mode >= 80% of >= 24 trusted samples** -> one-shot whole-character module
   fix `delta = mode * stepsPerChar`.
+- **below the purity gate but >= 50% of trusted samples on a single ±1
+  residual** -> systematic fault, fixed on the module cell the same way
+  (escalating it would dead-end every affected character in P2: the
+  firmware's ±32 char-cell clamp can never hold a whole-character fix).
+- **single-flap arc** (dominant state correct, but >= 12.5% of the drum
+  shows the same ±1 residual) -> the module enters the sub-pitch trim
+  ladder with an extra proportionate candidate
+  `round(arc_count / drumLen * stepsPerChar)`; the ladder keeps it only if
+  it beats the baseline without breaking a guard, otherwise the arc is
+  flagged for P2. Blank reads against non-blank commands are junk samples
+  and excluded from the histogram entirely.
 - **worse than that** -> the reads are unreliable: re-read the deviant frames
   once, then escalate `needs-human` (reader/hardware), never "correct" noise.
 - **a few same-sign +/-1 residuals** (a minority of the module's characters)
