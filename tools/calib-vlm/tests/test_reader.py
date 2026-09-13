@@ -47,6 +47,32 @@ def test_exact_read():
     assert reading.raw_count == 4
 
 
+def test_system_prompt_states_exact_module_count():
+    # The system prompt must name the actual module count (not "a fixed
+    # number") so the model counts positions instead of trimming blanks.
+    entries = [entry("H", module=i) for i in range(4)]
+    reader, vlm = make_reader([tool_reply(entries)])
+    reader.read(b"j", total=4, expected="HHHH", charset=CHARSET,
+                drum=CHARSET)
+    system = vlm.calls[0][0]["content"]
+    assert "exactly 4 modules" in system
+    assert "exactly 4 entries" in system
+    assert "fixed number" not in system
+
+
+def test_system_prompt_lists_character_set():
+    # The system prompt must spell out the allowed characters with
+    # lookalike guidance so small glyphs (I/1, '/.) are read correctly.
+    entries = [entry("H", module=i) for i in range(4)]
+    reader, vlm = make_reader([tool_reply(entries)])
+    reader.read(b"j", total=4, expected="HHHH", charset=CHARSET,
+                drum=CHARSET)
+    system = vlm.calls[0][0]["content"]
+    assert "Allowed characters" in system
+    assert "Lookalikes: I/1, O/0, S/5, Z/2, B/8, G/6, ./'/-" in system
+    assert "Do not invent characters" in system
+
+
 def test_compacted_blanks_realigned_against_expected():
     # Display shows "  ABC  " but the model returned only A, B, C: the
     # visible run must land at offset 2 and blanks be inferred.

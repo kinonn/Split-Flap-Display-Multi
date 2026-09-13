@@ -9,18 +9,19 @@ and does all calibration math in Python.
 
 from __future__ import annotations
 
-READER_SYSTEM = """You read a photograph of a modular split-flap display.
+READER_SYSTEM_TEMPLATE = """You read a photograph of a modular split-flap display.
 
-The display has a fixed number of modules arranged left to right. Each
+The display has exactly {total} modules arranged left to right. Each
 module shows exactly ONE character on its flap (a blank module shows a
-plain empty flap = a space). You must report every module position.
-
+plain empty flap = a space). You must report all {total} module positions.
+{charset_block}
 Rules that matter:
 - Report exactly one entry per module, in left-to-right order, index 0
   first. NEVER trim blank/space modules at the start or end: a blank
-  module is a real position and must be reported as a space.
-- "char" is a single character from the allowed set. Use a space " "
-  for a blank/empty flap. Do not invent characters.
+  module is a real position and must be reported as a space. Your answer
+  must contain exactly {total} entries, no more, no fewer.
+- "char" must be one of the allowed characters listed above. Use a space
+  " " for a blank/empty flap. Do not invent characters.
 - "condition" describes the mechanical state of that module:
   - "clean": the glyph is fully visible and centred, no flap seam
     crossing it.
@@ -39,6 +40,54 @@ Rules that matter:
 - Always answer by calling the report_reading tool; no prose answer is
   accepted.
 """
+
+def _charset_block(charset: str, drum: str) -> str:
+    """Human-readable character-set hint for the system prompt.
+
+    Groups the allowed characters so the model can tell confusable
+    glyphs apart (I/1, O/0, S/5, Z/2, B/8, G/6, ./'/-) and knows the
+    small punctuation marks (', ., -, /, :, !, ?, $, @, #, %) are real
+    characters, not dirt or seams.
+    """
+    if not charset:
+        return ""
+    shown = charset.replace(" ", "\u2423")
+    letters = "".join(c for c in charset if c.isalpha())
+    digits = "".join(c for c in charset if c.isdigit())
+    punct = "".join(c for c in charset if not c.isalnum() and c != " ")
+    lines = [f"Allowed characters ({len(charset)}): {shown!r} "
+             f"(\u2423 = space/blank)."]
+    if letters:
+        lines.append(f"Letters: {' '.join(letters)}")
+    if digits:
+        lines.append(f"Digits: {' '.join(digits)}")
+    if punct:
+        lines.append(f"Punctuation: {' '.join(punct)} "
+                     f"(tiny marks — do not mistake for seams or dirt)")
+    lines.append("Lookalikes: I/1, O/0, S/5, Z/2, B/8, G/6, ./'/- — "
+                 "check carefully before choosing.")
+    if drum and drum != charset:
+        lines.append(f"Drum order: {drum!r}")
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def reader_system_text(total: int, charset: str = "",
+                       drum: str = "") -> str:
+    """System prompt with the exact module count filled in.
+
+    The reader already knows `total` on every call, so the system
+    message states it explicitly instead of "a fixed number" — the
+    count is repeated in the user message too, but models weight the
+    system prompt more strongly against blank-trimming.
+    """
+    return READER_SYSTEM_TEMPLATE.format(
+        total=total, charset_block=_charset_block(charset, drum))
+
+
+# Backwards-compatible generic text (no specific count); prefer
+# reader_system_text(total) for actual reads.
+READER_SYSTEM = READER_SYSTEM_TEMPLATE.format(
+    total="a fixed number of", charset_block="")
 
 REPORT_READING_TOOL = {
     "type": "function",

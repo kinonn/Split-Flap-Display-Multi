@@ -219,6 +219,7 @@ class VlmCalibrator:
                  dwell_ms: int = 800, timeout_s: float = 60.0,
                  min_confidence: float = 0.6, exhaustive: bool = False,
                  mode: str = "full", on_event=None, max_seconds: float = 3600.0,
+                 phases: list[str] | None = None,
                  run_context: dict | None = None):
         if mode not in ("dry-run", "full"):
             raise ValueError("mode must be dry-run or full")
@@ -231,6 +232,9 @@ class VlmCalibrator:
         self.min_confidence = min_confidence
         self.exhaustive = exhaustive
         self.mode = mode
+        # Independently selectable phases (P0 always runs as a read-only
+        # safety gate). Per-run only; None/empty = full chain.
+        self.phases = self._normalize_phases(phases)
         self.on_event = on_event or (lambda e: None)
         self.max_seconds = max_seconds
         # Exhaustive mode visits every residue class so each drum
@@ -289,6 +293,25 @@ class VlmCalibrator:
         # Log every mutating display API call as `api` events so the run
         # log shows the full display traffic (status polls stay unlogged).
         self.display = _LoggingDisplay(display, self.event)
+
+    @staticmethod
+    def _normalize_phases(phases) -> list[str]:
+        """Validate a per-run phase selection; None/empty = full chain."""
+        order = ("p1", "p2", "p4", "acceptance")
+        if phases in (None, ""):
+            return list(order)
+        if isinstance(phases, str):
+            phases = [phases]
+        try:
+            items = [str(p).strip().lower() for p in list(phases)]
+        except TypeError:
+            raise ValueError("phases must be a list of phase names")
+        unknown = [p for p in items if p not in order]
+        if unknown:
+            raise ValueError(f"unknown phases: {', '.join(unknown)} "
+                             f"(choose from {', '.join(order)})")
+        # De-duplicate, keep canonical order.
+        return [p for p in order if p in items] or list(order)
 
     # -- events / abort -------------------------------------------------------
     def event(self, kind: str, text: str, photo: str | None = None,
@@ -1517,6 +1540,81 @@ class VlmCalibrator:
             | {ch for cells in phase_cells.values() for ch in cells},
             key=self.drum.index)
 
+    def _derive_flagged_readonly(self):
+        """Derive the P2 flagged-char list without touching offsets.
+
+        Used when P2 is requested without P1: a read-only reverse sweep
+        plus one deviant re-read pass, mirroring the residual computation
+        in `_p1_coarse` but skipping every nudge/commit. Unreliable
+        modules escalate exactly as in P1.
+        """
+        self.event("phase", "P2 input: read-only sweep "
+                            f"({len(self.drum)} characters)")
+        readings, chars = self._sweep()
+        shifts = {m: {ch: self._shift(readings[m].get(ch), ch)
+                      for ch in chars} for m in range(self.total)}
+        modes: dict[int, int] = {}
+        for m in range(self.total):
+            mode, purity, total = self._mode_purity(list(shifts[m].values()))
+            if total < SWEEP_MIN_SAMPLES or purity < SWEEP_TRUST_PURITY:
+                self._escalate(m, "?",
+                               f"unreliable reads ({total} samples, "
+                               f"purity {purity:.0%})")
+                continue
+            modes[m] = mode
+        deviant = sorted({ch for m in modes for ch in chars
+                          if shifts[m][ch] is not None
+                          and shifts[m][ch] != modes[m]}, key=self.drum.index)
+        if deviant:
+            self._reread_chars(deviant, readings, "p1r")
+        deviant_set = set(deviant)
+        residual: dict[int, dict[str, int | None]] = {}
+        for m in modes:
+            out: dict[str, int | None] = {}
+            for ch in chars:
+                if ch in deviant_set:
+                    out[ch] = self._shift(readings[m].get(ch), ch)
+                else:
+                    out[ch] = 0 if shifts[m][ch] == modes[m] \
+                        else shifts[m][ch]
+            residual[m] = out
+        phase_cells: dict[int, list[str]] = {}
+        for m in modes:
+            cells = []
+            for ch in chars:
+                entry = readings[m].get(ch)
+                if entry is None or not self._trusted(entry):
+                    continue
+                if entry.char != ch and not confusable(entry.char, ch):
+                    continue
+                if entry.condition in ("half", "double"):
+                    cells.append(ch)
+            if cells:
+                phase_cells[m] = cells
+        self._p1_flagged = sorted(
+            {ch for m in modes for ch in chars
+             if residual[m].get(ch) not in (None, 0)}
+            | {ch for cells in phase_cells.values() for ch in cells},
+            key=self.drum.index)
+        self.event("read", f"P2 input: {len(self._p1_flagged)} flagged "
+                           f"character(s) from read-only sweep")
+
+    def _subset_verdict(self) -> tuple[bool, str]:
+        """Verdict for runs that skip acceptance.
+
+        `converged` is only meaningful after the full acceptance sweep;
+        a subset run reports what it did and leaves human judgement for
+        the rest. Escalations still force `needs-human`.
+        """
+        if self.identity_persistent:
+            mods = sorted({e["module"] for e in self.identity_persistent})
+            return False, f"persistent identity/read problems on modules {mods}"
+        ran = [p for p in ("p1", "p2", "p4") if p in self.phases]
+        if not ran:
+            return False, "no tuning or verify phases selected"
+        return False, (f"subset complete ({'+'.join(ran)}); "
+                       "acceptance skipped, needs-human review")
+
     def _p2_fine(self):
         """P2: per-character offsets from the P1 residual map."""
         flagged = list(getattr(self, "_p1_flagged", []))
@@ -1715,6 +1813,7 @@ class VlmCalibrator:
             "contractVersion": SUPPORTED_CONTRACT,
             "exhaustive": self.exhaustive,
             "mode": self.mode,
+            "phases": list(self.phases),
             "fleet": {"totalModules": self.total,
                       "groupWidths": self.group_widths,
                       "charset": self.charset, "drumOrder": self.drum,
@@ -1756,10 +1855,20 @@ class VlmCalibrator:
                 ok, reason = False, ("dry-run: shift table only, "
                                      "nothing applied")
             else:
-                self._p1_coarse()
-                self._p2_fine()
-                self._p4_verify()
-                ok, reason = self._acceptance()
+                if "p1" in self.phases:
+                    self._p1_coarse()
+                elif "p2" in self.phases:
+                    # P2 needs the P1 residual map; without P1 run a
+                    # read-only sweep to derive it (no nudges/commits).
+                    self._derive_flagged_readonly()
+                if "p2" in self.phases:
+                    self._p2_fine()
+                if "p4" in self.phases:
+                    self._p4_verify()
+                if "acceptance" in self.phases:
+                    ok, reason = self._acceptance()
+                else:
+                    ok, reason = self._subset_verdict()
             report["result"] = "converged" if ok else "needs-human"
             report["reason"] = reason
         except CalibError as exc:
@@ -1784,6 +1893,12 @@ class VlmCalibrator:
             report["frames"] = self.frames
             report["deltas"] = self.deltas
             report["identity"] = {"persistent": self.identity_persistent}
+            if self.mode == "full":
+                report["skipped"] = [
+                    p for p in ("p1", "p2", "p4", "acceptance")
+                    if p not in self.phases]
+            else:
+                report["skipped"] = []
             report["summary"] = self.summarize(report["result"])
             report["budgets"] = {"frames": self.frames_used,
                                  "vlmCalls": self.vlm_calls,
