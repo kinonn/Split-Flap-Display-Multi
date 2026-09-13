@@ -473,3 +473,132 @@ def test_report_written_to_disk(tmp_path):
     run_calib(d, tmp_path)
     assert (tmp_path / "report.json").is_file()
     assert (tmp_path / "snapshot.json").is_file()
+
+
+def test_aborts_after_too_many_unreliable_reads(tmp_path):
+    # run-001 burned 53 min / the preview budget on a blind camera:
+    # 4 unreliable P1 modules then ~124 unreadable P2 escalations.
+    # More than MAX_UNRELIABLE_READS reader-trust escalations must stop
+    # the run immediately instead of tuning noise.
+    import pytest
+    from calib.display import CalibError
+    from calib_vlm.calibrate import MAX_UNRELIABLE_READS
+    d = FakeDisplay(total=4)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full",
+                          on_event=events.append)
+    for i in range(MAX_UNRELIABLE_READS):
+        calib._escalate(0, "?", f"unreliable reads ({i} samples)")
+    assert calib._unreliable_count == MAX_UNRELIABLE_READS
+    # The (MAX+1)th escalation raises: the run aborts via CalibError.
+    with pytest.raises(CalibError, match="too many unreliable reads"):
+        calib._escalate(0, "?", "unreadable during fine pass")
+
+
+def test_unreadable_escalation_counts_toward_abort(tmp_path):
+    from calib_vlm.calibrate import MAX_UNRELIABLE_READS
+    d = FakeDisplay(total=4)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    for _ in range(MAX_UNRELIABLE_READS):
+        calib._escalate(1, "X", "unreadable during fine pass")
+    assert calib._unreliable_count == MAX_UNRELIABLE_READS
+    # Non-reader escalations (char-cell clamp) must NOT count.
+    calib._escalate(1, "X", "identity fix does not fit a char cell")
+    assert calib._unreliable_count == MAX_UNRELIABLE_READS
+
+
+def test_display_api_calls_logged(tmp_path):
+    # Every mutating display call must appear in the log as an `api`
+    # event; status polls stay unlogged (wait_settled polls every 0.5 s).
+    d = FakeDisplay(total=4)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full",
+                          on_event=events.append)
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = [d.total]
+    calib.steps_per_char = d.spc
+    calib.display.show_and_settle("AB  ", 0, 5)
+    calib.display.preview(0, -1, 4)
+    calib.display.persist(1, "module", 4, 0, 0)
+    kinds = [e["kind"] for e in events]
+    assert "api" in kinds
+    api_texts = [e["text"] for e in events if e["kind"] == "api"]
+    assert any("POST show" in t for t in api_texts)
+    assert any("POST preview" in t for t in api_texts)
+    assert any("POST offsets" in t for t in api_texts)
+
+
+def test_vlm_call_logged_with_model_and_timing(tmp_path):
+    # Each frame read must log one `vlm` event with model + round trips.
+    d = FakeDisplay(total=4)
+    events = []
+    reader = SimReader(d)
+    reader.vlm = type("V", (), {"model": "test-model"})()
+    reader.last_calls = 1
+    calib = VlmCalibrator(d, FakeCamera(), reader,
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full",
+                          on_event=events.append)
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = [d.total]
+    calib.steps_per_char = d.spc
+    calib._show_read("AB  ", "probe")
+    vlm_events = [e for e in events if e["kind"] == "vlm"]
+    assert len(vlm_events) == 1
+    assert "test-model" in vlm_events[0]["text"]
+    assert "probe" in vlm_events[0]["text"]
+
+
+def test_events_carry_elapsed_seconds(tmp_path):
+    # Post-run speed analysis needs sub-second timing: every event must
+    # carry monotonic seconds since run start (wall `t` is 1 s resolution).
+    d = FakeDisplay(total=4)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full",
+                          on_event=events.append)
+    calib.event("phase", "probe phase")
+    assert events[0]["elapsed"] >= 0.0
+    assert isinstance(events[0]["elapsed"], float)
+
+
+def test_api_events_carry_duration(tmp_path):
+    # Per-call display cost (homing dominates) must be visible in the log.
+    d = FakeDisplay(total=4)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full",
+                          on_event=events.append)
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = [d.total]
+    calib.steps_per_char = d.spc
+    calib.display.show_and_settle("AB  ", 0, 5)
+    api_texts = [e["text"] for e in events if e["kind"] == "api"]
+    assert api_texts and all(" in " in t and t.endswith("s") for t in api_texts)
+
+
+def test_report_has_timing_context_and_traceback(tmp_path):
+    # Root-cause + speed analysis from report.json alone: run config,
+    # firmware identity, wall/VLM seconds, per-phase costs, crash trace.
+    d = FakeDisplay(total=4)
+    d.seed_module_error(1, -d.spc)
+    calib, report = run_calib(d, tmp_path)
+    assert report["result"] == "converged"
+    assert report["config"]["dwell_ms"] == 0
+    assert report["config"]["stepsPerRot"] == 2048
+    assert report["firmware"]["contractVersion"] == 1
+    assert report["timing"]["wallSeconds"] >= 0
+    assert report["timing"]["vlmSeconds"] >= 0
+    assert report["timing"]["vlmTokens"]["prompt_tokens"] >= 0
+    phases = [p["phase"] for p in report["timing"]["phases"]]
+    assert any("P1 coarse" in p for p in phases)
+    assert all(set(p) >= {"phase", "seconds", "frames", "vlmCalls",
+                          "previews", "persists"} for p in report["timing"]["phases"])

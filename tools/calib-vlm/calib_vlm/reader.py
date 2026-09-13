@@ -234,6 +234,7 @@ class VlmReader:
         # Actual round trips of the last read() call (a re-ask counts too);
         # the calibrator charges these against its VLM call budget.
         self.last_calls = 0
+        self.last_usage: dict = {}
         for attempt in range(2):
             extra = None if attempt == 0 else correction_text(total, got)
             messages = self._messages(total, charset, drum, jpeg, extra)
@@ -241,6 +242,13 @@ class VlmReader:
             try:
                 reply = self.vlm.chat(messages, tools=[REPORT_READING_TOOL],
                                       tool_choice="required")
+                usage = getattr(self.vlm, "last_usage", None) or {}
+                for key in ("prompt_tokens", "completion_tokens"):
+                    try:
+                        self.last_usage[key] = self.last_usage.get(key, 0) + int(
+                            usage.get(key, 0))
+                    except (TypeError, ValueError):
+                        pass
             except VLMError as exc:
                 raise ReaderError(str(exc)) from exc
             entries = self._extract(reply)

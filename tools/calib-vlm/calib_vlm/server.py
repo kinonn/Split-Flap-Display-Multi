@@ -267,7 +267,9 @@ class Harness:
             self.events.append(event)
             if event.get("photo") and event["photo"] not in self.photos:
                 self.photos.append(event["photo"])
-            self.events = self.events[-500:]
+            # No in-memory cap: the full log stays available via
+            # /api/run/events (offset/limit). events.jsonl on disk is
+            # already uncapped; the UI polls pages instead of a slice.
             run_dir = self.run_dir
         if run_dir:
             try:
@@ -279,14 +281,23 @@ class Harness:
 
     def state(self) -> dict:
         with self.lock:
-            return {"status": self.status, "events": self.events[-100:],
+            return {"status": self.status, "events": self.events[-200:],
                     "photos": self.photos[-24:], "report": self.report,
                     "run_dir": self.run_dir, "mode": self.mode,
                     "run_seq": self.run_seq,
+                    "event_count": len(self.events),
                     "frames": self.calibrator.frames_used
                     if self.calibrator else 0,
                     "vlm_calls": self.calibrator.vlm_calls
                     if self.calibrator else 0}
+
+    def events_since(self, offset: int, limit: int = 500) -> dict:
+        with self.lock:
+            total = len(self.events)
+            offset = max(0, min(offset, total))
+            limit = max(1, min(limit, 2000))
+            return {"total": total, "offset": offset,
+                    "events": self.events[offset:offset + limit]}
 
     def start(self, cfg: dict) -> dict:
         with self.lock:
@@ -360,7 +371,19 @@ class Harness:
                         min_confidence=float(cfg.get("min_confidence", 0.6)),
                         exhaustive=bool(cfg.get("exhaustive", False)),
                         mode=cfg.get("mode", "full"), on_event=self.log,
-                        max_seconds=float(cfg.get("max_seconds", 5400.0)))
+                        max_seconds=float(cfg.get("max_seconds", 5400.0)),
+                        run_context={
+                            "display_host": cfg.get("display_host"),
+                            "llm_base_url": cfg.get("llm_base_url"),
+                            "llm_model": cfg.get("llm_model"),
+                            "camera_index": cfg.get("camera_index"),
+                            "camera_brightness": cfg.get("camera_brightness"),
+                            "camera_exposure": cfg.get("camera_exposure"),
+                            "camera_crop_percent": cfg.get(
+                                "camera_crop_percent"),
+                            "camera_warmup_s": cfg.get("camera_warmup_s"),
+                            "annotate": bool(cfg.get("annotate", True)),
+                        })
                     with self.lock:
                         self.calibrator = calib
                     self.report = calib.run()
@@ -639,6 +662,12 @@ def run_abort():
 @app.get("/api/run/state")
 def run_state():
     return harness.state()
+
+
+@app.get("/api/run/events")
+def run_events(offset: int = 0, limit: int = 500):
+    """Full log paging: the UI polls this so no event is ever dropped."""
+    return harness.events_since(offset, limit)
 
 
 @app.get("/api/photos/{name}")
