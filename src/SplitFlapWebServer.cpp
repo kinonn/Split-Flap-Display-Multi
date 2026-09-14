@@ -536,6 +536,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
         int groupCount = isMultiDisplayMasterEnabled()
                              ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
                              : 1;
+        int scopeCounts[CALIB_MAX_GROUPS + 1] = {};
         for (JsonVariant nudge : nudges) {
             int scope = nudge["scope"].is<int>() ? nudge["scope"].as<int>() : 1;
             int module = nudge["module"].is<int>() ? nudge["module"].as<int>() : -1;
@@ -562,6 +563,17 @@ void SplitFlapWebServer::registerCalibRoutes() {
                 response["type"] = "error";
                 return request->send(400, "application/json", response.as<String>());
             }
+            // One ESP-NOW preview packet carries CALIB_MAX_NUDGES_PER_REMOTE
+            // nudges for a remote group; a bigger slice used to be forwarded
+            // only up to the 8th entry and dropped past that while this
+            // response still reported the full count (issue kinonn-bot#38).
+            if (! calibNudgesFitScope(scope, scopeCounts[scope] + 1)) {
+                response["message"] = "Too many nudges for scope " + String(scope) + " (max " +
+                                      String(CALIB_MAX_NUDGES_PER_REMOTE) + " per remote group)";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            scopeCounts[scope]++;
             batch.nudges[batch.count].scope = scope;
             batch.nudges[batch.count].module = module;
             batch.nudges[batch.count].charIndex = charIndex;

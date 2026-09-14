@@ -34,6 +34,22 @@ static int checks = 0;
     } while (0)
 
 int main() {
+    // --- preview-batch per-scope limit ---------------------------------------
+    // The local group is applied in-process and bounded only by the batch
+    // total (48), which the HTTP handler checks separately.
+    CHECK(calibNudgesFitScope(1, 1));
+    CHECK(calibNudgesFitScope(1, 48));
+    CHECK(calibNudgesFitScope(0, 48)); // defensive: anything <= 1 is local
+
+    // Remote groups: a slice of 8 fits the ESP-NOW preview packet, 9 must be
+    // refused rather than silently truncated.
+    for (int scope = 2; scope <= CALIB_MAX_GROUPS; scope++) {
+        CHECK(calibNudgesFitScope(scope, 1));
+        CHECK(calibNudgesFitScope(scope, CALIB_MAX_NUDGES_PER_REMOTE));
+        CHECK(! calibNudgesFitScope(scope, CALIB_MAX_NUDGES_PER_REMOTE + 1));
+        CHECK(! calibNudgesFitScope(scope, 48));
+    }
+
     // --- hold-mode text rule -------------------------------------------------
     // Held AND from the pinned master: accepted, or fleet calibration shows
     // can never reach a held group.

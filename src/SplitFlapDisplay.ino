@@ -255,15 +255,20 @@ void loop() {
             display.previewNudgeLocalBatch(mods, chars, deltas, localCount);
         }
         // Remote groups: forward their slices as volatile ESP-NOW nudges; the
-        // groups ack after homing so the busy fence covers them.
+        // groups ack after homing so the busy fence covers them. A slice can
+        // never exceed CALIB_MAX_NUDGES_PER_REMOTE here: the HTTP handler
+        // refuses a bigger batch for a remote scope, because one preview
+        // packet carries 8 nudges and the rest used to be dropped silently
+        // (issue kinonn-bot#38). The rc cap below is the defensive second
+        // half of that pair.
         if (splitflapEspNow && isMultiDisplayMasterEnabled()) {
             int groupCount = constrain(settings.getInt("masterGroupCount"), 1, MAX_DISPLAY_GROUPS);
             for (int g = 2; g <= groupCount; g++) {
-                uint8_t rmods[8];
-                int8_t rchars[8];
-                int16_t rdeltas[8];
+                uint8_t rmods[CALIB_MAX_NUDGES_PER_REMOTE];
+                int8_t rchars[CALIB_MAX_NUDGES_PER_REMOTE];
+                int16_t rdeltas[CALIB_MAX_NUDGES_PER_REMOTE];
                 int rc = 0;
-                for (int k = 0; k < count && rc < 8; k++) {
+                for (int k = 0; k < count && rc < CALIB_MAX_NUDGES_PER_REMOTE; k++) {
                     if (batch.nudges[k].scope == g) {
                         rmods[rc] = (uint8_t) batch.nudges[k].module;
                         rchars[rc] = (int8_t) batch.nudges[k].charIndex;

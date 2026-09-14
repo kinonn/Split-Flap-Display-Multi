@@ -17,6 +17,25 @@
 #define CALIB_CHAR_OFFSET_MAX 32
 #define CALIB_CONTRACT_VERSION 1
 
+// Per-scope limit for POST /api/calib/preview-batch. A remote group's slice
+// travels in ONE ESP-NOW preview packet, which carries at most 8 nudges
+// (SplitFlapPreviewNudgeMessage::nudges). A larger slice used to be
+// forwarded only up to the 8th entry and silently dropped past that while
+// the HTTP response still claimed the full count (issue kinonn-bot#38), so
+// the API now refuses such a batch instead of losing nudges.
+#define CALIB_MAX_NUDGES_PER_REMOTE 8
+
+// Does a preview-batch scope slice of `count` nudges fit? Group 1 (local) is
+// applied in-process and is bounded only by the batch total
+// (PendingActions::CalibBatchPreview::MAX_NUDGES); remote scopes are bounded
+// by the ESP-NOW packet above.
+inline bool calibNudgesFitScope(int scope, int count) {
+    if (scope <= 1) {
+        return true;
+    }
+    return count <= CALIB_MAX_NUDGES_PER_REMOTE;
+}
+
 // May an incoming text frame own the display of a controller in `mode`?
 // A held group (CALIB_HOLD_MODE) still has to accept text from the pinned
 // master: fleet calibration shows arrive over exactly that ESP-NOW text
