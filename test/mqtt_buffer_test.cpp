@@ -29,6 +29,7 @@ extern int g_publishCalls;
 extern PubSubClient *g_lastClient;
 extern int g_distributeCalls;
 extern std::string g_lastDistributed;
+extern bool g_lastDistributeCalib;
 extern int g_writeStringCalls;
 extern std::string g_lastWritten;
 extern float g_lastWriteSpeed;
@@ -136,6 +137,9 @@ int main() {
         mqtt.loop();
         CHECK(g_distributeCalls == 1);
         CHECK(g_lastDistributed == "fleet message");
+        // A staged MQTT message is not a calibration show: it must not arm
+        // the fleet ack fence that /api/calib/show relies on (kinonn-bot#42).
+        CHECK(g_lastDistributeCalib == false);
         CHECK(g_writeStringCalls == 0); // multi-group: no local writeString
         CHECK(g_publishCalls >= 1);     // state topic still published
     }
