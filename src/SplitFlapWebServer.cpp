@@ -319,6 +319,14 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["groupCount"] = isMultiDisplayMasterEnabled()
                                      ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
                                      : 1;
+        // Per-group module counts, group 1 (local) first. Clients must use
+        // these instead of assuming every group is local-wide: the master
+        // fans frames out with the user-editable masterGroupModuleCounts
+        // vector, which can be asymmetric (issue kinonn-bot#41).
+        JsonArray groupWidths = response["groupWidths"].to<JsonArray>();
+        for (int g = 1; g <= (int) response["groupCount"].as<int>(); g++) {
+            groupWidths.add(espNow && isMultiDisplayMasterEnabled() ? espNow->getGroupWidth(g - 1) : localModules);
+        }
         response["charset"] = charset;
         response["drumOrder"] = drumStr;
         response["displayOffset"] = display.getLiveDisplayOffset();

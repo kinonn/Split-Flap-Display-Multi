@@ -260,6 +260,10 @@ int SplitFlapEspNow::getGroupModuleCount(int groupIndex) {
     return MAX_MODULES;
 }
 
+int SplitFlapEspNow::getGroupWidth(int groupIndex) {
+    return getGroupModuleCount(groupIndex);
+}
+
 int SplitFlapEspNow::getTotalModuleCount() {
     int total = 0;
     int groupCount = getGroupCount();
@@ -773,8 +777,7 @@ void SplitFlapEspNow::applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt
         deltas[k] = (int) pkt->nudges[k].delta;
     }
     if (display.previewNudgeLocalBatch(mods, chars, deltas, count)) {
-        Serial.printf("[esp-now] applied %d volatile preview nudge(s) from group %d nudge\n",
-                      count, pkt->groupIndex);
+        Serial.printf("[esp-now] applied %d volatile preview nudge(s) from group %d nudge\n", count, pkt->groupIndex);
     }
 
     // Ack so the master's busy fence clears only after the homing finished.
@@ -786,9 +789,9 @@ void SplitFlapEspNow::applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt
     }
 }
 
-bool SplitFlapEspNow::pushPreviewNudges(int groupIndex, const uint8_t *modules,
-                                        const int8_t *charIndexes, const int16_t *deltas,
-                                        int count) {
+bool SplitFlapEspNow::pushPreviewNudges(
+    int groupIndex, const uint8_t *modules, const int8_t *charIndexes, const int16_t *deltas, int count
+) {
     if (! ensureInitialized()) return false;
     if (groupIndex < 1 || groupIndex >= getGroupCount()) return false;
     if (count < 1) return false;

@@ -151,8 +151,9 @@ class SplitFlapEspNow {
     // Volatile fleet preview (calibration trim): forwards RAM-only nudges to
     // one remote group and arms an ack fence for it. No NVS write on the
     // remote; the next offsets push/reload reverts the preview.
-    bool pushPreviewNudges(int groupIndex, const uint8_t *modules,
-                           const int8_t *charIndexes, const int16_t *deltas, int count);
+    bool pushPreviewNudges(
+        int groupIndex, const uint8_t *modules, const int8_t *charIndexes, const int16_t *deltas, int count
+    );
     bool hasPreviewAcksPending();
     // Fleet text ack fence (issue kinonn-bot#42): armed by the master when it
     // distributes a calibration frame, cleared per group when that group
@@ -172,6 +173,11 @@ class SplitFlapEspNow {
     // the local count in single-group mode. Read-only; used by MQTT status
     // reporting of the physical display size.
     int getTotalModuleCount();
+    // Module count of one group: 0 = local display, 1.. = remote groups in
+    // masterGroupModuleCounts order. Public so the calibration status API can
+    // report groupWidths instead of letting clients assume every group is
+    // local-wide (issue kinonn-bot#41).
+    int getGroupWidth(int groupIndex);
 
   private:
     JsonSettings &settings;
