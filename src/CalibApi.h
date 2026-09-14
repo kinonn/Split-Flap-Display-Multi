@@ -5,8 +5,9 @@
 //
 // Deliberately Arduino-free so it can be unit-tested on the host without
 // stubs. The JSON contract file duplicates these values for the AI agent —
-// keep the two in sync (CI checks the drum tables against
-// SplitFlapModule).
+// keep the two in sync: test/calib_contract_test.cpp compares the charsets
+// and limits in src/web/calib-contract.json against SplitFlapModule's drum
+// tables and these constants on the host.
 
 #define CALIB_HOLD_MODE 4
 #define CALIB_MAX_MODULES 8
@@ -15,6 +16,17 @@
 #define CALIB_CHAR_OFFSET_MIN -32
 #define CALIB_CHAR_OFFSET_MAX 32
 #define CALIB_CONTRACT_VERSION 1
+
+// May an incoming text frame own the display of a controller in `mode`?
+// A held group (CALIB_HOLD_MODE) still has to accept text from the pinned
+// master: fleet calibration shows arrive over exactly that ESP-NOW text
+// path, and dropping them left remote groups showing stale glyphs while the
+// master reported settled (issue kinonn-bot#37). Text from any other sender
+// keeps being dropped, which is the guard's original purpose — a non-held
+// master's clock/date/scroll pushes must not overwrite a held group's frame.
+inline bool calibTextAllowed(int mode, bool fromPinnedMaster) {
+    return fromPinnedMaster || mode != CALIB_HOLD_MODE;
+}
 
 // Pre-hold display mode tracker so hold release restores it (issue
 // kinonn-bot#35). Plain value type with the exact engage/release rules;

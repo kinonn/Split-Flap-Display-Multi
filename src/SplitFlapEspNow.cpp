@@ -103,19 +103,42 @@ void SplitFlapEspNow::loop() {
     packet.text[moduleCount] = '\0';
     String text = String(packet.text);
 
-    // Calibration hold owns the display: drop remote text instead of
-    // fighting the agent's show frames.
-    if (settings.getInt("mode") == CALIB_HOLD_MODE) {
+    // A held group still has to accept the pinned master's frames: fleet
+    // calibration shows arrive over this exact ESP-NOW text path, so the old
+    // blanket drop left remote groups showing stale glyphs while the master
+    // reported settled (issue kinonn-bot#37). Text from anyone else keeps
+    // being dropped — that is the guard's original purpose (a non-held
+    // master's clock/date/scroll pushes must not overwrite a held frame).
+    bool fromPinnedMaster;
+    portENTER_CRITICAL(&packetMux);
+    fromPinnedMaster = masterMacKnown && memcmp(pendingTextMac, masterMac, 6) == 0;
+    portEXIT_CRITICAL(&packetMux);
+
+    if (! calibTextAllowed(settings.getInt("mode"), fromPinnedMaster)) {
         return;
     }
 
-    if (text == lastRemoteText) {
-        return;
+    bool reShown = (text == lastRemoteText);
+    if (! reShown) {
+        // A held group must not latch into remote mode here, or its own
+        // clock/date modes would resume under the agent's frame the moment
+        // hold is released on the master.
+        if (settings.getInt("mode") != CALIB_HOLD_MODE) {
+            settings.putInt("mode", ESP_NOW_REMOTE_MODE);
+        }
+        display.writeString(text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
+        lastRemoteText = text;
     }
 
-    settings.putInt("mode", ESP_NOW_REMOTE_MODE);
-    display.writeString(text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
-    lastRemoteText = text;
+    // Ack even a re-shown identical frame: it is already on the drums, and
+    // the master's fence must clear (issue kinonn-bot#42). A master that
+    // never armed a fence simply ignores it.
+    if (masterMacKnown) {
+        SplitFlapCalibAckMessage ack = {};
+        ack.version = ESP_NOW_CALIB_ACK;
+        ack.groupIndex = packet.groupIndex;
+        esp_now_send(masterMac, (const uint8_t *) &ack, sizeof(ack));
+    }
 }
 
 bool SplitFlapEspNow::isMasterEnabled() {
@@ -181,7 +204,7 @@ bool SplitFlapEspNow::ensureInitialized() {
 }
 
 void SplitFlapEspNow::distributeMessage(
-    const String &message, bool centering, unsigned long scrollDelayMs, int scrollRepeatCount
+    const String &message, bool centering, unsigned long scrollDelayMs, int scrollRepeatCount, bool calib
 ) {
     if (! ensureInitialized()) {
         return;
@@ -190,7 +213,7 @@ void SplitFlapEspNow::distributeMessage(
     int totalModuleCount = getTotalModuleCount();
 
     if (message.length() <= totalModuleCount) {
-        distributeFrame(buildFrame(message, totalModuleCount, centering));
+        distributeFrame(buildFrame(message, totalModuleCount, centering), calib);
         return;
     }
 
@@ -212,7 +235,7 @@ void SplitFlapEspNow::distributeMessage(
 
     for (int r = 0; r < repeats; r++) {
         for (int i = 0; i < chunkCount; i++) {
-            distributeFrame(chunks[i]);
+            distributeFrame(chunks[i], calib);
             if (i < chunkCount - 1 || r < repeats - 1) {
                 delay(scrollDelayMs);
             }
@@ -292,7 +315,7 @@ String SplitFlapEspNow::buildFrame(const String &message, int width, bool center
     return frame;
 }
 
-void SplitFlapEspNow::distributeFrame(const String &frame) {
+void SplitFlapEspNow::distributeFrame(const String &frame, bool calib) {
     int groupCount = getGroupCount();
     int offset = 0;
 
@@ -311,6 +334,14 @@ void SplitFlapEspNow::distributeFrame(const String &frame) {
             moduleCount,
             offset + localModuleCount
         );
+        // Arm BEFORE the send: a fast group could ack before the mask is set
+        // and the fence would then never clear (issue kinonn-bot#42).
+        if (calib) {
+            portENTER_CRITICAL(&calibAckMux);
+            calibAckPendingMask |= (uint8_t) (1 << groupIndex);
+            calibAckDeadlineMs = millis() + PUSH_ACK_TIMEOUT_MS;
+            portEXIT_CRITICAL(&calibAckMux);
+        }
         sendToPeer(groupIndex, segment, moduleCount);
         offset += moduleCount;
     }
@@ -539,6 +570,11 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         return;
     }
 
+    if (len == sizeof(SplitFlapCalibAckMessage) && data[0] == ESP_NOW_CALIB_ACK) {
+        processCalibAck(mac);
+        return;
+    }
+
     if (len == sizeof(SplitFlapOffsetsReportMessage) && data[0] == ESP_NOW_OFFSETS_REPORT) {
         processOffsetsReport(mac, (const SplitFlapOffsetsReportMessage *) data);
         return;
@@ -560,6 +596,7 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         masterMacKnown = true;
     }
     memcpy(&pendingPacket, data, sizeof(pendingPacket));
+    memcpy(pendingTextMac, mac, 6);
     pendingMessage = true;
     portEXIT_CRITICAL(&packetMux);
 }
@@ -811,6 +848,27 @@ void SplitFlapEspNow::processPreviewAck(const uint8_t mac[6], const SplitFlapPre
     portENTER_CRITICAL(&previewAckMux);
     previewAckPendingMask &= (uint8_t) ~(1 << groupIdx);
     portEXIT_CRITICAL(&previewAckMux);
+}
+
+bool SplitFlapEspNow::hasCalibAcksPending() {
+    portENTER_CRITICAL(&calibAckMux);
+    if (calibAckPendingMask != 0 && (long) (millis() - calibAckDeadlineMs) >= 0) {
+        calibAckPendingMask = 0; // expired: ack never came, never stick busy
+    }
+    bool pending = calibAckPendingMask != 0;
+    portEXIT_CRITICAL(&calibAckMux);
+    return pending;
+}
+
+void SplitFlapEspNow::processCalibAck(const uint8_t mac[6]) {
+    if (! initialized || ! isMasterEnabled()) return;
+
+    int groupIdx = groupIndexForMac(mac);
+    if (groupIdx < 1) return;
+
+    portENTER_CRITICAL(&calibAckMux);
+    calibAckPendingMask &= (uint8_t) ~(1 << groupIdx);
+    portEXIT_CRITICAL(&calibAckMux);
 }
 
 void SplitFlapEspNow::applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt) {

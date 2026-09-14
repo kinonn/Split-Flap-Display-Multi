@@ -17,6 +17,12 @@
 #define ESP_NOW_OFFSETS_REPORT 0xFB
 #define ESP_NOW_PREVIEW_NUDGE 0xFA
 #define ESP_NOW_PREVIEW_ACK 0xF9
+// Ack for a fleet text frame (calibration shows): a remote answers once its
+// own drum motion finished, so the master's busy fence covers remote groups
+// instead of trusting that they finish within the local slice's motion
+// (issue kinonn-bot#42). Deliberately a distinct type, so an older master
+// simply logs an unknown length and ignores it.
+#define ESP_NOW_CALIB_ACK 0xF7
 #define OFFSET_RELOAD_SETTLE_MS 250
 #define OFFSET_PACKET_SPACING_MS 10
 // How long the master waits for pushed groups to report back after a
@@ -107,6 +113,13 @@ struct SplitFlapPreviewAckMessage
     uint8_t groupIndex;
 };
 
+// Remote -> master: "the fleet text frame you sent me is fully displayed".
+struct SplitFlapCalibAckMessage
+{
+    uint8_t version;
+    uint8_t groupIndex;
+};
+
 struct DiscoveredPeer
 {
     uint8_t mac[6];
@@ -141,6 +154,11 @@ class SplitFlapEspNow {
     bool pushPreviewNudges(int groupIndex, const uint8_t *modules,
                            const int8_t *charIndexes, const int16_t *deltas, int count);
     bool hasPreviewAcksPending();
+    // Fleet text ack fence (issue kinonn-bot#42): armed by the master when it
+    // distributes a calibration frame, cleared per group when that group
+    // acks after its writeString() returned. Expiry-aware like the other
+    // fences, so a missing ack can never stick the busy signal.
+    bool hasCalibAcksPending();
     // Trust-on-first-use pin for offset pushes (F3): the first push sender
     // becomes the pinned master; later pushes from any other MAC are
     // dropped. Returns true when a pin exists and mac differs from it.
@@ -148,7 +166,7 @@ class SplitFlapEspNow {
     void processPendingOffsetPackets();
     void distributeMessage(
         const String &message, bool centering = true, unsigned long scrollDelayMs = DEFAULT_SCROLL_DELAY_MS,
-        int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT
+        int scrollRepeatCount = DEFAULT_SCROLL_REPEAT_COUNT, bool calib = false
     );
     // Total module count across all groups (group 0 = local display). Equals
     // the local count in single-group mode. Read-only; used by MQTT status
@@ -167,6 +185,10 @@ class SplitFlapEspNow {
     // could still interleave. portENTER_CRITICAL spins across cores.
     portMUX_TYPE packetMux = portMUX_INITIALIZER_UNLOCKED;
     SplitFlapEspNowMessage pendingPacket;
+    // Sender of the queued text packet. The hold-mode text rule needs the
+    // sender at drain time (loop task), where the receive callback's `mac`
+    // is long gone (issue kinonn-bot#37).
+    uint8_t pendingTextMac[6];
     String lastRemoteText;
     bool initialized;
 
@@ -197,6 +219,11 @@ class SplitFlapEspNow {
     portMUX_TYPE previewAckMux = portMUX_INITIALIZER_UNLOCKED;
     uint8_t previewAckPendingMask = 0;
     unsigned long previewAckDeadlineMs = 0;
+    // Fleet text ack fence (master side only): bit i = group i still owes an
+    // ack for the calibration frame it was sent.
+    portMUX_TYPE calibAckMux = portMUX_INITIALIZER_UNLOCKED;
+    uint8_t calibAckPendingMask = 0;
+    unsigned long calibAckDeadlineMs = 0;
 
     bool ensureInitialized();
     int getGroupCount();
@@ -204,7 +231,7 @@ class SplitFlapEspNow {
     String getGroupMac(int groupIndex);
     String sliceMessage(const String &message, int start, int width);
     String buildFrame(const String &message, int width, bool centering);
-    void distributeFrame(const String &frame);
+    void distributeFrame(const String &frame, bool calib = false);
     void splitIntoChunks(const String &input, int width, String chunks[], int maxChunks, int &outCount);
     bool parseMacAddress(const String &macString, uint8_t mac[6]);
     bool sendToPeer(int groupIndex, const String &text, int moduleCount);
@@ -215,6 +242,7 @@ class SplitFlapEspNow {
     void applyCharOffsetsPush(const SplitFlapCharOffsetsPushMessage *pkt);
     void applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt);
     void processPreviewAck(const uint8_t mac[6], const SplitFlapPreviewAckMessage *pkt);
+    void processCalibAck(const uint8_t mac[6]);
     void processOffsetsReport(const uint8_t *mac, const SplitFlapOffsetsReportMessage *pkt);
     void processCharOffsetsReport(const uint8_t *mac, const SplitFlapCharOffsetsReportMessage *pkt);
     int groupIndexForMac(const uint8_t mac[6]);

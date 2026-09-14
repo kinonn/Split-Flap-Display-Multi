@@ -215,7 +215,12 @@ void loop() {
         String frame = String(calibFrame.c_str());
         if (splitflapEspNow && isMultiDisplayMasterEnabled() &&
             frame.length() == (unsigned int) splitflapEspNow->getTotalModuleCount()) {
-            splitflapEspNow->distributeMessage(frame, false);
+            // calib=true arms the fleet ack fence, so status.busy keeps
+            // covering the run until every group reports its own motion done
+            // (issue kinonn-bot#42).
+            splitflapEspNow->distributeMessage(
+                frame, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, /*calib=*/true
+            );
         } else {
             display.writeString(frame, MAX_RPM, false);
         }

@@ -271,8 +271,10 @@ bool SplitFlapWebServer::isCalibBusy() {
         pendingActions_.hasPushOffsets()) {
         return true;
     }
-    // Outstanding remote push acks (master only; null-safe elsewhere).
-    if (espNow && (espNow->hasPushAcksPending() || espNow->hasPreviewAcksPending())) {
+    // Outstanding remote acks (master only; null-safe elsewhere): offset
+    // pushes, volatile nudges and fleet text frames each report back, so a
+    // persist/verify photo never lands while a remote group is still moving.
+    if (espNow && (espNow->hasPushAcksPending() || espNow->hasPreviewAcksPending() || espNow->hasCalibAcksPending())) {
         return true;
     }
     return false;
@@ -665,8 +667,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
                 return request->send(400, "application/json", response.as<String>());
             }
             int value = json["value"].as<int>();
-            if (isLocal) {
-                settings.putInt("displayOffset", value);
+
                 pendingActions_.requestReloadOffsets();
                 if (! isMultiDisplayMasterEnabled() && espNow) {
                     pendingActions_.requestReportOffsets();
