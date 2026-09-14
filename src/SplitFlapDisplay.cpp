@@ -629,7 +629,8 @@ int SplitFlapDisplay::getLiveCharOffset(int module, int charIndex) const {
     return charOffsets[module][charIndex];
 }
 
-bool SplitFlapDisplay::previewNudgeLocalBatch(const int *modulesIn, const int *charIndexes, const int *deltas, int count) {
+bool
+SplitFlapDisplay::previewNudgeLocalBatch(const int *modulesIn, const int *charIndexes, const int *deltas, int count) {
     bool affectedFlags[MAX_MODULES] = {};
     bool any = false;
     int rowCopy[48];

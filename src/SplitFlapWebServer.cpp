@@ -316,9 +316,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
         // division truncates (12 modules / 8 local = 1), which made the
         // calibration tool treat remote modules as local and preview
         // out-of-range indices (firmware 400 "expected 0..7").
-        response["groupCount"] = isMultiDisplayMasterEnabled()
-                                     ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
-                                     : 1;
+        response["groupCount"] =
+            isMultiDisplayMasterEnabled() ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS) : 1;
         // Per-group module counts, group 1 (local) first. Clients must use
         // these instead of assuming every group is local-wide: the master
         // fans frames out with the user-editable masterGroupModuleCounts
@@ -351,9 +350,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
 
     // Enter/leave calibration hold (mode 4): suspends date/time/random/scroll
     // writes so the agent owns the display. Fleet: call on each controller.
-    server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/hold",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(
+        new AsyncCallbackJsonWebHandler("/api/calib/hold", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -384,15 +382,14 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["holdActive"] = active;
         response["previousMode"] = previousMode;
         request->send(200, "application/json", response.as<String>());
-    }
-    ));
+    })
+    );
 
     // Deterministic exact-width show: no centering, no scroll. On the master,
     // a fleet-width frame (length == total modules) is distributed across all
     // ESP-NOW groups left-to-right; a local-width frame shows locally only.
-    server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/show",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(
+        new AsyncCallbackJsonWebHandler("/api/calib/show", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -437,8 +434,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["fleetFrame"] = fleetFrame;
         response["dwellMs"] = dwellMs;
         request->send(202, "application/json", response.as<String>());
-    }
-    ));
+    })
+    );
 
     // Ground truth for a shown frame so the camera has expected glyphs.
     server.on("/api/calib/frame", HTTP_GET, [this](AsyncWebServerRequest *request) {
@@ -468,8 +465,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
     // module, no NVS write. For fleets, call each controller directly.
     // charIndex -1 = coarse module offset, else drum index 0..charset-1.
     server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/preview",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        "/api/calib/preview", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -527,8 +523,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
     // All nudges are applied and the touched modules re-homed in ONE pass so
     // N independent modules cost one homing cycle (parallel trim phase).
     server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/preview-batch",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        "/api/calib/preview-batch", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -543,15 +538,14 @@ void SplitFlapWebServer::registerCalibRoutes() {
         int charset = display.getCharsetSize();
         int maxDelta = display.getStepsPerRot();
         if (nudges.size() == 0 || nudges.size() > PendingActions::CalibBatchPreview::MAX_NUDGES) {
-            response["message"] = "Invalid nudges count (expected 1.." +
-                                  String(PendingActions::CalibBatchPreview::MAX_NUDGES) + ")";
+            response["message"] =
+                "Invalid nudges count (expected 1.." + String(PendingActions::CalibBatchPreview::MAX_NUDGES) + ")";
             response["type"] = "error";
             return request->send(400, "application/json", response.as<String>());
         }
         PendingActions::CalibBatchPreview batch;
-        int groupCount = isMultiDisplayMasterEnabled()
-                             ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS)
-                             : 1;
+        int groupCount =
+            isMultiDisplayMasterEnabled() ? constrain(settings.getInt("masterGroupCount"), 1, CALIB_MAX_GROUPS) : 1;
         int scopeCounts[CALIB_MAX_GROUPS + 1] = {};
         for (JsonVariant nudge : nudges) {
             int scope = nudge["scope"].is<int>() ? nudge["scope"].as<int>() : 1;
@@ -585,7 +579,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
             // response still reported the full count (issue kinonn-bot#38).
             if (! calibNudgesFitScope(scope, scopeCounts[scope] + 1)) {
                 response["message"] = "Too many nudges for scope " + String(scope) + " (max " +
-                                      String(CALIB_MAX_NUDGES_PER_REMOTE) + " per remote group)";
+                    String(CALIB_MAX_NUDGES_PER_REMOTE) + " per remote group)";
                 response["type"] = "error";
                 return request->send(400, "application/json", response.as<String>());
             }
@@ -614,9 +608,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
     // changes (CalibrationTriggers.h), so rolling back by re-POSTing identical
     // settings is a no-op and RAM-only preview residue would otherwise survive
     // across runs and corrupt the next run's baseline.
-    server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/reload",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(
+        new AsyncCallbackJsonWebHandler("/api/calib/reload", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         (void) json;
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
@@ -636,15 +629,14 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["message"] = "Reload queued (volatile previews reverted)";
         response["type"] = "success";
         request->send(202, "application/json", response.as<String>());
-    }
-    ));
+    })
+    );
 
     // Scoped persist (Phase 3): writes ONE offset cell to NVS, then queues
     // the existing reload/push paths. scope 1 (or "local") = local group,
     // 2..6 = remote group on the master.
     server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/offsets",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        "/api/calib/offsets", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
