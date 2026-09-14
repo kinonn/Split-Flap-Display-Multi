@@ -35,9 +35,10 @@
     "notes": [
         "Drums move forward-only: always step patterns in drum order, never random.",
         "Show frames are exact-width: length must equal numModules (local) or totalModules (fleet-wide distribute via master). Centering and scroll are forced off.",
-        "Poll GET /api/calib/status until busy==false, wait dwellMs, then shoot. GET /api/calib/frame?frameId=N is ground truth.",
-        "Preview is volatile RAM-only on the controller called (call each group directly for fleets); reload reverts. Persist via POST /api/calib/offsets (scope local or group 2..6 on master).",
-        "Calibration hold (mode 4) suspends date/time/random/scroll/MQTT/ESP-NOW writes; engage on every controller before starting, release when done."
+        "dwellMs on /show is client-side metadata: the firmware range-checks and echoes it but never blocks on it, so clients wait it out themselves. Poll GET /api/calib/status until busy==false, then shoot; GET /api/calib/frame?frameId=N is ground truth. On a fleet, busy also covers remote groups until each one acks the frame.",
+        "Preview is volatile RAM-only on the controller called (call each group directly for fleets); reload reverts. Persist via POST /api/calib/offsets (scope local or group 2..6 on master); module and display values must stay within one revolution.",
+        "Calibration hold (mode 4) suspends date/time/random/scroll/MQTT writes; engage on every controller before starting, release when done. A held controller still accepts frames from the master it has learned, so fleet-wide shows keep working while every group is held.",
+        "Fleet geometry: groups are NOT assumed to be equal width. Read groupWidths from GET /api/calib/status (group 1 first) — the master fans frames out using the editable masterGroupModuleCounts vector."
     ],
     "endpoints": {
         "status": "GET /api/calib/status (includes groupWidths: per-group module counts, group 1 first)",

@@ -403,6 +403,10 @@ void SplitFlapWebServer::registerCalibRoutes() {
             return request->send(400, "application/json", response.as<String>());
         }
         String frame = json["frame"].as<String>();
+        // dwellMs is client-side metadata: the firmware must not block the
+        // loop task (and with it ESP-NOW/MQTT service) for a dwell, so it is
+        // range-checked and echoed but never applied — clients wait it out
+        // themselves (issue kinonn-bot#46).
         int dwellMs = json["dwellMs"].is<int>() ? json["dwellMs"].as<int>() : 800;
         if (dwellMs < 0 || dwellMs > 10000) {
             response["message"] = "Invalid dwellMs (expected 0..10000)";
@@ -496,7 +500,11 @@ void SplitFlapWebServer::registerCalibRoutes() {
             response["type"] = "error";
             return request->send(400, "application/json", response.as<String>());
         }
-        if (getCalibBusy()) {
+        // Same busy predicate as /show: queued work counts, not just work
+        // already executing, so a preview cannot be queued on top of a
+        // pending show and land in an order the caller did not intend
+        // (issue kinonn-bot#46).
+        if (isCalibBusy()) {
             response["message"] = "Display busy, poll status until busy==false";
             response["type"] = "error";
             return request->send(409, "application/json", response.as<String>());
@@ -588,7 +596,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
             batch.nudges[batch.count].delta = delta;
             batch.count++;
         }
-        if (getCalibBusy()) {
+        if (isCalibBusy()) {
             response["message"] = "Display busy, poll status until busy==false";
             response["type"] = "error";
             return request->send(409, "application/json", response.as<String>());
@@ -614,7 +622,7 @@ void SplitFlapWebServer::registerCalibRoutes() {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
         JsonDocument response;
-        if (getCalibBusy()) {
+        if (isCalibBusy()) {
             response["message"] = "Display busy, poll status until busy==false";
             response["type"] = "error";
             return request->send(409, "application/json", response.as<String>());
@@ -670,6 +678,11 @@ void SplitFlapWebServer::registerCalibRoutes() {
         bool isLocal = (group == 1);
         int localModules = display.getNumModules();
         int charset = display.getCharsetSize();
+        // Module and display offsets re-anchor a drum / the whole display, so
+        // a value beyond one revolution is meaningless: the firmware reduces
+        // it modulo stepsPerRot, which would leave a permanently wrong offset
+        // in NVS (issue kinonn-bot#46). Char cells keep their own +/-32 clamp.
+        int maxOffset = display.getStepsPerRot();
 
         // F1: a persist re-homes motors via the loop drain. Refuse when a
         // show/preview/reload/push is still in flight — persisting under a
@@ -687,7 +700,13 @@ void SplitFlapWebServer::registerCalibRoutes() {
                 return request->send(400, "application/json", response.as<String>());
             }
             int value = json["value"].as<int>();
-
+            if (value < -maxOffset || value > maxOffset) {
+                response["message"] = "Invalid value (expected -" + String(maxOffset) + ".." + String(maxOffset) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
+            if (isLocal) {
+                settings.putInt("displayOffset", value);
                 pendingActions_.requestReloadOffsets();
                 if (! isMultiDisplayMasterEnabled() && espNow) {
                     pendingActions_.requestReportOffsets();
@@ -707,6 +726,11 @@ void SplitFlapWebServer::registerCalibRoutes() {
                 return request->send(400, "application/json", response.as<String>());
             }
             int value = json["value"].as<int>();
+            if (value < -maxOffset || value > maxOffset) {
+                response["message"] = "Invalid value (expected -" + String(maxOffset) + ".." + String(maxOffset) + ")";
+                response["type"] = "error";
+                return request->send(400, "application/json", response.as<String>());
+            }
             if (isLocal) {
                 if (module >= localModules) {
                     response["message"] = "Invalid module (expected 0.." + String(localModules - 1) + ")";
