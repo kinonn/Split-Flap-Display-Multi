@@ -219,6 +219,12 @@ class FakeDisplay:
     def show_and_settle(self, frame: str, dwell_ms: int = 800,
                         timeout_s: float | None = None, abort_flag=None,
                         pickup_grace_s: float = 3.0) -> dict:
+        # Firmware contract (src/SplitFlapWebServer.cpp /api/calib/show):
+        # dwellMs outside 0..10000 is rejected with HTTP 400, so an
+        # out-of-range server config would fail the run at its first show.
+        if dwell_ms < 0 or dwell_ms > 10000:
+            raise CalibError("POST /api/calib/show -> HTTP 400: "
+                             "Invalid dwellMs (expected 0..10000)")
         self.frame = frame
         self.fid += 1
         return {"frameId": self.fid, "fleetFrame": False}
