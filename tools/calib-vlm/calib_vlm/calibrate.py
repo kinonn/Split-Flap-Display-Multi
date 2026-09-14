@@ -32,15 +32,12 @@ MAX_VLM_CALLS = 300
 MAX_PREVIEWS = 200
 MAX_PERSISTS = 400
 MAX_SWEEPS = 3
-MAX_TUNE_ITER = 3
 # Abort when the reader cannot be trusted: more than this many
 # unreliable/unreadable escalations means camera/framing/lighting is bad
 # and continuing would burn wear/budget tuning noise.
 MAX_UNRELIABLE_READS = 5
 # Deltas tried per suspect cell (motor steps), coarse first.
 TRY_DELTAS = (4, -4, 2, -2, 8, -8, 1, -1)
-CONDITION_COST = {"clean": 0, "blank": 0, "half": 1, "double": 2,
-                  "stuck": 3, "unreadable": 4}
 # A module misaligned (half/double, identity still right) on this many
 # uniform frames is a whole-drum phase fault: tune the module cell once
 # instead of scattering per-char alignment searches across the drum.
@@ -61,6 +58,14 @@ MODULE_TRIM_GUARDS = 3
 # single |delta| > 32 with HTTP 400.
 CHAR_OFFSET_LIMIT = 32
 PREVIEW_DELTA_MAX = 32
+# Preview-batch sizes (src/PendingActions.h + the loop-task drain in
+# SplitFlapDisplay.ino): a POST /api/calib/preview-batch above
+# BATCH_MAX_NUDGES is rejected with HTTP 400 (not retryable), and the
+# drain copies at most REMOTE_BATCH_MAX_NUDGES nudges per remote group —
+# silently dropping the rest with no error. Both caps are per request, so
+# the tool chunks to them.
+BATCH_MAX_NUDGES = 48
+REMOTE_BATCH_MAX_NUDGES = 8
 # Shift-mode sweep (the new P1): command every character uniformly on every
 # module, walking the drum in REVERSE so each step is ~a full revolution and
 # every frame passes the magnet (independently homed). The per-module
@@ -598,10 +603,70 @@ class VlmCalibrator:
         return rec, reading
 
     # -- fleet geometry (mirrors calib.loop.Calibrator) -----------------------
-    def _widths(self, status: dict) -> list[int]:
+    @staticmethod
+    def _parse_widths(raw, groups: int) -> list[int] | None:
+        """First `groups` per-group module counts of a CSV/list, or None.
+
+        `masterGroupModuleCounts` is a user-editable CSV (firmware default
+        "8,8,8,8,8,8"); `GET /api/calib/status` reports the same data as a
+        `groupWidths` list. Entry 0 is group 1 (the local controller),
+        entry 1 group 2, ... (SplitFlapEspNow::getGroupModuleCount).
+        """
+        if raw is None or raw == "":
+            return None
+        items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+        try:
+            widths = [int(str(part).strip()) for part in items
+                      if str(part).strip() != ""]
+        except (TypeError, ValueError):
+            return None
+        if len(widths) < groups or any(w <= 0 for w in widths[:groups]):
+            return None
+        return widths[:groups]
+
+    def _declared_widths(self, status: dict, settings: dict,
+                         total: int, local: int, groups: int) -> list[int] | None:
+        """Group widths the firmware declares, or None when it declares none.
+
+        The firmware maps fleet modules through `masterGroupModuleCounts`,
+        so assuming every group is local-wide mis-maps every module past
+        the first group boundary. Prefer the status endpoint's
+        `groupWidths` (list, group 1 first); fall back to the
+        `masterGroupModuleCounts` CSV of the /settings snapshot. A
+        `groupWidths` that is present but contradicts the status counts is
+        an error — guessing a mapping would silently mis-tune.
+        """
+        if status.get("groupWidths") is not None:
+            raw = status["groupWidths"]
+            widths = self._parse_widths(raw, groups)
+            if (widths is None or len(widths) != groups
+                    or widths[0] != local or sum(widths) != total):
+                raise CalibError(
+                    f"fleet geometry inconsistent: groupWidths {raw!r} "
+                    f"does not cover {total} total / {local} local module(s) "
+                    f"over {groups} group(s)")
+            return widths
+        widths = self._parse_widths(settings.get("masterGroupModuleCounts"),
+                                    groups)
+        if widths is not None and widths[0] == local and sum(widths) == total:
+            return widths
+        return None
+
+    def _widths(self, status: dict, settings: dict | None = None) -> list[int]:
+        """Module count per group, group 1 (local) first.
+
+        Order of preference: the firmware's declared group widths (status
+        `groupWidths`, else the `masterGroupModuleCounts` CSV the run
+        already fetches), then the legacy equal-width heuristic for
+        firmware that reports neither.
+        """
         total = int(status["totalModules"])
         local = int(status["numModules"])
         groups = int(status.get("groupCount", 1)) or 1
+        declared = self._declared_widths(status, settings or {}, total,
+                                         local, groups)
+        if declared is not None:
+            return declared
         if groups <= 1:
             if total != local:
                 raise CalibError(
@@ -717,95 +782,6 @@ class VlmCalibrator:
         steps = chars * self.steps_per_char
         return -steps if char_index < 0 else steps
 
-    def _drum_error(self, seen: str, target: str) -> int | None:
-        """Absolute drum distance in characters (sign-independent)."""
-        chars = self._drum_delta(seen, target)
-        return None if chars is None else abs(chars)
-
-    def _settle_for_move(self, steps: int) -> None:
-        """Wait for the display to settle after a correction of `steps`.
-
-        The firmware reports idle when the command drains, but a flap can
-        still be travelling (re-homes at maxVel take seconds). Scale the
-        extra settle by move size on top of the normal wait so tune reads
-        never photograph a moving flap.
-        """
-        extra = min(10.0, abs(steps) / max(1, self.steps_per_char) * 0.5)
-        if extra > 0.1 and self.dwell_ms > 0:
-            time.sleep(extra)
-        self._wait_settled(self.timeout_s)
-
-    def _steady_read(self, show_frame: str, tag: str, module: int,
-                     target: str) -> tuple[dict, Reading]:
-        """Read until two consecutive reads agree, else escalate the blur.
-
-        A flap photographed mid-travel reads as a random wrong glyph at
-        high confidence (the run-001 tune photos show motion blur read as
-        '8' then 'Q'). If two back-to-back reads of the same settled frame
-        disagree by more than one drum position, the flap is still moving:
-        wait and re-read once; if still unstable, return None so the caller
-        escalates instead of correcting a transient.
-        """
-        rec, reading = self._show_read(show_frame, tag)
-        first = reading.modules[module]
-        if not self._trusted(first) or first.char not in self.drum:
-            return rec, reading
-        if self.dwell_ms > 0:
-            time.sleep(0.5)
-        # Re-reads, not re-shows: the drum is already at the frame.
-        rec2, reading2 = self._reread(show_frame, tag + "_steady")
-        second = reading2.modules[module]
-        if not self._trusted(second) or second.char not in self.drum:
-            return rec2, reading2
-        d1 = self._drum_error(first.char, target)
-        d2 = self._drum_error(second.char, target)
-        if d1 is None or d2 is None:
-            return rec2, reading2
-        if abs(d1 - d2) > 1:
-            self.event("error",
-                       f"m{module} reading unstable between consecutive reads "
-                       f"({first.char!r} vs {second.char!r}; flap still moving?)")
-            if self.dwell_ms > 0:
-                time.sleep(1.0)
-            rec3, reading3 = self._reread(show_frame, tag + "_steady2")
-            third = reading3.modules[module]
-            if not self._trusted(third) or third.char not in self.drum:
-                return rec3, reading3
-            d3 = self._drum_error(third.char, target)
-            if d3 is None or abs(d3 - d2) > 1:
-                return rec3, reading3  # caller sees non-convergence via stalls
-        return rec2, reading2
-
-    def _steady_confirm(self, show_frame: str, tag: str, module: int,
-                        target: str, reading: Reading) -> Reading:
-        """Blur check for a `_reread` result: one more agreeing read.
-
-        Mirrors the tail of `_steady_read` but never shows (the drum is
-        already at the frame). Returns the confirming reading, or the
-        original when no confirmation is possible.
-        """
-        first = reading.modules[module]
-        if not self._trusted(first) or first.char not in self.drum:
-            return reading
-        if self.dwell_ms > 0:
-            time.sleep(0.5)
-        _, reading2 = self._reread(show_frame, tag + "_steady")
-        second = reading2.modules[module]
-        if not self._trusted(second) or second.char not in self.drum:
-            return reading2
-        d1 = self._drum_error(first.char, target)
-        d2 = self._drum_error(second.char, target)
-        if d1 is not None and d2 is not None and abs(d1 - d2) > 1:
-            self.event("error",
-                       f"m{module} reading unstable between consecutive reads "
-                       f"({first.char!r} vs {second.char!r}; flap still moving?)")
-        return reading2
-
-    def _cost(self, entry: ModuleReading, target: str) -> tuple:
-        return (0 if entry.char == target else 1,
-                CONDITION_COST.get(entry.condition, 4),
-                -entry.confidence)
-
     def _escalate(self, module: int, glyph: str, note: str):
         rec = {"module": module, "glyph": glyph, "note": note}
         if rec not in self.identity_persistent:
@@ -858,232 +834,6 @@ class VlmCalibrator:
         self.residue[key] = 0
         self._wait_settled(self.timeout_s)
 
-    def _apply_identity_delta(self, delta: int, char_index: int, group: int,
-                              local: int, key, kind: str) -> bool:
-        """Apply an identity correction to one cell; False when impossible.
-
-        Char cells are motor-step offsets the firmware clamps to ±32, so a
-        whole-character correction (stepsPerChar motor steps, 55 at the
-        default settings) can never live there: returning False makes the
-        caller escalate instead of writing a silently clamped wrong value.
-        Module cells are unconstrained and re-home the whole drum, so the
-        full correction is sent as ONE preview (the endpoint allows it for
-        charIndex < 0): the module re-homes once instead of once per 32
-        steps. Char cells stay chunked because the firmware clamps their
-        absolute value to ±32.
-        """
-        target_value = self.live(key) + delta
-        if char_index >= 0 and abs(target_value) > CHAR_OFFSET_LIMIT:
-            return False
-        if group == 1:
-            chunks = [delta] if char_index < 0 and delta else _preview_chunks(delta)
-            for chunk in chunks:
-                self._guard_budgets(preview=True)
-                self.display.preview(local, char_index, chunk)
-                residue = self.residue.get(key, 0) + chunk
-                if char_index >= 0:
-                    # Mirror the firmware: each preview clamps the cell's
-                    # ABSOLUTE value to ±32, so must the tracked belief.
-                    absolute = self.overlay.get(key, 0) + residue
-                    residue = (max(-CHAR_OFFSET_LIMIT,
-                                   min(CHAR_OFFSET_LIMIT, absolute))
-                               - self.overlay.get(key, 0))
-                self.residue[key] = residue
-                self.previews += 1
-                self._wait_settled(self.timeout_s)
-        else:
-            self._guard_budgets()
-            self.display.persist(group, kind, target_value, local,
-                                 max(char_index, 0))
-            self.persists += 1
-            self.overlay[key] = target_value
-            self.residue[key] = 0
-            self._wait_settled(self.timeout_s)
-        return True
-
-    def _tune_identity(self, module: int, char_index: int, target: str,
-                       show_frame: str) -> dict:
-        """Drive `module` until it reads `target` (character-level).
-
-        Signed-minimal drum deltas with move-scaled settle; steady reads
-        reject motion-blur transients. Two successive non-improving
-        iterations escalate instead of burning the preview budget.
-        """
-        group = self._group_of(module)
-        local = self._local_index(module)
-        key = self._ensure_cell(group, local, char_index)
-        kind = self._kind(char_index)
-        tag = f"tune_g{group}m{local}c{char_index}"
-        before: ModuleReading | None = None
-        last_err: int | None = None
-        stalls = 0
-        first_pass = True
-        for _ in range(MAX_TUNE_ITER):
-            if first_pass:
-                # Show once: the drum is not at this frame yet.
-                _, reading = self._steady_read(show_frame, tag, module,
-                                               target)
-                first_pass = False
-            else:
-                # Already shown: the preview re-homed in place, so settle
-                # + re-read without driving another full revolution.
-                _, reading = self._reread(show_frame, tag)
-                entry_probe = reading.modules[module]
-                if (self._trusted(entry_probe)
-                        and entry_probe.char in self.drum):
-                    reading = self._steady_confirm(show_frame, tag, module,
-                                                   target, reading)
-            entry = reading.modules[module]
-            if before is None:
-                before = entry
-            if entry.char == target and entry.condition == "clean":
-                self._commit_local(group, key, kind, char_index)
-                return self._record_delta(module, char_index, target, before,
-                                          entry, fixed=True, delta=0)
-            if self.mode == "dry-run" or (self.mode == "preview" and group != 1):
-                delta = self._identity_steps(entry.char, target, char_index)
-                return self._record_delta(module, char_index, target, before,
-                                          entry, fixed=False, proposal=True,
-                                          delta=delta)
-            if not self._trusted(entry):
-                self._escalate(module, target,
-                               "photo unreadable while tuning")
-                return self._record_delta(module, char_index, target, before,
-                                          entry, fixed=False)
-            if entry.char == target:
-                # Identity is right but the flap is misaligned: fine-tune.
-                return self._tune_alignment(module, char_index, target,
-                                            show_frame, before=before)
-            err = self._drum_error(entry.char, target)
-            if err is None:
-                self._escalate(module, target,
-                               f"read {entry.char!r} is not on the drum")
-                return self._record_delta(module, char_index, target, before,
-                                          entry, fixed=False)
-            if last_err is not None:
-                if err < last_err:
-                    stalls = 0
-                else:
-                    stalls += 1
-                    if stalls >= 2:
-                        self._escalate(
-                            module, target,
-                            f"correction not converging (drum error {last_err} "
-                            f"-> {err} chars); escalating instead of burning "
-                            f"more previews")
-                        return self._record_delta(module, char_index, target,
-                                                  before, entry, fixed=False)
-            last_err = err
-            delta = self._identity_steps(entry.char, target, char_index)
-            if not delta:
-                self._escalate(module, target,
-                               f"read {entry.char!r} is not on the drum")
-                return self._record_delta(module, char_index, target, before,
-                                          entry, fixed=False)
-            if not self._apply_identity_delta(delta, char_index, group, local,
-                                              key, kind):
-                self._escalate(
-                    module, target,
-                    f"identity fix {delta:+d} motor steps does not fit a "
-                    f"char cell (firmware clamps char offsets to "
-                    f"±{CHAR_OFFSET_LIMIT})")
-                return self._record_delta(module, char_index, target, before,
-                                          entry, fixed=False)
-            self._settle_for_move(delta)
-        _, reading = self._show_read(show_frame, tag + "_final")
-        after = reading.modules[module]
-        fixed = after.char == target and after.condition == "clean"
-        if fixed:
-            self._commit_local(group, key, kind, char_index)
-        return self._record_delta(module, char_index, target, before, after,
-                                  fixed=fixed)
-
-    def _tune_alignment(self, module: int, char_index: int, target: str,
-                        show_frame: str,
-                        before: ModuleReading | None = None) -> dict:
-        """Small-step search for a clean flap while keeping identity right."""
-        group = self._group_of(module)
-        local = self._local_index(module)
-        key = self._ensure_cell(group, local, char_index)
-        kind = self._kind(char_index)
-        tag = f"align_g{group}m{local}c{char_index}"
-        if before is None:
-            _, reading = self._show_read(show_frame, tag)
-            before = reading.modules[module]
-        best = self._cost(before, target)
-        if best[0] == 0 and best[1] == 0:
-            return self._record_delta(module, char_index, target, before,
-                                      before, fixed=True)
-        if self.mode == "dry-run" or (self.mode == "preview" and group != 1):
-            return self._record_delta(module, char_index, target, before,
-                                      before, fixed=False, proposal=True)
-        if group != 1:
-            # Remote: persist absolute candidates, verify, revert losers.
-            base = self.live(key)
-            best_abs = base
-            for d in TRY_DELTAS:
-                if char_index >= 0 and abs(base + d) > CHAR_OFFSET_LIMIT:
-                    continue  # firmware clamps char cells; not a real candidate
-                self._guard_budgets()
-                self.display.persist(group, kind, base + d, local,
-                                     max(char_index, 0))
-                self.persists += 1
-                self._wait_settled(self.timeout_s)
-                _, reading = self._show_read(show_frame, tag)
-                entry = reading.modules[module]
-                cost = self._cost(entry, target)
-                if cost < best:
-                    best, best_abs = cost, base + d
-                else:
-                    self.display.persist(group, kind, best_abs, local,
-                                         max(char_index, 0))
-                    self.persists += 1
-                    self._wait_settled(self.timeout_s)
-            self.overlay[key] = best_abs
-            self.residue[key] = 0
-        else:
-            # Local: volatile preview ladder. Each candidate is applied
-            # FROM THE BASE (not compounded), because the deltas are not a
-            # fresh search from wherever the last candidate left the flap.
-            base_live = self.live(key)
-            applied = 0
-            best_extra = 0
-            for d in TRY_DELTAS:
-                if char_index >= 0 and abs(base_live + d) > CHAR_OFFSET_LIMIT:
-                    continue  # firmware clamps char cells; not a real candidate
-                correction = d - applied
-                self._guard_budgets(preview=True)
-                self.display.preview(local, char_index, correction)
-                self.residue[key] = self.residue.get(key, 0) + correction
-                applied = d
-                self.previews += 1
-                self._wait_settled(self.timeout_s)
-                _, reading = self._show_read(show_frame, tag)
-                cost = self._cost(reading.modules[module], target)
-                if cost < best:
-                    best = cost
-                    best_extra = d
-            if self.mode == "full":
-                self._guard_budgets()
-                self.display.persist(group, kind, base_live + best_extra, local,
-                                     max(char_index, 0))
-                self.persists += 1
-                self.overlay[key] = base_live + best_extra
-                self.residue[key] = 0
-                self._wait_settled(self.timeout_s)
-            else:
-                correction = (base_live + best_extra) - self.live(key)
-                if correction:
-                    self.display.preview(local, char_index, correction)
-                    self.residue[key] = self.residue.get(key, 0) + correction
-                    self.previews += 1
-                    self._wait_settled(self.timeout_s)
-        _, reading = self._show_read(show_frame, tag + "_verify")
-        after = reading.modules[module]
-        fixed = after.char == target and after.condition == "clean"
-        return self._record_delta(module, char_index, target, before, after,
-                                  fixed=fixed)
-
     # -- phases ---------------------------------------------------------------
     def _index_strip(self) -> str:
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -1124,13 +874,35 @@ class VlmCalibrator:
             raise CalibError("P0 registration failed: " + "; ".join(problems))
 
     def _batch_nudge(self, nudges: list[tuple[int, int, int, int]]):
-        """Apply cell nudges [(group, local, char_index, delta), ...] in one pass.
+        """Apply cell nudges [(group, local, char_index, delta), ...].
 
-        Group 1 is applied locally; groups 2..6 are forwarded by the master
-        over ESP-NOW and applied RAM-only on each remote (the master's busy
-        fence covers their homing via preview acks). N cells across the
-        fleet cost one homing pass, not N. Falls back to serial single
-        previews on older firmware (local group only).
+        Every nudge is one entry of the `nudges` array of
+        `POST /api/calib/preview-batch`, shaped
+        {"scope": <1..6>, "module": <module index inside that scope>,
+         "charIndex": <drum index, -1 = the module cell>,
+         "delta": <motor steps, non-zero, |delta| <= stepsPerRot>}.
+        Scope 1 is the local controller (applied straight away); scopes
+        2..6 are remote groups, forwarded by the master over ESP-NOW and
+        applied RAM-only there (the master's busy fence covers their
+        homing via preview acks). N cells across the fleet cost one homing
+        pass per chunk, not N.
+
+        Firmware caps, which this method must respect itself:
+        - at most BATCH_MAX_NUDGES (48) nudges per call — the endpoint
+          rejects more with HTTP 400, which is not retryable;
+        - at most REMOTE_BATCH_MAX_NUDGES (8) nudges per remote group per
+          call — the drain forwards only the first 8 and silently drops
+          the rest, so an oversized remote slice would be lost.
+        The nudges are therefore sent in order, chunked per scope (<=48
+        for the local scope, <=8 for each remote scope).
+
+        Char cells accept |delta| <= 32 per entry but apply additively, so
+        a larger correction is split into chunks inside the same pass.
+        `self.overlay`/`self.residue` track the device's live value for
+        every touched cell after each chunk (residue mirroring the
+        firmware's ±32 char-cell clamp) and `self.previews` is charged
+        once per nudge sent. Falls back to serial single previews on older
+        firmware (local group only).
         """
         if not nudges:
             return
@@ -1154,9 +926,13 @@ class VlmCalibrator:
         for group, items in sorted(by_scope.items()):
             applied = False
             if batch is not None:
-                batch([{"scope": group, "module": local,
-                        "charIndex": char_index, "delta": delta}
-                       for local, char_index, delta in items])
+                limit = (BATCH_MAX_NUDGES if group == 1
+                         else REMOTE_BATCH_MAX_NUDGES)
+                for start in range(0, len(items), limit):
+                    chunk = items[start:start + limit]
+                    batch([{"scope": group, "module": local,
+                            "charIndex": char_index, "delta": delta}
+                           for local, char_index, delta in chunk])
                 applied = True
             elif group == 1:
                 for local, char_index, delta in items:
@@ -1201,10 +977,9 @@ class VlmCalibrator:
         glyphs pointing both ways (no single shift helps) are left to the
         coarse/per-character paths. Returns the modules that improved.
 
-        Mode gating (same contract as _tune_identity/_tune_alignment):
-        dry-run touches nothing (the surviving votes become proposals in
-        the later paths); preview may nudge the LOCAL group only, since
-        remote trims can only be committed via persist; full does both.
+        Mode gating: dry-run touches nothing (the surviving votes become
+        proposals in the later paths); full applies candidates and commits
+        the verified winner (local via preview+persist, remote via persist).
         """
         if self.mode == "dry-run":
             return set()
@@ -1214,8 +989,6 @@ class VlmCalibrator:
             wrong = [g for g in glyphs if g in wrong_sets[module]]
             if not wrong or len(wrong) >= len(glyphs):
                 continue
-            if self.mode == "preview" and self._group_of(module) != 1:
-                continue  # remote trim needs persist; not allowed in preview
             errors = []
             for glyph in wrong:
                 delta = self._drum_delta(seen[module].get(glyph, "?"), glyph)
@@ -1465,12 +1238,18 @@ class VlmCalibrator:
             if p["group"] == 1:
                 self._commit_local(1, key, kind, p["char_index"])
             elif self.mode == "full":
-                # Remote previews are RAM-only: persist the absolute winner
-                # (base + whole-phase offset already previewed + ladder) so
-                # the fix survives the revert.
-                base = self._read_cell(p["group"], p["local"],
-                                       p["char_index"])
-                target = base + p.get("offset_base", 0) + p["best"]
+                # Remote previews are RAM-only: persist the tracked
+                # absolute (overlay + residue), i.e. exactly what the
+                # device holds after the ladder (run-start base + the
+                # whole-character offset previewed above + this ladder's
+                # best). INVARIANT: the persisted value equals the value
+                # the device actually holds, so a later commit on the same
+                # cell (P1 runs the module trim and the phase trim over
+                # overlapping modules) builds on this one instead of
+                # dropping it. Re-reading the run-start /settings snapshot
+                # here would discard every earlier verified commit, since
+                # that snapshot is never refreshed during a run.
+                target = self.live(key)
                 self._guard_budgets()
                 self.display.persist(p["group"], kind, target,
                                      p["local"], max(p["char_index"], 0))
@@ -1499,6 +1278,10 @@ class VlmCalibrator:
         Skipped characters are never shown. Returns {module: {char:
         ModuleReading}} plus the char order.
         """
+        # One sweep pass consumes one sweep of the budget (MAX_SWEEPS):
+        # check before starting, charge once the pass has run. Without the
+        # counter the "sweep budget exhausted" guard can never fire.
+        self._guard_budgets()
         chars = self._usable(reversed(self.drum))
         readings: dict[int, dict[str, ModuleReading]] = \
             {m: {} for m in range(self.total)}
@@ -1506,6 +1289,7 @@ class VlmCalibrator:
             _, reading = self._show_read(ch * self.total, f"sw_{ord(ch)}")
             for m, entry in enumerate(reading.modules):
                 readings[m][ch] = entry
+        self.sweeps += 1
         return readings, chars
 
     def _reread_chars(self, chars, readings, tag: str):
@@ -1551,8 +1335,6 @@ class VlmCalibrator:
         plans = []
         magnitudes = TRY_DELTAS
         for m, cells in sorted(phase_cells.items()):
-            if self.mode == "preview" and self._group_of(m) != 1:
-                continue
             right = [ch for ch in chars
                      if ch not in cells
                      and readings[m].get(ch) is not None
@@ -1674,8 +1456,6 @@ class VlmCalibrator:
             if any(abs(v) != 1 for v in vals):
                 continue
             if len({v > 0 for v in vals}) != 1:
-                continue
-            if self.mode == "preview" and self._group_of(m) != 1:
                 continue
             votes[m] = outliers
             seen[m] = {ch: readings[m][ch].char for ch in outliers}
@@ -2011,9 +1791,12 @@ class VlmCalibrator:
         self.total = int(status["totalModules"])
         self.charset = int(status["charset"])
         self.drum = str(status["drumOrder"])
-        self.group_widths = self._widths(status)
+        # Fleet geometry needs the /settings snapshot too (the firmware's
+        # `masterGroupModuleCounts` is the real per-group mapping when the
+        # status endpoint has no `groupWidths`).
         snapshot = self.display.snapshot()
         settings = snapshot.get("settings", snapshot) if isinstance(snapshot, dict) else {}
+        self.group_widths = self._widths(status, settings)
         try:
             steps_per_rot = int(settings.get(
                 "stepsPerRot", status.get("stepsPerRot", 2048)))

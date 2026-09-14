@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from calib_vlm import prompts
 from calib_vlm.reader import ReaderError, VlmReader, annotate_modules
 
 CHARSET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -69,7 +70,11 @@ def test_system_prompt_lists_character_set():
                 drum=CHARSET)
     system = vlm.calls[0][0]["content"]
     assert "Allowed characters" in system
-    assert "Lookalikes: I/1, O/0, S/5, Z/2, B/8, G/6, ./'/-" in system
+    # Assert against the builder's own constant, not a copy of the text:
+    # the previous literal missed the ':' the builder had added and the
+    # suite stayed red (kinonn-bot#44).
+    assert prompts.LOOKALIKE_HINT in system
+    assert "check carefully before choosing" in system
     assert "Do not invent characters" in system
 
 

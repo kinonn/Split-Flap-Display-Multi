@@ -90,8 +90,17 @@ void SplitFlapEspNow::loop() {
     }
 
     SplitFlapEspNowMessage packet;
+    // Sender MAC is taken in the SAME critical section as the packet it
+    // belongs to: reading it in a second window would let a packet that
+    // arrived in between decide the previous packet's fate — dropping a real
+    // master frame while held, or accepting a foreign one (issue
+    // kinonn-bot#37).
+    uint8_t senderMac[6];
+    bool senderIsPinnedMaster = false;
     portENTER_CRITICAL(&packetMux);
     memcpy(&packet, &pendingPacket, sizeof(packet));
+    memcpy(senderMac, pendingTextMac, sizeof(senderMac));
+    senderIsPinnedMaster = masterMacKnown && memcmp(senderMac, masterMac, 6) == 0;
     pendingMessage = false;
     portEXIT_CRITICAL(&packetMux);
 
@@ -103,19 +112,39 @@ void SplitFlapEspNow::loop() {
     packet.text[moduleCount] = '\0';
     String text = String(packet.text);
 
-    // Calibration hold owns the display: drop remote text instead of
-    // fighting the agent's show frames.
-    if (settings.getInt("mode") == CALIB_HOLD_MODE) {
+    int currentMode = settings.getInt("mode");
+    if (! calibTextAllowed(currentMode, senderIsPinnedMaster)) {
         return;
     }
+    bool held = (currentMode == CALIB_HOLD_MODE);
 
-    if (text == lastRemoteText) {
-        return;
+    // Under hold the master owns this display, so a repeated frame is written
+    // (and acked) again instead of being skipped — see calibTextNeedsWrite()
+    // for why a skipped write would make the ack lie about the drums.
+    bool writeRequired = calibTextNeedsWrite(text != lastRemoteText, currentMode, senderIsPinnedMaster);
+    if (writeRequired) {
+        // A held group must not latch into remote mode here, or its own
+        // clock/date modes would resume under the agent's frame the moment
+        // hold is released on the master.
+        if (! held) {
+            settings.putInt("mode", ESP_NOW_REMOTE_MODE);
+        }
+        display.writeString(text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
+        lastRemoteText = text;
     }
 
-    settings.putInt("mode", ESP_NOW_REMOTE_MODE);
-    display.writeString(text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
-    lastRemoteText = text;
+    // Ack once the write has returned, so a fleet show's busy fence covers
+    // this group's motion (issue kinonn-bot#42); a master that never armed a
+    // fence simply ignores it. ensurePeer() first: a freshly booted group
+    // that goes straight into hold has no master peer entry yet, and
+    // esp_now_send() only reports that through its return value.
+    if (masterMacKnown) {
+        ensurePeer(masterMac);
+        SplitFlapCalibAckMessage ack = {};
+        ack.version = ESP_NOW_CALIB_ACK;
+        ack.groupIndex = packet.groupIndex;
+        esp_now_send(masterMac, (const uint8_t *) &ack, sizeof(ack));
+    }
 }
 
 bool SplitFlapEspNow::isMasterEnabled() {
@@ -181,7 +210,7 @@ bool SplitFlapEspNow::ensureInitialized() {
 }
 
 void SplitFlapEspNow::distributeMessage(
-    const String &message, bool centering, unsigned long scrollDelayMs, int scrollRepeatCount
+    const String &message, bool centering, unsigned long scrollDelayMs, int scrollRepeatCount, bool calib
 ) {
     if (! ensureInitialized()) {
         return;
@@ -190,7 +219,7 @@ void SplitFlapEspNow::distributeMessage(
     int totalModuleCount = getTotalModuleCount();
 
     if (message.length() <= totalModuleCount) {
-        distributeFrame(buildFrame(message, totalModuleCount, centering));
+        distributeFrame(buildFrame(message, totalModuleCount, centering), calib);
         return;
     }
 
@@ -212,7 +241,7 @@ void SplitFlapEspNow::distributeMessage(
 
     for (int r = 0; r < repeats; r++) {
         for (int i = 0; i < chunkCount; i++) {
-            distributeFrame(chunks[i]);
+            distributeFrame(chunks[i], calib);
             if (i < chunkCount - 1 || r < repeats - 1) {
                 delay(scrollDelayMs);
             }
@@ -235,6 +264,10 @@ int SplitFlapEspNow::getGroupModuleCount(int groupIndex) {
     }
 
     return MAX_MODULES;
+}
+
+int SplitFlapEspNow::getGroupWidth(int groupIndex) {
+    return getGroupModuleCount(groupIndex);
 }
 
 int SplitFlapEspNow::getTotalModuleCount() {
@@ -292,7 +325,7 @@ String SplitFlapEspNow::buildFrame(const String &message, int width, bool center
     return frame;
 }
 
-void SplitFlapEspNow::distributeFrame(const String &frame) {
+void SplitFlapEspNow::distributeFrame(const String &frame, bool calib) {
     int groupCount = getGroupCount();
     int offset = 0;
 
@@ -311,7 +344,21 @@ void SplitFlapEspNow::distributeFrame(const String &frame) {
             moduleCount,
             offset + localModuleCount
         );
-        sendToPeer(groupIndex, segment, moduleCount);
+        // Arm BEFORE the send: a fast group could ack before the mask is set
+        // and the fence would then never clear (issue kinonn-bot#42).
+        if (calib) {
+            portENTER_CRITICAL(&calibAckMux);
+            calibAckPendingMask |= (uint8_t) (1 << groupIndex);
+            calibAckDeadlineMs = millis() + PUSH_ACK_TIMEOUT_MS;
+            portEXIT_CRITICAL(&calibAckMux);
+        }
+        if (! sendToPeer(groupIndex, segment, moduleCount) && calib) {
+            // No send, no ack, no reason to hold busy for the whole fence
+            // timeout (unknown peer, esp_now_send failure).
+            portENTER_CRITICAL(&calibAckMux);
+            calibAckPendingMask &= (uint8_t) ~(1 << groupIndex);
+            portEXIT_CRITICAL(&calibAckMux);
+        }
         offset += moduleCount;
     }
 
@@ -539,6 +586,11 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         return;
     }
 
+    if (len == sizeof(SplitFlapCalibAckMessage) && data[0] == ESP_NOW_CALIB_ACK) {
+        processCalibAck(mac);
+        return;
+    }
+
     if (len == sizeof(SplitFlapOffsetsReportMessage) && data[0] == ESP_NOW_OFFSETS_REPORT) {
         processOffsetsReport(mac, (const SplitFlapOffsetsReportMessage *) data);
         return;
@@ -560,6 +612,7 @@ void SplitFlapEspNow::queueReceived(const uint8_t *mac, const uint8_t *data, int
         masterMacKnown = true;
     }
     memcpy(&pendingPacket, data, sizeof(pendingPacket));
+    memcpy(pendingTextMac, mac, 6);
     pendingMessage = true;
     portEXIT_CRITICAL(&packetMux);
 }
@@ -736,8 +789,7 @@ void SplitFlapEspNow::applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt
         deltas[k] = (int) pkt->nudges[k].delta;
     }
     if (display.previewNudgeLocalBatch(mods, chars, deltas, count)) {
-        Serial.printf("[esp-now] applied %d volatile preview nudge(s) from group %d nudge\n",
-                      count, pkt->groupIndex);
+        Serial.printf("[esp-now] applied %d volatile preview nudge(s) from group %d nudge\n", count, pkt->groupIndex);
     }
 
     // Ack so the master's busy fence clears only after the homing finished.
@@ -749,9 +801,9 @@ void SplitFlapEspNow::applyPreviewNudges(const SplitFlapPreviewNudgeMessage *pkt
     }
 }
 
-bool SplitFlapEspNow::pushPreviewNudges(int groupIndex, const uint8_t *modules,
-                                        const int8_t *charIndexes, const int16_t *deltas,
-                                        int count) {
+bool SplitFlapEspNow::pushPreviewNudges(
+    int groupIndex, const uint8_t *modules, const int8_t *charIndexes, const int16_t *deltas, int count
+) {
     if (! ensureInitialized()) return false;
     if (groupIndex < 1 || groupIndex >= getGroupCount()) return false;
     if (count < 1) return false;
@@ -811,6 +863,27 @@ void SplitFlapEspNow::processPreviewAck(const uint8_t mac[6], const SplitFlapPre
     portENTER_CRITICAL(&previewAckMux);
     previewAckPendingMask &= (uint8_t) ~(1 << groupIdx);
     portEXIT_CRITICAL(&previewAckMux);
+}
+
+bool SplitFlapEspNow::hasCalibAcksPending() {
+    portENTER_CRITICAL(&calibAckMux);
+    if (calibAckPendingMask != 0 && (long) (millis() - calibAckDeadlineMs) >= 0) {
+        calibAckPendingMask = 0; // expired: ack never came, never stick busy
+    }
+    bool pending = calibAckPendingMask != 0;
+    portEXIT_CRITICAL(&calibAckMux);
+    return pending;
+}
+
+void SplitFlapEspNow::processCalibAck(const uint8_t mac[6]) {
+    if (! initialized || ! isMasterEnabled()) return;
+
+    int groupIdx = groupIndexForMac(mac);
+    if (groupIdx < 1) return;
+
+    portENTER_CRITICAL(&calibAckMux);
+    calibAckPendingMask &= (uint8_t) ~(1 << groupIdx);
+    portEXIT_CRITICAL(&calibAckMux);
 }
 
 void SplitFlapEspNow::applyOffsetsPush(const SplitFlapOffsetsPushMessage *pkt) {

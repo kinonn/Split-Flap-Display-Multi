@@ -2,7 +2,11 @@
 
 import math
 
-from calib_vlm.calibrate import VlmCalibrator
+import pytest
+
+from calib.display import CalibError
+from calib_vlm.calibrate import (BATCH_MAX_NUDGES, REMOTE_BATCH_MAX_NUDGES,
+                                 VlmCalibrator)
 
 from tests.fixtures import FakeCamera, FakeDisplay, SimReader
 
@@ -51,11 +55,12 @@ def test_per_char_identity_converges(tmp_path):
 
 
 def test_per_char_identity_overflow_escalates_cleanly(tmp_path):
-    # A fault needing MORE than half a revolution (e.g. 30 chars on a
-    # 48-char drum) cannot live in a char cell the firmware clamps to
-    # ±32: escalate instead of writing a clamped, wrong offset that
-    # would leave the display worse than before. Driven directly (a
-    # full run would route a many-glyph fault to the module cell).
+    # A per-character fault whose fix is a whole number of characters (a
+    # 37-char drum 30 positions away is +7 chars = 385 motor steps here)
+    # cannot live in a char cell the firmware clamps to ±32: P2 must
+    # escalate instead of writing a clamped, wrong offset that would leave
+    # the display worse than before. Driven through the real P2 pass (a
+    # full run routes a many-glyph fault to the module cell first).
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
     far = d.drum[(ci + 30) % len(d.drum)]
@@ -67,9 +72,10 @@ def test_per_char_identity_overflow_escalates_cleanly(tmp_path):
     calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
     calib.group_widths = [d.total]
     calib.steps_per_char = d.spc
-    out = calib._tune_identity(2, ci, "O", "O" * d.total)
-    assert out["fixed"] is False
+    calib._p1_flagged = ["O"]
+    calib._p2_fine()
     assert d.char_off[2].get(ci, 0) == 0   # cell untouched, not clamped
+    assert not d.previews and not d.persists
     notes = [e["note"] for e in calib.identity_persistent]
     assert any("does not fit a char cell" in n for n in notes)
 
@@ -87,9 +93,10 @@ def test_remote_per_char_overflow_escalates_cleanly(tmp_path):
     calib.group_widths = d.widths()
     calib.steps_per_char = d.spc
     calib._load_remote_offsets(calib.display.snapshot().get("settings", {}))
-    out = calib._tune_identity(5, ci, "H", "H" * d.total)
-    assert out["fixed"] is False
+    calib._p1_flagged = ["H"]
+    calib._p2_fine()
     assert d.remote_char[0][2][ci] == 0    # not corrupted to ±32
+    assert not d.previews and not d.persists
     notes = [e["note"] for e in calib.identity_persistent]
     assert any("does not fit a char cell" in n for n in notes)
 
@@ -169,6 +176,49 @@ def test_module_trim_trims_modules_in_parallel_batches(tmp_path):
     # One candidate batch per trim round (plus reverts), far below the
     # serial one-batch-per-module-per-round cost.
     assert len(d.batches) <= 24
+
+
+def test_batch_nudge_chunks_to_the_firmware_caps(tmp_path):
+    # kinonn-bot#40/#38: _batch_nudge sent every nudge of one scope in ONE
+    # preview-batch call. The firmware rejects >48 nudges per call (HTTP
+    # 400, not retryable) and its loop-task drain forwards only 8 nudges
+    # per remote group, silently dropping the rest — so a large trim plan
+    # either aborted the run or lost nudges. The fixture display enforces
+    # both real caps, so this test fails loudly on the old code.
+    d = FakeDisplay(total=18, groups=3, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = d.widths()
+    calib.steps_per_char = d.spc
+    calib._load_remote_offsets(d.snapshot()["settings"])
+    nudges = ([(1, m, ci, 1) for m in range(6) for ci in range(10)]      # 60
+              + [(2, m, ci, 1) for m in range(2) for ci in range(10)]     # 20
+              + [(3, m, ci, 1) for m in range(2) for ci in range(10)])    # 20
+    calib._batch_nudge(nudges)
+    # No >48 call (HTTP 400) and no silent remote truncation: the batches
+    # respect the caps and every nudge landed on the device.
+    for batch in d.batches:
+        assert len(batch) <= BATCH_MAX_NUDGES, len(batch)
+        for scope in {n["scope"] for n in batch if n["scope"] >= 2}:
+            count = sum(1 for n in batch if n["scope"] == scope)
+            assert count <= REMOTE_BATCH_MAX_NUDGES, (scope, count)
+    want: dict[tuple[int, int, int], int] = {}
+    for group, module, ci, delta in nudges:
+        want[(group, module, ci)] = want.get((group, module, ci), 0) + delta
+    for (group, module, ci), delta in want.items():
+        if group == 1:
+            assert d.res_char[module][ci] == delta
+        else:
+            assert d.res_remote_char[group - 2][module][ci] == delta
+    assert calib.previews == len(nudges)
+    # 60 local nudges -> two <=48 calls; each 20-nudge remote scope -> three
+    # <=8 calls. Nothing is re-sent or reordered.
+    assert len(d.batches) == 2 + 3 + 3
+    flat = [n for batch in d.batches for n in batch]
+    assert [(n["scope"], n["module"], n["charIndex"], n["delta"])
+            for n in flat] == sorted(nudges), "nudges lost or reordered"
 
 
 def test_module_trim_fixes_remote_boundary_flaps(tmp_path):
@@ -313,6 +363,75 @@ def test_unreliable_reads_escalate_without_corrections(tmp_path):
     assert calib.previews < calib.max_previews
 
 
+def test_fleet_geometry_uses_declared_group_widths(tmp_path):
+    # kinonn-bot#41: the firmware maps fleet modules through the
+    # user-editable masterGroupModuleCounts (group 1 first), not through
+    # local-wide groups. With local 8 and counts 8,6,4 (total 18) the old
+    # heuristic derived [8,8,2], so fleet module 14 - group 3, local 0 -
+    # was tuned as group 2 local 6 and never fixed.
+    d = FakeDisplay(group_widths=[8, 6, 4])
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    status, settings = d.status(), d.snapshot()["settings"]
+    assert (status["numModules"], status["totalModules"],
+            status["groupCount"]) == (8, 18, 3)
+    assert settings["masterGroupModuleCounts"] == "8,6,4"
+    assert calib._widths(status, settings) == [8, 6, 4]
+    calib.group_widths = [8, 6, 4]
+    assert (calib._group_of(7), calib._local_index(7)) == (1, 7)
+    assert (calib._group_of(8), calib._local_index(8)) == (2, 0)
+    assert (calib._group_of(13), calib._local_index(13)) == (2, 5)
+    assert (calib._group_of(14), calib._local_index(14)) == (3, 0)
+    assert (calib._group_of(17), calib._local_index(17)) == (3, 3)
+
+
+def test_fleet_run_tunes_the_declared_mapping(tmp_path):
+    # End to end: a fault on fleet module 14 is a group-3 fault, and the
+    # report carries the geometry the run actually used.
+    d = FakeDisplay(group_widths=[8, 6, 4])
+    d.seed_module_error(14, -d.spc)  # group 3, local module 0
+    calib, report = run_calib(d, tmp_path)
+    assert report["fleet"]["groupWidths"] == [8, 6, 4]
+    assert report["result"] == "converged"
+    assert d.remote_mod[2][0] == 0
+    assert all(not row for row in d.remote_mod[1])  # group 2 untouched
+
+
+def test_fleet_geometry_prefers_status_group_widths(tmp_path):
+    # The status endpoint's groupWidths (new firmware field) wins over a
+    # stale /settings CSV, and a present-but-inconsistent field is an
+    # error - guessing a mapping silently mis-tunes every later group.
+    d = FakeDisplay(group_widths=[8, 6, 4], master_counts="8,8,8,8,8,8",
+                    status_group_widths=[8, 6, 4])
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    assert calib._widths(d.status(), d.snapshot()["settings"]) == [8, 6, 4]
+    d.declared_status_widths = [8, 8, 8]  # sums to 24, not 18
+    with pytest.raises(CalibError, match="fleet geometry inconsistent"):
+        calib._widths(d.status(), d.snapshot()["settings"])
+    d.declared_status_widths = [8, 6]     # three groups, two widths
+    with pytest.raises(CalibError, match="fleet geometry inconsistent"):
+        calib._widths(d.status(), d.snapshot()["settings"])
+
+
+def test_fleet_geometry_falls_back_to_equal_width_heuristic(tmp_path):
+    # Firmware that declares no widths keeps the legacy equal-width layout
+    # (last group short, so an 8-module/3-group display is 2,2,4).
+    d = FakeDisplay(total=8, groups=3, master_counts="")
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    assert "groupWidths" not in d.status()
+    assert d.snapshot()["settings"]["masterGroupModuleCounts"] == ""
+    assert calib._widths(d.status(), d.snapshot()["settings"]) == [2, 2, 4]
+    # A stale CSV that does not add up is ignored the same way.
+    stale = FakeDisplay(total=8, groups=3, master_counts="8,8,8")
+    assert calib._widths(stale.status(), stale.snapshot()["settings"]) == \
+        [2, 2, 4]
+
+
 def test_remote_group_char_converges(tmp_path):
     d = FakeDisplay(total=6, groups=2)
     ci = d.drum.index("H")
@@ -388,6 +507,39 @@ def test_skip_list_excludes_default_punctuation(tmp_path):
     assert "." not in chars and "'" not in chars and "-" not in chars
     assert len(chars) == len(d.drum) - 3
     assert set(readings[0]) == set(chars)
+
+
+def test_sweep_budget_counts_passes_and_fires(tmp_path):
+    # kinonn-bot#48: nothing incremented `self.sweeps`, so the "sweep
+    # budget exhausted" guard was inert. One sweep pass = one sweep.
+    d = FakeDisplay(total=4)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib.max_sweeps = 2
+    calib._sweep()
+    assert calib.sweeps == 1
+    calib._sweep()
+    assert calib.sweeps == 2
+    with pytest.raises(CalibError, match="sweep budget exhausted"):
+        calib._sweep()
+    assert calib.sweeps == 2   # the rejected pass is not counted
+
+
+def test_run_enforces_the_sweep_budget(tmp_path):
+    # The budget stops the run with a reason instead of grinding through
+    # one more whole-drum sweep.
+    d = FakeDisplay(total=4)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.max_sweeps = 0
+    report = calib.run()
+    assert report["result"] == "needs-human"
+    assert "sweep budget exhausted" in report["reason"]
 
 
 def test_skip_list_disabled_covers_full_drum(tmp_path):
@@ -480,6 +632,54 @@ def test_remote_whole_drum_plus_trim_commits_both(tmp_path):
     assert report["result"] == "converged"
     assert d.remote_mod[0][1] != 0
     assert d.remote_mech[0][1][d.drum.index("H")] != 0
+
+
+def test_remote_cell_second_commit_keeps_the_first(tmp_path):
+    # kinonn-bot#39: a remote cell is committed twice in one run (P1 runs
+    # the module trim and the phase trim over overlapping modules and
+    # unions them as handled = trimmed | phased). The second commit
+    # recomputed its base from the run-start /settings snapshot, which is
+    # never refreshed, so it silently dropped the first verified
+    # component. Invariant: the persisted value is the value the device
+    # actually holds.
+    d = FakeDisplay(total=6, groups=2, charset=48)
+    d.flap_window = int(round(d.spc * 0.4))
+    d.seed_flap_error(4, d.drum.index("H"), int(round(d.spc * 0.6)))  # g2 local1
+    d.seed_flap_error(4, d.drum.index("N"), int(round(d.spc * 1.0)))
+    d.seed_flap_error(4, d.drum.index("G"), int(round(d.spc * 1.0)))
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = d.widths()
+    calib.steps_per_char = d.spc
+    calib._load_remote_offsets(d.snapshot()["settings"])
+    steps = [int(round(d.spc * f)) for f in (0.5, 0.25, 0.125, 0.0625)]
+
+    def plan(label, target, guard):
+        return {"module": 4, "group": 2, "local": 1, "char_index": -1,
+                "steps": list(steps), "cap": d.spc, "targets": [target],
+                "guards": [guard], "state": 0, "best": 0, "best_score": 0,
+                "label": label}
+
+    first = plan("trim", "H", "A")
+    assert calib._cell_ladder([first]) == {4}
+    written = d.remote_mod[0][1]
+    assert written and d.displayed_char(4, "H") == "H"
+    second = plan("phase", "N", "G")
+    assert calib._cell_ladder([second]) == {4}
+    assert second["best"] != 0
+    # The second commit persists the tracked absolute = first + second,
+    # not the run-start snapshot + second.
+    assert d.remote_mod[0][1] == written + second["best"]
+    assert calib.live((2, 1, -1)) == d.remote_mod[0][1]
+    assert [p for p in d.persists if p[0] == 2] == [
+        (2, "module", written, 1, 0),
+        (2, "module", written + second["best"], 1, 0)]
+    # Both components are live on the device: H (first commit) and N
+    # (second commit) read clean.
+    assert d.displayed_char(4, "H") == "H" and d.condition(4, "H") == "clean"
+    assert d.displayed_char(4, "N") == "N" and d.condition(4, "N") == "clean"
 
 
 def test_confusable_pair_never_becomes_a_correction(tmp_path):
@@ -882,6 +1082,18 @@ def test_phases_reject_unknown_names(tmp_path):
         assert "unknown phases" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown phase")
+
+
+def test_preview_mode_is_rejected_not_supported(tmp_path):
+    # kinonn-bot#48: the old `self.mode == "preview"` branches were
+    # unreachable — the calibrator accepts dry-run/full only (and the
+    # server folds the legacy "preview" config into "full"), which is why
+    # they were removed rather than kept "just in case".
+    d = FakeDisplay(total=4)
+    with pytest.raises(ValueError, match="mode must be dry-run or full"):
+        VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                      dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                      mode="preview")
 
 
 def test_p1_only_skips_later_phases(tmp_path):
