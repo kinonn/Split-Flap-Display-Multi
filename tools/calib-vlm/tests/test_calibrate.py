@@ -2,7 +2,8 @@
 
 import math
 
-from calib_vlm.calibrate import VlmCalibrator
+from calib_vlm.calibrate import (BATCH_MAX_NUDGES, REMOTE_BATCH_MAX_NUDGES,
+                                 VlmCalibrator)
 
 from tests.fixtures import FakeCamera, FakeDisplay, SimReader
 
@@ -169,6 +170,49 @@ def test_module_trim_trims_modules_in_parallel_batches(tmp_path):
     # One candidate batch per trim round (plus reverts), far below the
     # serial one-batch-per-module-per-round cost.
     assert len(d.batches) <= 24
+
+
+def test_batch_nudge_chunks_to_the_firmware_caps(tmp_path):
+    # kinonn-bot#40/#38: _batch_nudge sent every nudge of one scope in ONE
+    # preview-batch call. The firmware rejects >48 nudges per call (HTTP
+    # 400, not retryable) and its loop-task drain forwards only 8 nudges
+    # per remote group, silently dropping the rest — so a large trim plan
+    # either aborted the run or lost nudges. The fixture display enforces
+    # both real caps, so this test fails loudly on the old code.
+    d = FakeDisplay(total=18, groups=3, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = d.widths()
+    calib.steps_per_char = d.spc
+    calib._load_remote_offsets(d.snapshot()["settings"])
+    nudges = ([(1, m, ci, 1) for m in range(6) for ci in range(10)]      # 60
+              + [(2, m, ci, 1) for m in range(2) for ci in range(10)]     # 20
+              + [(3, m, ci, 1) for m in range(2) for ci in range(10)])    # 20
+    calib._batch_nudge(nudges)
+    # No >48 call (HTTP 400) and no silent remote truncation: the batches
+    # respect the caps and every nudge landed on the device.
+    for batch in d.batches:
+        assert len(batch) <= BATCH_MAX_NUDGES, len(batch)
+        for scope in {n["scope"] for n in batch if n["scope"] >= 2}:
+            count = sum(1 for n in batch if n["scope"] == scope)
+            assert count <= REMOTE_BATCH_MAX_NUDGES, (scope, count)
+    want: dict[tuple[int, int, int], int] = {}
+    for group, module, ci, delta in nudges:
+        want[(group, module, ci)] = want.get((group, module, ci), 0) + delta
+    for (group, module, ci), delta in want.items():
+        if group == 1:
+            assert d.res_char[module][ci] == delta
+        else:
+            assert d.res_remote_char[group - 2][module][ci] == delta
+    assert calib.previews == len(nudges)
+    # 60 local nudges -> two <=48 calls; each 20-nudge remote scope -> three
+    # <=8 calls. Nothing is re-sent or reordered.
+    assert len(d.batches) == 2 + 3 + 3
+    flat = [n for batch in d.batches for n in batch]
+    assert [(n["scope"], n["module"], n["charIndex"], n["delta"])
+            for n in flat] == sorted(nudges), "nudges lost or reordered"
 
 
 def test_module_trim_fixes_remote_boundary_flaps(tmp_path):

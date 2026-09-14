@@ -61,6 +61,14 @@ MODULE_TRIM_GUARDS = 3
 # single |delta| > 32 with HTTP 400.
 CHAR_OFFSET_LIMIT = 32
 PREVIEW_DELTA_MAX = 32
+# Preview-batch sizes (src/PendingActions.h + the loop-task drain in
+# SplitFlapDisplay.ino): a POST /api/calib/preview-batch above
+# BATCH_MAX_NUDGES is rejected with HTTP 400 (not retryable), and the
+# drain copies at most REMOTE_BATCH_MAX_NUDGES nudges per remote group —
+# silently dropping the rest with no error. Both caps are per request, so
+# the tool chunks to them.
+BATCH_MAX_NUDGES = 48
+REMOTE_BATCH_MAX_NUDGES = 8
 # Shift-mode sweep (the new P1): command every character uniformly on every
 # module, walking the drum in REVERSE so each step is ~a full revolution and
 # every frame passes the magnet (independently homed). The per-module
@@ -1124,13 +1132,35 @@ class VlmCalibrator:
             raise CalibError("P0 registration failed: " + "; ".join(problems))
 
     def _batch_nudge(self, nudges: list[tuple[int, int, int, int]]):
-        """Apply cell nudges [(group, local, char_index, delta), ...] in one pass.
+        """Apply cell nudges [(group, local, char_index, delta), ...].
 
-        Group 1 is applied locally; groups 2..6 are forwarded by the master
-        over ESP-NOW and applied RAM-only on each remote (the master's busy
-        fence covers their homing via preview acks). N cells across the
-        fleet cost one homing pass, not N. Falls back to serial single
-        previews on older firmware (local group only).
+        Every nudge is one entry of the `nudges` array of
+        `POST /api/calib/preview-batch`, shaped
+        {"scope": <1..6>, "module": <module index inside that scope>,
+         "charIndex": <drum index, -1 = the module cell>,
+         "delta": <motor steps, non-zero, |delta| <= stepsPerRot>}.
+        Scope 1 is the local controller (applied straight away); scopes
+        2..6 are remote groups, forwarded by the master over ESP-NOW and
+        applied RAM-only there (the master's busy fence covers their
+        homing via preview acks). N cells across the fleet cost one homing
+        pass per chunk, not N.
+
+        Firmware caps, which this method must respect itself:
+        - at most BATCH_MAX_NUDGES (48) nudges per call — the endpoint
+          rejects more with HTTP 400, which is not retryable;
+        - at most REMOTE_BATCH_MAX_NUDGES (8) nudges per remote group per
+          call — the drain forwards only the first 8 and silently drops
+          the rest, so an oversized remote slice would be lost.
+        The nudges are therefore sent in order, chunked per scope (<=48
+        for the local scope, <=8 for each remote scope).
+
+        Char cells accept |delta| <= 32 per entry but apply additively, so
+        a larger correction is split into chunks inside the same pass.
+        `self.overlay`/`self.residue` track the device's live value for
+        every touched cell after each chunk (residue mirroring the
+        firmware's ±32 char-cell clamp) and `self.previews` is charged
+        once per nudge sent. Falls back to serial single previews on older
+        firmware (local group only).
         """
         if not nudges:
             return
@@ -1154,9 +1184,13 @@ class VlmCalibrator:
         for group, items in sorted(by_scope.items()):
             applied = False
             if batch is not None:
-                batch([{"scope": group, "module": local,
-                        "charIndex": char_index, "delta": delta}
-                       for local, char_index, delta in items])
+                limit = (BATCH_MAX_NUDGES if group == 1
+                         else REMOTE_BATCH_MAX_NUDGES)
+                for start in range(0, len(items), limit):
+                    chunk = items[start:start + limit]
+                    batch([{"scope": group, "module": local,
+                            "charIndex": char_index, "delta": delta}
+                           for local, char_index, delta in chunk])
                 applied = True
             elif group == 1:
                 for local, char_index, delta in items:

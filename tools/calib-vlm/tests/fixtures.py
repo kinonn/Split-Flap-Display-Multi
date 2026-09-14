@@ -6,7 +6,8 @@ import numpy as np
 
 from calib.display import CalibError
 
-from calib_vlm.calibrate import CHAR_OFFSET_LIMIT, PREVIEW_DELTA_MAX
+from calib_vlm.calibrate import (BATCH_MAX_NUDGES, CHAR_OFFSET_LIMIT,
+                                 PREVIEW_DELTA_MAX, REMOTE_BATCH_MAX_NUDGES)
 from calib_vlm.reader import ModuleReading, Reading
 
 CHARSET_37 = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -231,7 +232,35 @@ class FakeDisplay:
 
         Scope 1 is the local controller; scope 2..6 is a remote group
         (forwarded by the master and applied RAM-only there).
+
+        The real firmware caps are enforced here so a tool that sends
+        oversized batches fails exactly like it would on the device:
+        - more than BATCH_MAX_NUDGES (48) nudges in one call: the endpoint
+          rejects the request with HTTP 400
+          (src/SplitFlapWebServer.cpp + PendingActions::CalibBatchPreview);
+        - more than REMOTE_BATCH_MAX_NUDGES (8) nudges for one remote
+          group: the loop-task drain copies only the first 8 per group and
+          drops the rest silently (src/SplitFlapDisplay.ino).
         """
+        if len(nudges) > BATCH_MAX_NUDGES:
+            raise CalibError(
+                "POST /api/calib/preview-batch -> HTTP 400: Invalid nudges "
+                f"count (expected 1..{BATCH_MAX_NUDGES})")
+        per_scope: dict[int, int] = {}
+        for nudge in nudges:
+            scope = int(nudge.get("scope", 1))
+            if scope >= 2:
+                per_scope[scope] = per_scope.get(scope, 0) + 1
+        for scope in sorted(per_scope):
+            count = per_scope[scope]
+            if count > REMOTE_BATCH_MAX_NUDGES:
+                # No error on the wire: the master just drops the tail, so
+                # the nudge would silently never reach the group.
+                raise CalibError(
+                    f"POST /api/calib/preview-batch -> group {scope}: the "
+                    f"firmware drain forwards only "
+                    f"{REMOTE_BATCH_MAX_NUDGES} nudges per remote group per "
+                    f"call, dropping {count - REMOTE_BATCH_MAX_NUDGES}")
         self.batches.append(list(nudges))
         for nudge in nudges:
             scope = int(nudge.get("scope", 1))
