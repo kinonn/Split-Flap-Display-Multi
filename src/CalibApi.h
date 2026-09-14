@@ -40,11 +40,31 @@ inline bool calibNudgesFitScope(int scope, int count) {
 // A held group (CALIB_HOLD_MODE) still has to accept text from the pinned
 // master: fleet calibration shows arrive over exactly that ESP-NOW text
 // path, and dropping them left remote groups showing stale glyphs while the
-// master reported settled (issue kinonn-bot#37). Text from any other sender
-// keeps being dropped, which is the guard's original purpose — a non-held
-// master's clock/date/scroll pushes must not overwrite a held group's frame.
+// master reported settled (issue kinonn-bot#37).
+//
+// Limit, by design of the packet: a text frame carries no type, so a held
+// group accepts ANY frame from the master it pinned — including that
+// master's clock/date/scroll pushes if the master itself is not held. This
+// rule therefore only rejects text from other senders. Closing the gap needs
+// calibration frames to travel as their own ESP-NOW message type, which
+// would make fleet calibration require every controller on one firmware
+// build; that trade-off is left to issue kinonn-bot#37.
 inline bool calibTextAllowed(int mode, bool fromPinnedMaster) {
     return fromPinnedMaster || mode != CALIB_HOLD_MODE;
+}
+
+// Does an accepted text frame have to be written to the drums again? A held
+// group re-writes frames from its pinned master even when the text is
+// unchanged: the ESP-NOW de-duplication is per boot, the group's own
+// clock/date writer may have owned the display in between, and skipping the
+// write would make the frame ack — and with it the master's "settled" — a
+// claim the drums do not back (issues kinonn-bot#37/#42). Outside hold the
+// old de-duplication stands.
+inline bool calibTextNeedsWrite(bool textChanged, int mode, bool fromPinnedMaster) {
+    if (textChanged) {
+        return true;
+    }
+    return fromPinnedMaster && mode == CALIB_HOLD_MODE;
 }
 
 // Pre-hold display mode tracker so hold release restores it (issue

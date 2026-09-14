@@ -421,7 +421,12 @@ void SplitFlapWebServer::registerCalibRoutes() {
             response["totalModules"] = totalModules;
             return request->send(400, "application/json", response.as<String>());
         }
-        if (getCalibBusy() || pendingActions_.hasCalibShowPending()) {
+        // isCalibBusy(), not the raw flag: a show queued while previews or a
+        // batch are still pending would be drained first (the .ino drains
+        // shows before previews) and would inherit the previous frame's ack
+        // bit, so the fence could clear on the older frame's late ack
+        // (issue kinonn-bot#46).
+        if (isCalibBusy()) {
             response["message"] = "Display busy, poll status until busy==false";
             response["type"] = "error";
             return request->send(409, "application/json", response.as<String>());
@@ -496,10 +501,10 @@ void SplitFlapWebServer::registerCalibRoutes() {
             response["type"] = "error";
             return request->send(400, "application/json", response.as<String>());
         }
-        // Same busy predicate as /show: queued work counts, not just work
-        // already executing, so a preview cannot be queued on top of a
-        // pending show and land in an order the caller did not intend
-        // (issue kinonn-bot#46).
+        // The composite predicate /show uses too: queued work and outstanding
+        // remote acks count, not just work already executing, so a preview
+        // cannot be queued on top of a pending show and land in an order the
+        // caller did not intend (issue kinonn-bot#46).
         if (isCalibBusy()) {
             response["message"] = "Display busy, poll status until busy==false";
             response["type"] = "error";

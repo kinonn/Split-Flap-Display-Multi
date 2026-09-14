@@ -11,6 +11,9 @@
 //
 // This test re-implements the dispatch logic in pure C++ so it can run on
 // the host without Arduino. It exercises the exact branch that changed.
+//
+// Build & run:
+//   g++ -std=c++17 -Wall -Wextra -I src -I test/stubs_jsonsettings test/multi_group_mqtt_state_test.cpp -o /tmp/multi_group_mqtt_state_test && /tmp/multi_group_mqtt_state_test
 
 #include <iostream>
 #include <string>

@@ -90,8 +90,17 @@ void SplitFlapEspNow::loop() {
     }
 
     SplitFlapEspNowMessage packet;
+    // Sender MAC is taken in the SAME critical section as the packet it
+    // belongs to: reading it in a second window would let a packet that
+    // arrived in between decide the previous packet's fate — dropping a real
+    // master frame while held, or accepting a foreign one (issue
+    // kinonn-bot#37).
+    uint8_t senderMac[6];
+    bool senderIsPinnedMaster = false;
     portENTER_CRITICAL(&packetMux);
     memcpy(&packet, &pendingPacket, sizeof(packet));
+    memcpy(senderMac, pendingTextMac, sizeof(senderMac));
+    senderIsPinnedMaster = masterMacKnown && memcmp(senderMac, masterMac, 6) == 0;
     pendingMessage = false;
     portEXIT_CRITICAL(&packetMux);
 
@@ -103,37 +112,34 @@ void SplitFlapEspNow::loop() {
     packet.text[moduleCount] = '\0';
     String text = String(packet.text);
 
-    // A held group still has to accept the pinned master's frames: fleet
-    // calibration shows arrive over this exact ESP-NOW text path, so the old
-    // blanket drop left remote groups showing stale glyphs while the master
-    // reported settled (issue kinonn-bot#37). Text from anyone else keeps
-    // being dropped — that is the guard's original purpose (a non-held
-    // master's clock/date/scroll pushes must not overwrite a held frame).
-    bool fromPinnedMaster;
-    portENTER_CRITICAL(&packetMux);
-    fromPinnedMaster = masterMacKnown && memcmp(pendingTextMac, masterMac, 6) == 0;
-    portEXIT_CRITICAL(&packetMux);
-
-    if (! calibTextAllowed(settings.getInt("mode"), fromPinnedMaster)) {
+    int currentMode = settings.getInt("mode");
+    if (! calibTextAllowed(currentMode, senderIsPinnedMaster)) {
         return;
     }
+    bool held = (currentMode == CALIB_HOLD_MODE);
 
-    bool reShown = (text == lastRemoteText);
-    if (! reShown) {
+    // Under hold the master owns this display, so a repeated frame is written
+    // (and acked) again instead of being skipped — see calibTextNeedsWrite()
+    // for why a skipped write would make the ack lie about the drums.
+    bool writeRequired = calibTextNeedsWrite(text != lastRemoteText, currentMode, senderIsPinnedMaster);
+    if (writeRequired) {
         // A held group must not latch into remote mode here, or its own
         // clock/date modes would resume under the agent's frame the moment
         // hold is released on the master.
-        if (settings.getInt("mode") != CALIB_HOLD_MODE) {
+        if (! held) {
             settings.putInt("mode", ESP_NOW_REMOTE_MODE);
         }
         display.writeString(text, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
         lastRemoteText = text;
     }
 
-    // Ack even a re-shown identical frame: it is already on the drums, and
-    // the master's fence must clear (issue kinonn-bot#42). A master that
-    // never armed a fence simply ignores it.
+    // Ack once the write has returned, so a fleet show's busy fence covers
+    // this group's motion (issue kinonn-bot#42); a master that never armed a
+    // fence simply ignores it. ensurePeer() first: a freshly booted group
+    // that goes straight into hold has no master peer entry yet, and
+    // esp_now_send() only reports that through its return value.
     if (masterMacKnown) {
+        ensurePeer(masterMac);
         SplitFlapCalibAckMessage ack = {};
         ack.version = ESP_NOW_CALIB_ACK;
         ack.groupIndex = packet.groupIndex;
@@ -346,7 +352,13 @@ void SplitFlapEspNow::distributeFrame(const String &frame, bool calib) {
             calibAckDeadlineMs = millis() + PUSH_ACK_TIMEOUT_MS;
             portEXIT_CRITICAL(&calibAckMux);
         }
-        sendToPeer(groupIndex, segment, moduleCount);
+        if (! sendToPeer(groupIndex, segment, moduleCount) && calib) {
+            // No send, no ack, no reason to hold busy for the whole fence
+            // timeout (unknown peer, esp_now_send failure).
+            portENTER_CRITICAL(&calibAckMux);
+            calibAckPendingMask &= (uint8_t) ~(1 << groupIndex);
+            portEXIT_CRITICAL(&calibAckMux);
+        }
         offset += moduleCount;
     }
 

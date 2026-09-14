@@ -50,6 +50,18 @@ int main() {
         CHECK(! calibNudgesFitScope(scope, 48));
     }
 
+    // --- hold-mode write rule (issues #37 / #42) ------------------------------
+    // Under hold, a frame from the pinned master is written even when the text
+    // is unchanged: a per-boot de-duplication would otherwise let the group ack
+    // a frame it is not showing (its own clock/date writer may have owned the
+    // display since the last identical frame).
+    CHECK(calibTextNeedsWrite(true, 0, false));                // new text, not held
+    CHECK(calibTextNeedsWrite(true, CALIB_HOLD_MODE, true));   // new text, held
+    CHECK(calibTextNeedsWrite(false, CALIB_HOLD_MODE, true));  // repeat frame from the pinned master while held
+    CHECK(! calibTextNeedsWrite(false, 0, true));              // repeat frame, not held: old de-duplication
+    CHECK(! calibTextNeedsWrite(false, 2, false));
+    CHECK(! calibTextNeedsWrite(false, CALIB_HOLD_MODE, false));
+
     // --- hold-mode text rule -------------------------------------------------
     // Held AND from the pinned master: accepted, or fleet calibration shows
     // can never reach a held group.

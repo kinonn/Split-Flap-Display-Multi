@@ -116,6 +116,29 @@ int main() {
     CHECK(jsonInt("maxNudgesPerBatch") == PendingActions::CalibBatchPreview::MAX_NUDGES);
     CHECK(jsonInt("maxNudgesPerRemoteScope") == CALIB_MAX_NUDGES_PER_REMOTE);
 
+    // Every shipped copy of the contract must stay in step with the served
+    // one: tools/calib and tools/calib-agent carry mirrors that the tools
+    // read offline (issue kinonn-bot#38's first draft shipped them stale).
+    {
+        std::ifstream served("src/web/calib-contract.json", std::ios::binary);
+        std::ostringstream servedBuf;
+        servedBuf << served.rdbuf();
+        const char *mirrors[] = {
+            "tools/calib/calib/contract.json",
+            "tools/calib-agent/contract.json",
+        };
+        for (const char *path : mirrors) {
+            std::ifstream in(path, std::ios::binary);
+            std::ostringstream buf;
+            buf << in.rdbuf();
+            if (buf.str() != servedBuf.str()) {
+                std::printf("FAIL mirror differs from the served contract: %s\n", path);
+            }
+            CHECK(! buf.str().empty());
+            CHECK(buf.str() == servedBuf.str());
+        }
+    }
+
     if (failures == 0) {
         std::printf("calib_contract_test: all %d checks passed\n", checks);
         return 0;
