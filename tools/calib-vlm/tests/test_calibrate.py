@@ -2,6 +2,9 @@
 
 import math
 
+import pytest
+
+from calib.display import CalibError
 from calib_vlm.calibrate import (BATCH_MAX_NUDGES, REMOTE_BATCH_MAX_NUDGES,
                                  VlmCalibrator)
 
@@ -355,6 +358,75 @@ def test_unreliable_reads_escalate_without_corrections(tmp_path):
     notes = [e["note"] for e in report["identity"]["persistent"]]
     assert any("unreliable reads" in n or "purity" in n for n in notes)
     assert calib.previews < calib.max_previews
+
+
+def test_fleet_geometry_uses_declared_group_widths(tmp_path):
+    # kinonn-bot#41: the firmware maps fleet modules through the
+    # user-editable masterGroupModuleCounts (group 1 first), not through
+    # local-wide groups. With local 8 and counts 8,6,4 (total 18) the old
+    # heuristic derived [8,8,2], so fleet module 14 - group 3, local 0 -
+    # was tuned as group 2 local 6 and never fixed.
+    d = FakeDisplay(group_widths=[8, 6, 4])
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    status, settings = d.status(), d.snapshot()["settings"]
+    assert (status["numModules"], status["totalModules"],
+            status["groupCount"]) == (8, 18, 3)
+    assert settings["masterGroupModuleCounts"] == "8,6,4"
+    assert calib._widths(status, settings) == [8, 6, 4]
+    calib.group_widths = [8, 6, 4]
+    assert (calib._group_of(7), calib._local_index(7)) == (1, 7)
+    assert (calib._group_of(8), calib._local_index(8)) == (2, 0)
+    assert (calib._group_of(13), calib._local_index(13)) == (2, 5)
+    assert (calib._group_of(14), calib._local_index(14)) == (3, 0)
+    assert (calib._group_of(17), calib._local_index(17)) == (3, 3)
+
+
+def test_fleet_run_tunes_the_declared_mapping(tmp_path):
+    # End to end: a fault on fleet module 14 is a group-3 fault, and the
+    # report carries the geometry the run actually used.
+    d = FakeDisplay(group_widths=[8, 6, 4])
+    d.seed_module_error(14, -d.spc)  # group 3, local module 0
+    calib, report = run_calib(d, tmp_path)
+    assert report["fleet"]["groupWidths"] == [8, 6, 4]
+    assert report["result"] == "converged"
+    assert d.remote_mod[2][0] == 0
+    assert all(not row for row in d.remote_mod[1])  # group 2 untouched
+
+
+def test_fleet_geometry_prefers_status_group_widths(tmp_path):
+    # The status endpoint's groupWidths (new firmware field) wins over a
+    # stale /settings CSV, and a present-but-inconsistent field is an
+    # error - guessing a mapping silently mis-tunes every later group.
+    d = FakeDisplay(group_widths=[8, 6, 4], master_counts="8,8,8,8,8,8",
+                    status_group_widths=[8, 6, 4])
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    assert calib._widths(d.status(), d.snapshot()["settings"]) == [8, 6, 4]
+    d.declared_status_widths = [8, 8, 8]  # sums to 24, not 18
+    with pytest.raises(CalibError, match="fleet geometry inconsistent"):
+        calib._widths(d.status(), d.snapshot()["settings"])
+    d.declared_status_widths = [8, 6]     # three groups, two widths
+    with pytest.raises(CalibError, match="fleet geometry inconsistent"):
+        calib._widths(d.status(), d.snapshot()["settings"])
+
+
+def test_fleet_geometry_falls_back_to_equal_width_heuristic(tmp_path):
+    # Firmware that declares no widths keeps the legacy equal-width layout
+    # (last group short, so an 8-module/3-group display is 2,2,4).
+    d = FakeDisplay(total=8, groups=3, master_counts="")
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    assert "groupWidths" not in d.status()
+    assert d.snapshot()["settings"]["masterGroupModuleCounts"] == ""
+    assert calib._widths(d.status(), d.snapshot()["settings"]) == [2, 2, 4]
+    # A stale CSV that does not add up is ignored the same way.
+    stale = FakeDisplay(total=8, groups=3, master_counts="8,8,8")
+    assert calib._widths(stale.status(), stale.snapshot()["settings"]) == \
+        [2, 2, 4]
 
 
 def test_remote_group_char_converges(tmp_path):

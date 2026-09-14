@@ -606,10 +606,70 @@ class VlmCalibrator:
         return rec, reading
 
     # -- fleet geometry (mirrors calib.loop.Calibrator) -----------------------
-    def _widths(self, status: dict) -> list[int]:
+    @staticmethod
+    def _parse_widths(raw, groups: int) -> list[int] | None:
+        """First `groups` per-group module counts of a CSV/list, or None.
+
+        `masterGroupModuleCounts` is a user-editable CSV (firmware default
+        "8,8,8,8,8,8"); `GET /api/calib/status` reports the same data as a
+        `groupWidths` list. Entry 0 is group 1 (the local controller),
+        entry 1 group 2, ... (SplitFlapEspNow::getGroupModuleCount).
+        """
+        if raw is None or raw == "":
+            return None
+        items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+        try:
+            widths = [int(str(part).strip()) for part in items
+                      if str(part).strip() != ""]
+        except (TypeError, ValueError):
+            return None
+        if len(widths) < groups or any(w <= 0 for w in widths[:groups]):
+            return None
+        return widths[:groups]
+
+    def _declared_widths(self, status: dict, settings: dict,
+                         total: int, local: int, groups: int) -> list[int] | None:
+        """Group widths the firmware declares, or None when it declares none.
+
+        The firmware maps fleet modules through `masterGroupModuleCounts`,
+        so assuming every group is local-wide mis-maps every module past
+        the first group boundary. Prefer the status endpoint's
+        `groupWidths` (list, group 1 first); fall back to the
+        `masterGroupModuleCounts` CSV of the /settings snapshot. A
+        `groupWidths` that is present but contradicts the status counts is
+        an error — guessing a mapping would silently mis-tune.
+        """
+        if status.get("groupWidths") is not None:
+            raw = status["groupWidths"]
+            widths = self._parse_widths(raw, groups)
+            if (widths is None or len(widths) != groups
+                    or widths[0] != local or sum(widths) != total):
+                raise CalibError(
+                    f"fleet geometry inconsistent: groupWidths {raw!r} "
+                    f"does not cover {total} total / {local} local module(s) "
+                    f"over {groups} group(s)")
+            return widths
+        widths = self._parse_widths(settings.get("masterGroupModuleCounts"),
+                                    groups)
+        if widths is not None and widths[0] == local and sum(widths) == total:
+            return widths
+        return None
+
+    def _widths(self, status: dict, settings: dict | None = None) -> list[int]:
+        """Module count per group, group 1 (local) first.
+
+        Order of preference: the firmware's declared group widths (status
+        `groupWidths`, else the `masterGroupModuleCounts` CSV the run
+        already fetches), then the legacy equal-width heuristic for
+        firmware that reports neither.
+        """
         total = int(status["totalModules"])
         local = int(status["numModules"])
         groups = int(status.get("groupCount", 1)) or 1
+        declared = self._declared_widths(status, settings or {}, total,
+                                         local, groups)
+        if declared is not None:
+            return declared
         if groups <= 1:
             if total != local:
                 raise CalibError(
@@ -2051,9 +2111,12 @@ class VlmCalibrator:
         self.total = int(status["totalModules"])
         self.charset = int(status["charset"])
         self.drum = str(status["drumOrder"])
-        self.group_widths = self._widths(status)
+        # Fleet geometry needs the /settings snapshot too (the firmware's
+        # `masterGroupModuleCounts` is the real per-group mapping when the
+        # status endpoint has no `groupWidths`).
         snapshot = self.display.snapshot()
         settings = snapshot.get("settings", snapshot) if isinstance(snapshot, dict) else {}
+        self.group_widths = self._widths(status, settings)
         try:
             steps_per_rot = int(settings.get(
                 "stepsPerRot", status.get("stepsPerRot", 2048)))

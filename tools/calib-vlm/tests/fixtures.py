@@ -31,10 +31,34 @@ class FakeDisplay:
     """
 
     def __init__(self, total: int = 4, groups: int = 1, charset: int = 37,
-                 steps_per_rot: int = 2048, drum: str | None = None):
-        self.total = total
-        self.groups = max(1, groups)
-        self.local = total if self.groups <= 1 else total // self.groups
+                 steps_per_rot: int = 2048, drum: str | None = None,
+                 group_widths: list[int] | None = None,
+                 master_counts: str | None = None,
+                 status_group_widths: list[int] | None = None):
+        # Explicit per-group module counts (group 1 = local first), the way
+        # the firmware's `masterGroupModuleCounts` maps a fleet. Defaults to
+        # the legacy equal-width layout.
+        self.fixed_widths = [int(w) for w in group_widths] if group_widths \
+            else None
+        if self.fixed_widths:
+            self.groups = len(self.fixed_widths)
+            self.total = sum(self.fixed_widths)
+            self.local = self.fixed_widths[0]
+        else:
+            self.total = total
+            self.groups = max(1, groups)
+            self.local = total if self.groups <= 1 else total // self.groups
+        # `/settings` always carries `masterGroupModuleCounts` (a CSV of the
+        # per-group module counts, group 1 first; firmware default
+        # "8,8,8,8,8,8"). Defaults to this display's real geometry; pass
+        # master_counts="" (or a stale value) to model a display whose
+        # setting does not describe its fleet.
+        self.master_counts = (master_counts if master_counts is not None
+                              else ",".join(str(w) for w in self.widths()))
+        # The status endpoint only reports `groupWidths` on firmware that
+        # carries the new field — opt in per test.
+        self.declared_status_widths = (list(status_group_widths)
+                                       if status_group_widths else None)
         self.charset = charset
         self.drum = drum or (CHARSET_37 if charset == 37 else CHARSET_48)
         self.steps_per_rot = steps_per_rot
@@ -72,6 +96,8 @@ class FakeDisplay:
 
     # -- geometry -------------------------------------------------------------
     def widths(self) -> list[int]:
+        if self.fixed_widths:
+            return list(self.fixed_widths)
         if self.groups <= 1:
             return [self.total]
         widths = [self.local] * self.groups
@@ -162,7 +188,7 @@ class FakeDisplay:
                 row[ci] = (self.char_off[i].get(ci, 0)
                            + self.res_char[i].get(ci, 0))
             rows.append(row)
-        return {
+        status = {
             "contractVersion": 1, "schemaVersion": 1, "busy": False,
             "numModules": self.local, "totalModules": self.total,
             "groupCount": self.groups, "charset": self.charset,
@@ -171,13 +197,17 @@ class FakeDisplay:
                               for i in range(self.local)],
             "charOffsets": rows, "holdActive": self.hold_active,
         }
+        if self.declared_status_widths:
+            status["groupWidths"] = list(self.declared_status_widths)
+        return status
 
     def contract(self) -> dict:
         return {"contractVersion": 1}
 
     def snapshot(self) -> dict:
         settings = {"stepsPerRot": self.steps_per_rot,
-                    "rModOffs": matrix_to_csv(self.remote_mod)}
+                    "rModOffs": matrix_to_csv(self.remote_mod),
+                    "masterGroupModuleCounts": self.master_counts}
         for row in range(5):
             settings[f"rChrOff{row}"] = matrix_to_csv(self.remote_char[row])
         return {"settings": settings}
