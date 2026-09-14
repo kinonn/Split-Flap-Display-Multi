@@ -58,6 +58,10 @@ static std::map<String, JsonSetting> testSchema() {
         {"masterGroupCount", JsonSetting(1)},
         {"maxVel", JsonSetting(15.0f)},
         {"moduleCount", JsonSetting(8)},
+        // Calibration hold (mode 4) is read by the real processPendingMessage()
+        // before it dispatches staged text (kinonn-bot#43): without it the
+        // production path throws Key-not-found out of the settings stub.
+        {"mode", JsonSetting(0)},
     };
 }
 
