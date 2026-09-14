@@ -55,11 +55,12 @@ def test_per_char_identity_converges(tmp_path):
 
 
 def test_per_char_identity_overflow_escalates_cleanly(tmp_path):
-    # A fault needing MORE than half a revolution (e.g. 30 chars on a
-    # 48-char drum) cannot live in a char cell the firmware clamps to
-    # ±32: escalate instead of writing a clamped, wrong offset that
-    # would leave the display worse than before. Driven directly (a
-    # full run would route a many-glyph fault to the module cell).
+    # A per-character fault whose fix is a whole number of characters (a
+    # 37-char drum 30 positions away is +7 chars = 385 motor steps here)
+    # cannot live in a char cell the firmware clamps to ±32: P2 must
+    # escalate instead of writing a clamped, wrong offset that would leave
+    # the display worse than before. Driven through the real P2 pass (a
+    # full run routes a many-glyph fault to the module cell first).
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
     far = d.drum[(ci + 30) % len(d.drum)]
@@ -71,9 +72,10 @@ def test_per_char_identity_overflow_escalates_cleanly(tmp_path):
     calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
     calib.group_widths = [d.total]
     calib.steps_per_char = d.spc
-    out = calib._tune_identity(2, ci, "O", "O" * d.total)
-    assert out["fixed"] is False
+    calib._p1_flagged = ["O"]
+    calib._p2_fine()
     assert d.char_off[2].get(ci, 0) == 0   # cell untouched, not clamped
+    assert not d.previews and not d.persists
     notes = [e["note"] for e in calib.identity_persistent]
     assert any("does not fit a char cell" in n for n in notes)
 
@@ -91,9 +93,10 @@ def test_remote_per_char_overflow_escalates_cleanly(tmp_path):
     calib.group_widths = d.widths()
     calib.steps_per_char = d.spc
     calib._load_remote_offsets(calib.display.snapshot().get("settings", {}))
-    out = calib._tune_identity(5, ci, "H", "H" * d.total)
-    assert out["fixed"] is False
+    calib._p1_flagged = ["H"]
+    calib._p2_fine()
     assert d.remote_char[0][2][ci] == 0    # not corrupted to ±32
+    assert not d.previews and not d.persists
     notes = [e["note"] for e in calib.identity_persistent]
     assert any("does not fit a char cell" in n for n in notes)
 
@@ -504,6 +507,39 @@ def test_skip_list_excludes_default_punctuation(tmp_path):
     assert "." not in chars and "'" not in chars and "-" not in chars
     assert len(chars) == len(d.drum) - 3
     assert set(readings[0]) == set(chars)
+
+
+def test_sweep_budget_counts_passes_and_fires(tmp_path):
+    # kinonn-bot#48: nothing incremented `self.sweeps`, so the "sweep
+    # budget exhausted" guard was inert. One sweep pass = one sweep.
+    d = FakeDisplay(total=4)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib.max_sweeps = 2
+    calib._sweep()
+    assert calib.sweeps == 1
+    calib._sweep()
+    assert calib.sweeps == 2
+    with pytest.raises(CalibError, match="sweep budget exhausted"):
+        calib._sweep()
+    assert calib.sweeps == 2   # the rejected pass is not counted
+
+
+def test_run_enforces_the_sweep_budget(tmp_path):
+    # The budget stops the run with a reason instead of grinding through
+    # one more whole-drum sweep.
+    d = FakeDisplay(total=4)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.max_sweeps = 0
+    report = calib.run()
+    assert report["result"] == "needs-human"
+    assert "sweep budget exhausted" in report["reason"]
 
 
 def test_skip_list_disabled_covers_full_drum(tmp_path):
@@ -1046,6 +1082,18 @@ def test_phases_reject_unknown_names(tmp_path):
         assert "unknown phases" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown phase")
+
+
+def test_preview_mode_is_rejected_not_supported(tmp_path):
+    # kinonn-bot#48: the old `self.mode == "preview"` branches were
+    # unreachable — the calibrator accepts dry-run/full only (and the
+    # server folds the legacy "preview" config into "full"), which is why
+    # they were removed rather than kept "just in case".
+    d = FakeDisplay(total=4)
+    with pytest.raises(ValueError, match="mode must be dry-run or full"):
+        VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                      dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                      mode="preview")
 
 
 def test_p1_only_skips_later_phases(tmp_path):
