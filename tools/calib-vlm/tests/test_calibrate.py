@@ -482,6 +482,54 @@ def test_remote_whole_drum_plus_trim_commits_both(tmp_path):
     assert d.remote_mech[0][1][d.drum.index("H")] != 0
 
 
+def test_remote_cell_second_commit_keeps_the_first(tmp_path):
+    # kinonn-bot#39: a remote cell is committed twice in one run (P1 runs
+    # the module trim and the phase trim over overlapping modules and
+    # unions them as handled = trimmed | phased). The second commit
+    # recomputed its base from the run-start /settings snapshot, which is
+    # never refreshed, so it silently dropped the first verified
+    # component. Invariant: the persisted value is the value the device
+    # actually holds.
+    d = FakeDisplay(total=6, groups=2, charset=48)
+    d.flap_window = int(round(d.spc * 0.4))
+    d.seed_flap_error(4, d.drum.index("H"), int(round(d.spc * 0.6)))  # g2 local1
+    d.seed_flap_error(4, d.drum.index("N"), int(round(d.spc * 1.0)))
+    d.seed_flap_error(4, d.drum.index("G"), int(round(d.spc * 1.0)))
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = d.widths()
+    calib.steps_per_char = d.spc
+    calib._load_remote_offsets(d.snapshot()["settings"])
+    steps = [int(round(d.spc * f)) for f in (0.5, 0.25, 0.125, 0.0625)]
+
+    def plan(label, target, guard):
+        return {"module": 4, "group": 2, "local": 1, "char_index": -1,
+                "steps": list(steps), "cap": d.spc, "targets": [target],
+                "guards": [guard], "state": 0, "best": 0, "best_score": 0,
+                "label": label}
+
+    first = plan("trim", "H", "A")
+    assert calib._cell_ladder([first]) == {4}
+    written = d.remote_mod[0][1]
+    assert written and d.displayed_char(4, "H") == "H"
+    second = plan("phase", "N", "G")
+    assert calib._cell_ladder([second]) == {4}
+    assert second["best"] != 0
+    # The second commit persists the tracked absolute = first + second,
+    # not the run-start snapshot + second.
+    assert d.remote_mod[0][1] == written + second["best"]
+    assert calib.live((2, 1, -1)) == d.remote_mod[0][1]
+    assert [p for p in d.persists if p[0] == 2] == [
+        (2, "module", written, 1, 0),
+        (2, "module", written + second["best"], 1, 0)]
+    # Both components are live on the device: H (first commit) and N
+    # (second commit) read clean.
+    assert d.displayed_char(4, "H") == "H" and d.condition(4, "H") == "clean"
+    assert d.displayed_char(4, "N") == "N" and d.condition(4, "N") == "clean"
+
+
 def test_confusable_pair_never_becomes_a_correction(tmp_path):
     # O and 0 are indistinguishable on the drum: a reader that swaps them
     # must not be "corrected" (a 12-character shift for O/0). Confusable

@@ -1465,12 +1465,18 @@ class VlmCalibrator:
             if p["group"] == 1:
                 self._commit_local(1, key, kind, p["char_index"])
             elif self.mode == "full":
-                # Remote previews are RAM-only: persist the absolute winner
-                # (base + whole-phase offset already previewed + ladder) so
-                # the fix survives the revert.
-                base = self._read_cell(p["group"], p["local"],
-                                       p["char_index"])
-                target = base + p.get("offset_base", 0) + p["best"]
+                # Remote previews are RAM-only: persist the tracked
+                # absolute (overlay + residue), i.e. exactly what the
+                # device holds after the ladder (run-start base + the
+                # whole-character offset previewed above + this ladder's
+                # best). INVARIANT: the persisted value equals the value
+                # the device actually holds, so a later commit on the same
+                # cell (P1 runs the module trim and the phase trim over
+                # overlapping modules) builds on this one instead of
+                # dropping it. Re-reading the run-start /settings snapshot
+                # here would discard every earlier verified commit, since
+                # that snapshot is never refreshed during a run.
+                target = self.live(key)
                 self._guard_budgets()
                 self.display.persist(p["group"], kind, target,
                                      p["local"], max(p["char_index"], 0))
