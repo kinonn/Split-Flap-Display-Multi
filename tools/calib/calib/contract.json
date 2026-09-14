@@ -12,6 +12,8 @@
         "maxTotalModules": 48,
         "charOffsetMin": -32,
         "charOffsetMax": 32,
+        "maxNudgesPerBatch": 48,
+        "maxNudgesPerRemoteScope": 8,
         "dwellMsMin": 0,
         "dwellMsMax": 10000
     },
@@ -33,17 +35,19 @@
     "notes": [
         "Drums move forward-only: always step patterns in drum order, never random.",
         "Show frames are exact-width: length must equal numModules (local) or totalModules (fleet-wide distribute via master). Centering and scroll are forced off.",
-        "Poll GET /api/calib/status until busy==false, wait dwellMs, then shoot. GET /api/calib/frame?frameId=N is ground truth.",
-        "Preview is volatile RAM-only on the controller called (call each group directly for fleets); reload reverts. Persist via POST /api/calib/offsets (scope local or group 2..6 on master).",
-        "Calibration hold (mode 4) suspends date/time/random/scroll/MQTT/ESP-NOW writes; engage on every controller before starting, release when done."
+        "dwellMs on /show is client-side metadata: the firmware range-checks and echoes it but never blocks on it, so clients wait it out themselves. Poll GET /api/calib/status until busy==false, then shoot; GET /api/calib/frame?frameId=N is ground truth. On a fleet, busy also covers remote groups until each one acks the frame.",
+        "Preview is volatile RAM-only on the controller called (call each group directly for fleets); reload reverts. Persist via POST /api/calib/offsets (scope local or group 2..6 on master); module and display values must stay within one revolution.",
+        "Calibration hold (mode 4) suspends date/time/random/scroll/MQTT writes; engage on every controller before starting, release when done. A held controller accepts any text frame from the master it has learned (the ESP-NOW text packet carries no type), so fleet-wide shows keep working while every group is held — but that same openness means the master's own scheduled pushes would reach a held group if the master itself is not held.",
+        "Fleet geometry: groups are NOT assumed to be equal width. Read groupWidths from GET /api/calib/status (group 1 first) — the master fans frames out using the editable masterGroupModuleCounts vector.",
+        "Fleet shows are acked per group: busy stays true until every group reports the frame as displayed, so a group still running firmware from before that ack exists never answers and busy stays true for the whole fence timeout. Flash every controller with the same build before a fleet run."
     ],
     "endpoints": {
-        "status": "GET /api/calib/status",
+        "status": "GET /api/calib/status (includes groupWidths: per-group module counts, group 1 first)",
         "hold": "POST /api/calib/hold {active:bool}",
         "show": "POST /api/calib/show {frame:string, dwellMs?:int}",
         "frame": "GET /api/calib/frame?frameId=N",
         "preview": "POST /api/calib/preview {module:int, charIndex:int(-1=coarse), delta:int}",
-        "previewBatch": "POST /api/calib/preview-batch {nudges:[{scope?:1..6, module, charIndex, delta},...]} (one home pass; scope>1 forwarded RAM-only over ESP-NOW)",
+        "previewBatch": "POST /api/calib/preview-batch {nudges:[{scope?:1..6, module, charIndex, delta},...]} (one home pass; max 48 nudges per call and max 8 per remote scope; scope>1 forwarded RAM-only over ESP-NOW)",
         "reload": "POST /api/calib/reload {} (revert volatile previews to NVS)",
         "offsets": "POST /api/calib/offsets {scope:\"local\"|1..6, kind:\"char\"|\"module\"|\"display\", module?, charIndex?, value:int}"
     }

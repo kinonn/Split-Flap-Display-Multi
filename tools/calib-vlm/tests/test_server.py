@@ -1,5 +1,8 @@
 """Server config + read-test endpoints (no hardware)."""
 
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,6 +15,35 @@ from tests.fixtures import FakeCamera, FakeDisplay, SimReader
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIB_VLM_DATA", str(tmp_path))
     return TestClient(server.app)
+
+
+@pytest.fixture()
+def idle_harness(monkeypatch):
+    """Module-level harness in a pristine idle state for a real run."""
+    monkeypatch.setattr(server.harness, "status", "idle")
+    monkeypatch.setattr(server.harness, "calibrator", None)
+    monkeypatch.setattr(server.harness, "pending_abort", False)
+    yield server.harness
+
+
+def _wait_done(client, timeout: float = 60.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = client.get("/api/run/state").json()
+        if state["status"] in ("done", "failed", "idle"):
+            return state
+        time.sleep(0.02)
+    raise AssertionError(f"run did not finish: {state}")
+
+
+def _fake_run(monkeypatch, display):
+    """Wire the run thread to the fakes (no camera, display or VLM)."""
+    monkeypatch.setattr(server, "_reader_from_config", lambda cfg: None)
+    monkeypatch.setattr(server, "Display", lambda host: display)
+    monkeypatch.setattr(server, "Camera", lambda *a, **k: FakeCamera())
+    monkeypatch.setattr(server, "VLMClient", lambda *a, **k: object())
+    monkeypatch.setattr(server, "VlmReader",
+                        lambda *a, **k: SimReader(display))
 
 
 def test_config_masks_key(client):
@@ -116,6 +148,107 @@ def test_normalize_phases_defaults_and_rejects():
         assert "unknown phases" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown phase")
+
+
+def test_config_clamps_declared_ranges(client):
+    # kinonn-bot#47: save_config unpacked the declared ranges and never
+    # applied them, so dwell_ms > 10000 made the firmware reject every
+    # show (HTTP 400) and a negative dwell_ms would reach time.sleep.
+    body = client.post("/api/config",
+                       json={"dwell_ms": 999999, "timeout_s": 0.1,
+                             "min_confidence": 7,
+                             "max_seconds": 5}).json()
+    assert body["dwell_ms"] == 10000
+    assert body["timeout_s"] == 1
+    assert body["min_confidence"] == 1
+    assert body["max_seconds"] == 60
+    low = client.post("/api/config",
+                      json={"dwell_ms": -5, "timeout_s": 99999,
+                            "min_confidence": -3,
+                            "max_seconds": 10 ** 9}).json()
+    assert low["dwell_ms"] == 0
+    assert low["timeout_s"] == 3600
+    assert low["min_confidence"] == 0
+    assert low["max_seconds"] == 36000
+    # The persisted config is what the run thread reads, and the clamped
+    # dwell is inside the firmware's accepted range (the fixture enforces
+    # 0..10000 exactly like /api/calib/show does).
+    cfg = server.load_config()
+    assert (cfg["dwell_ms"], cfg["timeout_s"]) == (0, 3600)
+    FakeDisplay(total=4).show_and_settle("H   ", cfg["dwell_ms"])
+
+
+def test_out_of_range_dwell_still_runs(client, monkeypatch, idle_harness):
+    # A stored dwell_ms of -1 (or > 10 s) aborted the run at its first
+    # show; the clamp makes the configured value runnable.
+    display = FakeDisplay(total=4)
+    _fake_run(monkeypatch, display)
+    body = client.post("/api/config",
+                       json={"dwell_ms": -1,
+                             "llm_api_key": "«redacted:sk-…»"}).json()
+    assert body["dwell_ms"] == 0
+    r = client.post("/api/run/start")
+    assert r.status_code == 200, r.text
+    state = _wait_done(client)
+    assert state["status"] == "done"
+    assert "HTTP 400" not in (state["report"] or {}).get("reason", "")
+    assert display.fid > 0  # the run really showed frames
+
+
+def test_run_start_rejected_while_aborting(client, monkeypatch, idle_harness):
+    # kinonn-bot#47: start() only rejected status == "running", so a new
+    # run could start while the previous one was still aborting, sharing
+    # its events/run_dir and releasing its display hold.
+    monkeypatch.setattr(server, "_reader_from_config", lambda cfg: None)
+    idle_harness.status = "aborting"
+    run_seq = idle_harness.run_seq
+    r = client.post("/api/run/start")
+    assert r.status_code == 409, r.text
+    assert idle_harness.state()["status"] == "aborting"
+    assert idle_harness.run_seq == run_seq  # no run was started
+
+
+def test_abort_before_the_calibrator_exists_is_applied(client, monkeypatch,
+                                                       idle_harness):
+    # kinonn-bot#47: the calibrator is built inside the run thread after
+    # the display probe, the camera open and the camera check, but abort()
+    # only forwarded when self.calibrator existed — an abort in that
+    # window was lost while the status said "aborting".
+    entered = threading.Event()
+    release = threading.Event()
+    made: list = []
+
+    class SlowCalib:
+        def __init__(self, *args, **kwargs):
+            self.aborted = False
+            self.frames_used = 0
+            self.vlm_calls = 0
+            self.report = {"result": "needs-human",
+                           "reason": "aborted by user"}
+            made.append(self)
+            entered.set()
+            release.wait(10)
+
+        def abort(self):
+            self.aborted = True
+
+        def run(self):
+            return dict(self.report)
+
+    _fake_run(monkeypatch, FakeDisplay(total=4))
+    monkeypatch.setattr(server, "VlmCalibrator", SlowCalib)
+    client.post("/api/config", json={"llm_api_key": "«redacted:sk-…»"})
+    r = client.post("/api/run/start")
+    assert r.status_code == 200, r.text
+    assert entered.wait(10), "run thread never reached the calibrator"
+    assert server.harness.calibrator is None  # the window is open
+    r = client.post("/api/run/abort")
+    assert r.json()["status"] == "aborting"
+    assert made[0].aborted is False  # not constructed when abort arrived
+    release.set()
+    state = _wait_done(client)
+    assert state["status"] == "done"
+    assert made[0].aborted is True  # the queued abort was applied
 
 
 def test_event_log_pages_without_truncation(client):

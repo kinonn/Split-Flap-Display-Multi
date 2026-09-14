@@ -156,6 +156,13 @@ def save_config(patch: dict) -> dict:
                 raise HTTPException(400, f"{key} must be a number")
             if not math.isfinite(value):
                 raise HTTPException(400, f"{key} must be a number")
+            # The declared range is enforced, not just checked: a
+            # dwell_ms > 10000 makes the firmware reject every show with
+            # HTTP 400 (the run fails at its first frame) and a negative
+            # one would reach time.sleep(). Clamp like camera_warmup_s /
+            # camera_crop_percent so a value outside the slider range
+            # still yields a usable run.
+            value = max(float(lo), min(float(hi), value))
             stored[key] = int(value) if key in ("dwell_ms", "max_seconds") \
                 else value
     # Start-wait (warm-up budget for cameras that open black) validates
@@ -279,6 +286,10 @@ class Harness:
         self.calibrator: VlmCalibrator | None = None
         self.thread: threading.Thread | None = None
         self.run_seq = 0
+        # An abort can arrive after the run is "running" but before the
+        # run thread has constructed the calibrator (display probe, camera
+        # open, camera check): remember it and apply it on construction.
+        self.pending_abort = False
         self.last_readtest_photo = ""
 
     def log(self, event: dict):
@@ -325,9 +336,13 @@ class Harness:
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         with self.lock:
-            if self.status == "running":
+            # "aborting" is busy too: a run started in that window would
+            # share events/run_dir with the aborting run and release its
+            # display hold under it.
+            if self.status in ("running", "aborting"):
                 raise HTTPException(409, "run already in progress")
             self.status = "running"
+            self.pending_abort = False
             self.mode = cfg.get("mode", "full")
             self.phases = phases
             self.events = []
@@ -414,6 +429,11 @@ class Harness:
                         })
                     with self.lock:
                         self.calibrator = calib
+                        if self.pending_abort:
+                            # Abort posted while the calibrator did not
+                            # exist yet (display probe / camera open):
+                            # forward it now instead of losing it.
+                            calib.abort()
                     self.report = calib.run()
                     with self.lock:
                         self.report = calib.report
@@ -454,7 +474,18 @@ class Harness:
         return {"status": "running", "run_dir": run_dir}
 
     def abort(self):
+        """Request an abort of the live run (no-op when idle).
+
+        The calibrator only exists once the run thread has got past the
+        display probe, the camera open and the camera check, so an abort
+        arriving before that is queued (pending_abort) and forwarded as
+        soon as the calibrator is constructed — otherwise the UI would say
+        "aborting" while the run happily continues.
+        """
         with self.lock:
+            if self.status not in ("running", "aborting"):
+                return
+            self.pending_abort = True
             if self.calibrator:
                 self.calibrator.abort()
             if self.status == "running":

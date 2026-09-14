@@ -41,13 +41,21 @@ Rules that matter:
   accepted.
 """
 
+# Lookalike guidance shared by the prompt builder and its tests: both
+# sides reference this constant, so the prompt text and the assertion can
+# never drift apart (the literal in tests/test_reader.py silently missed
+# the ':' the builder had added for the CHARSET_48 drum).
+LOOKALIKE_HINT = ("Lookalikes: I/1, O/0, S/5, Z/2/:, B/8, G/6, ./'/- — "
+                  "check carefully before choosing.")
+
+
 def _charset_block(charset: str, drum: str) -> str:
     """Human-readable character-set hint for the system prompt.
 
     Groups the allowed characters so the model can tell confusable
-    glyphs apart (I/1, O/0, S/5, Z/2, B/8, G/6, ./'/-) and knows the
-    small punctuation marks (', ., -, /, :, !, ?, $, @, #, %) are real
-    characters, not dirt or seams.
+    glyphs apart (see LOOKALIKE_HINT) and knows the small punctuation
+    marks (', ., -, /, :, !, ?, $, @, #, %) are real characters, not dirt
+    or seams.
     """
     if not charset:
         return ""
@@ -64,8 +72,7 @@ def _charset_block(charset: str, drum: str) -> str:
     if punct:
         lines.append(f"Punctuation: {' '.join(punct)} "
                      f"(tiny marks — do not mistake for seams or dirt)")
-    lines.append("Lookalikes: I/1, O/0, S/5, Z/2/:, B/8, G/6, ./'/- — "
-                 "check carefully before choosing.")
+    lines.append(LOOKALIKE_HINT)
     if drum and drum != charset:
         lines.append(f"Drum order: {drum!r}")
     return "\n" + "\n".join(lines) + "\n"

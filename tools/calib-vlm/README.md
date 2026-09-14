@@ -192,18 +192,20 @@ the shift/purity table (no writes).
   Module (`charIndex = -1`) offsets are unbounded (up to a full
   revolution per call), so a whole-character module correction is sent as
   **one** preview that re-homes the module once instead of once per 32
-  steps.
-- Tune reads are closed-loop: the settle wait scales with the move size
-  (the firmware reports idle when the command drains, but flaps can
-  still be travelling), consecutive reads must agree within one drum
-  position (a mid-travel flap reads as a random glyph — never correct a
-  transient), and two successive non-improving iterations escalate
-  instead of burning the preview budget.
-- Alignment fixes search `+4, -4, +2, -2, +8, -8, +1, -1` motor steps,
-  each candidate applied from the base (not compounded).
-- Cost per reading: wrong character, then condition rank
-  (`clean`/`blank` < `half` < `double` < `stuck` < `unreadable`), then
-  confidence.
+  steps. A `preview-batch` call carries at most 48 nudges (the endpoint
+  rejects more with HTTP 400) and at most 8 nudges per remote group (the
+  master's loop-task drain forwards only the first 8, dropping the rest
+  silently), so each scope is chunked to those caps.
+- Cells are tuned by a parallel **cell ladder**: every plan applies its own
+  candidate in the same mixed frames/reads (one `preview-batch` per step),
+  and the score is `target read correct+clean` per target minus a penalty
+  per broken guard glyph, so a candidate is kept only when it beats the
+  cell's baseline — a non-improving nudge is reverted before the next
+  step. Candidates are coarse-to-fine: sub-pitch fractions of one
+  character for boundary flaps, `+4, -4, +2, -2, +8, -8, +1, -1` motor
+  steps for a whole-drum seam (identity right, several cells reading
+  half/double), the exact signed-minimal identity delta for a
+  per-character P2 fault.
 - P1 runs a **parallel sub-pitch module trim** before any per-character
   cell is touched: a module wrong on only a few glyphs is usually a
   boundary/phase problem, so candidates `0.75/0.5/0.25/0.125` of one
@@ -220,9 +222,13 @@ the shift/purity table (no writes).
 - Local group (1): volatile `/api/calib/preview` nudges, re-read, then
   persist the verified absolute value via `/api/calib/offsets`.
 - Remote groups: volatile fleet preview (above) for the trim; other cell
-  work uses persist-verify-revert. Absolute bases come from the master's
+  work uses persist-verify-revert. The initial base comes from the master's
   `rModOffs` / `rChrOff0..4` settings (the `status` endpoint only exposes
-  local live offsets).
+  local live offsets), but every commit persists the **tracked absolute**
+  (base + all preview deltas applied to that cell), never the run-start
+  snapshot: the persisted value must equal the value the device holds, or
+  a second commit on the same cell (P1's module trim and phase trim
+  overlap) would drop the first verified component.
 - Baseline hygiene: every run starts with `POST /api/calib/reload`, which
   reverts any RAM-only preview residue from earlier runs; `full` mode does
   the same on the way out (persisted winners remain, ghost residue on
@@ -235,6 +241,12 @@ the shift/purity table (no writes).
 
 - All shows go to the master; fleet-width frames fan out via ESP-NOW.
   Engage hold on remote controllers out-of-band before starting.
+- Fleet geometry: the per-group module counts come from the status
+  endpoint's `groupWidths` list (group 1 first), else the
+  `masterGroupModuleCounts` CSV of the `/settings` snapshot — the same
+  vector the firmware maps groups with, so an asymmetric fleet (e.g.
+  `8,6,4`) is addressed correctly. Firmware that reports neither falls
+  back to equal-width groups with a short last group.
 - `dry-run` sweeps and prints the shift/purity table only (no writes);
   `full` applies, verifies and commits each phase.
 - Budgets: frames 300/1200, reader calls 300/1200, previews 200/800,
