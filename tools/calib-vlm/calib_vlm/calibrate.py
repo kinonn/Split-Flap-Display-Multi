@@ -29,7 +29,7 @@ SUPPORTED_CONTRACT = 1
 # Wear/time budgets.
 MAX_FRAMES = 500
 MAX_VLM_CALLS = 500
-MAX_PREVIEWS = 300
+MAX_PREVIEWS = 500
 MAX_PERSISTS = 500
 MAX_SWEEPS = 3
 # Abort when the reader cannot be trusted: more than this many
@@ -38,12 +38,14 @@ MAX_SWEEPS = 3
 MAX_UNRELIABLE_READS = 5
 # Deltas tried per suspect cell (motor steps), coarse first.
 TRY_DELTAS = (4, -4, 2, -2, 8, -8, 1, -1)
-# P2 seam ladder: a per-character `half`/`double` flap reports no
-# magnitude, so candidate offsets are scanned in fixed motor-step
-# increments, up to half a character pitch (`stepsPerChar` / 2 - any
-# further and the flap sits too close to the neighbouring character).
-# A clean window narrower than the increment can fall between two
-# candidates, so the half-step probes follow as a fallback chain.
+# P2 char-cell ladder: every per-character fault - a wrong glyph and a
+# `half`/`double` seam alike - is scanned in fixed motor-step increments
+# instead of one-shot exact deltas. The cap defaults to half a character
+# pitch (`stepsPerChar` / 2 - any further and the flap sits too close to
+# the neighbouring character); identity faults pass the firmware's ±32
+# char-cell clamp so the scan can reach it. A clean window narrower than
+# the increment can fall between two candidates, so the half-step probes
+# follow as a fallback chain.
 P2_LADDER_STEP = 4
 # A module misaligned (half/double, identity still right) on this many
 # uniform frames is a whole-drum phase fault: tune the module cell once
@@ -53,7 +55,7 @@ ALIGN_VOTE_MIN = 2
 # landing by the same steps, so a fraction of one flap pulls characters
 # sitting just past their flap boundary back onto their own flap without
 # moving well-centred characters. Multiples of a full character stay on the
-# coarse `_identity_steps` path.
+# coarse whole-character module path.
 MODULE_TRIM_FRACTIONS = (0.5, 0.25, 0.125, 0.0625)
 # Distinct wrong glyphs evaluated per suspect module during the trim.
 MODULE_TRIM_TARGETS = 3
@@ -130,15 +132,20 @@ def confusable(a: str, b: str) -> bool:
     return a != b and b in CONFUSABLES.get(a, ())
 
 
-def _p2_ladder_steps(steps_per_char: int) -> list[int]:
-    """Signed candidate offsets for the P2 seam ladder.
+def _p2_ladder_steps(steps_per_char: int,
+                     cap: int | None = None) -> list[int]:
+    """Signed candidate offsets for the P2 per-character ladder.
 
-    Increments of P2_LADDER_STEP up to half a character pitch, coarse
-    first and alternating sign, then the narrow-window fallback (half the
-    increment, then one step). Each candidate is applied from the base,
-    so the smallest offset that clears the flap wins.
+    Increments of P2_LADDER_STEP, coarse first and alternating sign, then
+    the narrow-window fallback (half the increment, then one step). Each
+    candidate is applied from the base, so the smallest offset that
+    clears the flap wins. `cap` bounds the candidate magnitude: it
+    defaults to half a character pitch (the seam window past which the
+    flap sits too close to the neighbouring character), while an identity
+    fault passes the firmware's char-cell clamp so the scan can reach it.
     """
-    cap = max(1, steps_per_char // 2)
+    if cap is None:
+        cap = max(1, steps_per_char // 2)
     mags = list(range(P2_LADDER_STEP, cap + 1, P2_LADDER_STEP))
     fine: list[int] = []
     for mag in (P2_LADDER_STEP // 2, 1):
@@ -425,7 +432,9 @@ class VlmCalibrator:
             evt["detail"] = detail
         if kind == "phase":
             # Phase boundary with budget snapshot: post-run analysis can
-            # derive per-phase seconds + frames/VLM/preview/persist cost.
+            # derive per-phase seconds + frames/VLM/preview/persist cost
+            # (`_phase_timing` books each interval to the phase announced
+            # by the PREVIOUS mark).
             self._phase_marks.append({
                 "name": text, "elapsed": evt["elapsed"],
                 "frames": self.frames_used, "vlmCalls": self.vlm_calls,
@@ -787,25 +796,6 @@ class VlmCalibrator:
         n = len(self.drum)
         raw = (self.drum.index(target) - self.drum.index(seen)) % n
         return raw - n if raw > n // 2 else raw
-
-    def _identity_steps(self, seen: str, target: str,
-                        char_index: int = 0) -> int | None:
-        """Signed-minimal motor-step correction moving `seen` to `target`.
-
-        A per-char cell shifts that character forward for positive steps,
-        but a module cell re-anchors the homing magnet reference for the
-        whole drum and shifts the displayed character the other way: on
-        magnet detection the firmware sets `position = magnetPos +
-        moduleOffset`, then steps forward-only to `charPosition`. Raising
-        the module offset therefore shows an *earlier* drum character, so
-        module-cell corrections are negated. Getting this backwards makes
-        the tune walk the drum away from the target instead of towards it.
-        """
-        chars = self._drum_delta(seen, target)
-        if chars is None:
-            return None
-        steps = chars * self.steps_per_char
-        return -steps if char_index < 0 else steps
 
     def _escalate(self, module: int, glyph: str, note: str):
         rec = {"module": module, "glyph": glyph, "note": note}
@@ -1263,6 +1253,9 @@ class VlmCalibrator:
                 p["state"] = candidate
                 if diff:
                     moved.add(p["module"])
+                    # Record the probes actually applied so an escalated,
+                    # unresolved cell can report what was tried.
+                    p.setdefault("attempted", []).append(candidate)
                     apply.append((p["group"], p["local"], p["char_index"],
                                   diff))
             self._batch_nudge(apply)
@@ -1692,30 +1685,15 @@ class VlmCalibrator:
                          and g not in skipped]
                 stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
                 guards = right[::stride][:MODULE_TRIM_GUARDS]
-                if entry.char != ch:
-                    full = self._identity_steps(entry.char, ch, ci)
-                    if full is None:
-                        self._escalate(m, ch, f"read {entry.char!r} is not "
-                                              f"on the drum")
-                        continue
-                    key = self._ensure_cell(self._group_of(m),
-                                            self._local_index(m), ci)
-                    if abs(self.live(key) + full) > CHAR_OFFSET_LIMIT:
-                        self._escalate(m, ch, "identity fix does not fit a "
-                                              "char cell (firmware clamps "
-                                              "char offsets to ±32)")
-                        continue
-                    # One-shot: the exact landing correction, then verify.
-                    steps = [full]
-                    cap = CHAR_OFFSET_LIMIT
-                else:
-                    # Right glyph, seam off-phase: the reader reports no
-                    # magnitude, so scan the incremental ladder - candidate
-                    # offsets in steps of P2_LADDER_STEP up to half a
-                    # character pitch (the clamp: past that the flap sits
-                    # too close to the neighbouring character).
-                    steps = _p2_ladder_steps(self.steps_per_char)
-                    cap = max(1, self.steps_per_char // 2)
+                # Every char-cell fault - a wrong glyph included - is walked
+                # up the incremental ladder: candidate offsets in steps of
+                # P2_LADDER_STEP up to the firmware's ±32 char-cell clamp. A
+                # one-shot exact identity fix is never sent: the cell only
+                # ever moves by a candidate within the clamp, and a fault
+                # that needs a whole flap is escalated below instead of
+                # written clamped.
+                steps = _p2_ladder_steps(self.steps_per_char,
+                                         cap=CHAR_OFFSET_LIMIT)
                 plans.append({
                     "module": m,
                     "group": self._group_of(m),
@@ -1723,7 +1701,7 @@ class VlmCalibrator:
                     "char_index": ci,
                     "steps": steps,
                     "absolute": True,
-                    "cap": cap,
+                    "cap": CHAR_OFFSET_LIMIT,
                     "targets": [ch],
                     "guards": guards,
                     "state": 0,
@@ -1732,8 +1710,22 @@ class VlmCalibrator:
                     "label": f"g{self._group_of(m)} "
                              f"m{self._local_index(m)} c{ci} ({ch!r})",
                 })
-        if plans:
-            self._cell_ladder(plans)
+        if not plans:
+            return
+        self._cell_ladder(plans)
+        # A cell the ladder could not land correct+clean is hardware/reader
+        # work: escalate and report the probes it tried, never leave a
+        # silently unresolved offset.
+        for p in plans:
+            if p["best_score"] >= 3 * len(p["targets"]):
+                continue
+            attempted = p.get("attempted") or []
+            reach = max((abs(a) for a in attempted), default=0)
+            self._escalate(
+                p["module"], p["targets"][0],
+                f"incremental ladder found no clean offset on the char "
+                f"cell (tried {len(attempted)} candidate(s) up to ±{reach}; "
+                f"best {p['best']:+d}, score {p['best_score']})")
 
     def _p4_verify(self):
         """P4: repeatability plus folded border check (short forward hops)."""
@@ -1831,13 +1823,25 @@ class VlmCalibrator:
         }
 
     def _phase_timing(self) -> list[dict]:
-        """Per-phase seconds + budget deltas derived from phase marks."""
+        """Per-phase seconds + budget deltas derived from phase marks.
+
+        A mark announces the phase it starts, so a slice between two
+        marks is the cost of the EARLIER one: each row is labelled with
+        the previous mark's name so the numbers land on the phase that
+        produced them. run-008 shipped the table one row late (P0's
+        3 frames under "P1 coarse", the sub-pitch ladder's 14 previews
+        and 2 persists under "P2 fine", P4's 142 s under the closing
+        cleanup mark). The slice before the first mark is "startup"; the
+        closing "reverted volatile previews" marks fire after their work
+        and therefore end the phase before them.
+        """
         out = []
         prev = {"elapsed": 0.0, "frames": 0, "vlmCalls": 0,
                 "previews": 0, "persists": 0}
-        for mark in self._phase_marks:
+        for i, mark in enumerate(self._phase_marks):
             out.append({
-                "phase": mark["name"],
+                "phase": (self._phase_marks[i - 1]["name"] if i
+                          else "startup"),
                 "seconds": round(mark["elapsed"] - prev["elapsed"], 2),
                 "frames": mark["frames"] - prev["frames"],
                 "vlmCalls": mark["vlmCalls"] - prev["vlmCalls"],

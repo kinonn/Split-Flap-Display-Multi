@@ -142,19 +142,16 @@ and trim winners are committed as module cells before P2 starts.
 ### P2 — fine: per-character offsets
 
 Re-reads the flagged characters (identity mismatches and seam cells) at the
-committed P1 base:
-
-- **wrong glyph** (non-confusable) -> one-shot exact char-cell fix
-  `_drum_delta(seen, c) * stepsPerChar`; if the resulting absolute value would
-  exceed the firmware's +/-32 clamp, escalate as hardware.
-- **right glyph, `half`/`double`** -> the reader reports no magnitude, so scan
-  the **incremental ladder** on the char cell (parallel across cells):
-  candidate offsets `+/-4/8/12/16/20` motor steps — increments of 4 up to
-  half a character pitch, the clamp past which the flap sits too close to
-  the neighbouring character — and keep the smallest offset that reads
-  clean. A cell that reads clean stops being probed (the rest of its scan
-  could only tie it), and a clean window narrower than the increment is
-  covered by the `+/-2, +/-1` fallback probes.
+committed P1 base and walks **every** char-cell fault — a wrong glyph
+included — up the **incremental ladder** (parallel across cells): candidate
+offsets `+/-4/8/12/...` motor steps in increments of 4 up to the firmware's
+`+/-32` char-cell clamp, then the narrow-window fallback `+/-2, +/-1`. Each
+candidate is applied from the base and kept only when it beats the cell's
+baseline without breaking a guard, so the smallest offset that reads
+correct+clean wins; a cell that reads clean stops being probed (the rest of
+its scan could only tie it). A one-shot exact identity delta is never
+written: a fault that needs a whole flap is escalated as hardware, reporting
+the probes it tried, rather than sent as a clamped, wrong offset.
 
 Char-cell deltas are chunked to +/-32 within one batch pass, the flagged frames
 are re-read to verify, and the confirmed char cells are committed.
@@ -277,7 +274,9 @@ Each run writes to `data/runs/run-NNN/`:
 - `snapshot.json` — the pre-run `/settings` body for rollback.
 - `report.json` — result/reason, fleet geometry, per-frame readings and
   warnings, every delta (old/new, before/after, proposal/fixed),
-  persistent escalations, per-module summary and budget usage.
+  persistent escalations, per-module summary, budget usage and
+  `timing.phases` (one row per phase boundary — seconds + frames/VLM/
+  preview/persist deltas, each attributed to the phase that produced it).
 
 ## Code map
 
