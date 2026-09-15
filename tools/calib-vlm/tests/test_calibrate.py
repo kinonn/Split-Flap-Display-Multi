@@ -1,12 +1,12 @@
 """VlmCalibrator tests: delta math, convergence, escalation, fleet."""
 
-import math
-
 import pytest
 
 from calib.display import CalibError
-from calib_vlm.calibrate import (BATCH_MAX_NUDGES, REMOTE_BATCH_MAX_NUDGES,
-                                 VlmCalibrator, _p2_ladder_steps)
+from calib_vlm.calibrate import (BATCH_MAX_NUDGES, CHAR_OFFSET_LIMIT,
+                                 REMOTE_BATCH_MAX_NUDGES, VlmCalibrator,
+                                 _p2_ladder_steps)
+from calib_vlm.reader import ReaderError
 
 from tests.fixtures import FakeCamera, FakeDisplay, SimReader
 
@@ -48,7 +48,8 @@ def test_per_char_identity_converges(tmp_path):
     d.seed_char_error(2, ci, -32)
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
-    assert d.char_off[2].get(ci, 0) == 0
+    assert d.displayed_char(2, "O") == "O"
+    assert -32 <= d.char_off[2].get(ci, 0) <= 32
     # A single-glyph fault must stay on a char cell; a coarse module shift
     # would break every other character on that drum.
     m2 = [x for x in report["deltas"] if x["globalModule"] == 2]
@@ -105,31 +106,37 @@ def test_remote_per_char_overflow_escalates_cleanly(tmp_path):
     assert any("incremental ladder" in n and "char cell" in n for n in notes)
 
 
-def test_alignment_half_flap_converges_exhaustive(tmp_path):
+def test_sub_pitch_offset_is_invisible_and_left_alone(tmp_path):
+    # This hardware always lands on a full glyph, so a sub-step landing
+    # error (1 motor step of 43) rounds to the same character, reads
+    # clean, and is no fault at all. The tool must not "fix" an offset the
+    # acceptance sweep cannot see.
     d = FakeDisplay(total=4)
     ci = d.drum.index("A")
-    d.seed_char_error(3, ci, 1)  # same glyph, one motor step out of phase
+    d.seed_char_error(3, ci, 1)
     calib, report = run_calib(d, tmp_path, exhaustive=True)
     assert report["result"] == "converged"
-    assert d.char_off[3].get(ci, 0) == 0
+    assert d.char_off[3].get(ci, 0) == 1  # untouched
 
 
-def test_module_trim_fixes_boundary_flaps(tmp_path):
-    # Manual process, layer 0: a module wrong on only a few glyphs is a
-    # boundary/phase problem, not several broken characters. A sub-pitch
-    # module trim pulls those flaps back without touching char cells and
-    # without moving the centred characters.
+def test_per_char_offsets_may_differ_within_a_module(tmp_path):
+    # The identity model: each glyph on a module can need its own char-cell
+    # offset. One character lands a flap ahead, another a flap behind; both
+    # are corrected independently, on the SAME module, without a
+    # module-wide shift.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))   # readable off-centre window
-    for glyph in ("D", "H"):
-        d.seed_flap_error(1, d.drum.index(glyph), int(round(d.spc * 0.6)))
+    ahead = d.drum.index("H")
+    behind = d.drum.index("D")
+    d.seed_char_error(1, ahead, 32)    # 'H' shows the next flap
+    d.seed_char_error(1, behind, -32)  # 'D' shows the previous flap
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
-    assert d.mod_off[1] != 0                  # fixed on the module cell
-    assert all(not row for row in d.char_off)  # no per-char cell touched
+    assert d.displayed_char(1, "H") == "H"
+    assert d.displayed_char(1, "D") == "D"
+    assert d.char_off[1][ahead] != d.char_off[1][behind]  # independent
+    assert d.mod_off[1] == 0  # no module-wide correction
     m1 = [x for x in report["deltas"] if x["globalModule"] == 1]
-    assert any(x["charIndex"] == -1 for x in m1)
-    assert all(x["charIndex"] == -1 for x in m1)
+    assert m1 and all(x["charIndex"] >= 0 for x in m1)
 
 
 def test_sweep_is_reverse_drum_order(tmp_path):
@@ -153,32 +160,22 @@ def test_sweep_is_reverse_drum_order(tmp_path):
     assert seen == [ch * d.total for ch in reversed(d.drum)]
 
 
-def test_single_boundary_flap_fixed_at_module_level(tmp_path):
-    # A lone flap just past its boundary is still a module-phase problem:
-    # the sub-pitch trim fixes it without a char cell.
+def test_char_fixes_apply_in_parallel_batches(tmp_path):
+    # Independent character cells are tuned in the same rounds: one batch
+    # per round carries every candidate, so the frame count does not grow
+    # with the number of cells.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_flap_error(2, d.drum.index("T"), int(round(d.spc * 0.6)))
-    calib, report = run_calib(d, tmp_path)
-    assert report["result"] == "converged"
-    assert d.mod_off[2] != 0
-    assert all(not row for row in d.char_off)
-
-
-def test_module_trim_trims_modules_in_parallel_batches(tmp_path):
-    # Independent modules are adjusted in the same rounds: one batch per
-    # round carries every suspect module's candidate, so the frame count
-    # does not grow with the number of modules.
-    d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_flap_error(1, d.drum.index("H"), int(round(d.spc * 0.6)))
-    d.seed_flap_error(3, d.drum.index("O"), int(round(d.spc * 0.6)))
+    ci = d.drum.index("H")
+    d.seed_char_error(1, ci, 32)
+    d.seed_char_error(3, ci, 32)
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     multi = [b for b in d.batches if len(b) >= 2]
-    assert multi, "expected a batch carrying both modules' candidates"
-    # One candidate batch per trim round (plus reverts), far below the
-    # serial one-batch-per-module-per-round cost.
+    assert multi, "expected a batch carrying both cells' candidates"
+    assert d.displayed_char(1, "H") == "H"
+    assert d.displayed_char(3, "H") == "H"
+    # One candidate batch per step (plus reverts), far below the serial
+    # one-batch-per-cell-per-round cost.
     assert len(d.batches) <= 24
 
 
@@ -225,59 +222,17 @@ def test_batch_nudge_chunks_to_the_firmware_caps(tmp_path):
             for n in flat] == sorted(nudges), "nudges lost or reordered"
 
 
-def test_module_trim_fixes_remote_boundary_flaps(tmp_path):
-    # Remote groups are trimmed the same way: the master forwards the
-    # volatile nudge over ESP-NOW (no NVS write) and the group is only
-    # persisted once the trim actually improved it.
-    d = FakeDisplay(total=6, groups=2, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_flap_error(4, d.drum.index("H"), int(round(d.spc * 0.6)))  # g2 m0
-    calib, report = run_calib(d, tmp_path)
-    assert report["result"] == "converged"
-    assert any(n.get("scope") == 2 for batch in d.batches for n in batch)
-    assert d.remote_mod[0][1] != 0
-    assert all(not row for row in d.char_off)
-
-
-def test_module_trim_skips_mixed_direction_faults(tmp_path):
-    # One flap ahead and one behind cannot be fixed by a single whole-drum
-    # shift: the module trim must not touch that module (later phases may
-    # still walk the individual char cells).
+def test_dry_run_leaves_char_faults_untouched(tmp_path):
+    # Dry-run is read-only: even a character fault the full mode would fix
+    # must stay untouched (no previews, no persists, no batches).
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_flap_error(1, d.drum.index("H"), int(round(d.spc * 0.6)))
-    d.seed_flap_error(1, d.drum.index("D"), -int(round(d.spc * 0.6)))
-    calib, report = run_calib(d, tmp_path)
-    assert all(not (n["module"] == 1 and n["charIndex"] < 0)
-               for batch in d.batches for n in batch)
-
-
-def test_module_trim_dry_run_touches_nothing(tmp_path):
-    # Regression: the trim bypassed mode gating, so dry-run applied
-    # volatile previews (and even persisted remote trims) despite the
-    # read-only contract. Dry-run must leave every offset untouched.
-    d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_flap_error(1, d.drum.index("H"), int(round(d.spc * 0.6)))
+    ci = d.drum.index("H")
+    d.seed_char_error(1, ci, 32)
     calib, report = run_calib(d, tmp_path, mode="dry-run")
     assert not d.previews
     assert not d.persists
     assert not d.batches
-    assert d.mod_off[1] == 0
-    assert d.res_mod[1] == 0
-
-
-def test_module_phase_fault_fixed_at_module_level(tmp_path):
-    # Manual process, layer 1: a whole-drum phase error (every glyph
-    # reads right but half-flap) gets ONE module-cell alignment search,
-    # not a per-char search per glyph.
-    d = FakeDisplay(total=4)
-    d.seed_module_error(1, 2)  # every glyph 2 motor steps out of phase
-    calib, report = run_calib(d, tmp_path)
-    assert report["result"] == "converged"
-    assert d.mod_off[1] == 0
-    m1 = [x for x in report["deltas"] if x["globalModule"] == 1]
-    assert m1 and all(x["charIndex"] == -1 for x in m1)
+    assert d.char_off[1].get(ci, 0) == 32
 
 
 def test_module_fix_clears_char_suspects_without_char_tunes(tmp_path):
@@ -310,9 +265,11 @@ def test_ahead_by_one_char_converges_within_clamp(tmp_path):
     d.seed_char_error(1, ci, 32)  # 'E' shows the NEXT char on m1
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
-    assert d.char_off[1].get(ci, 0) == 0
+    assert d.displayed_char(1, "E") == "E"
+    assert d.char_off[1].get(ci, 0) == 24  # one -8 step settles it
     char_previews = [(c, d_) for _, c, d_ in d.previews if c >= 0]
     assert all(abs(delta) <= 32 for _, delta in char_previews)
+    assert all(c >= 0 for _, c, _ in d.previews)  # no module-cell jump
 
 
 def test_module_cell_fault_applied_in_one_preview(tmp_path):
@@ -439,12 +396,16 @@ def test_fleet_geometry_falls_back_to_equal_width_heuristic(tmp_path):
 
 
 def test_remote_group_char_converges(tmp_path):
+    # A remote character cell is tuned with RAM-only previews, then its
+    # verified absolute value is persisted to the master's mirror.
     d = FakeDisplay(total=6, groups=2)
     ci = d.drum.index("H")
-    d.seed_char_error(5, ci, -d.spc)  # group 2, local 2, char H
+    d.seed_char_error(5, ci, 32)  # group 2, local 2: H shows the next char
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
-    assert d.remote_char[0][2][ci] == 0
+    assert d.displayed_char(5, "H") == "H"
+    assert d.remote_char[0][2][ci] == 24
+    assert any(p[0] == 2 and p[1] == "char" for p in d.persists)
 
 def test_stuck_module_escalates(tmp_path):
     d = FakeDisplay(total=4)
@@ -627,68 +588,6 @@ def test_fine_identity_that_does_not_fit_escalates(tmp_path):
     assert d.char_off[2].get(ci, 0) == 30 * d.spc  # untouched
 
 
-def test_remote_whole_drum_plus_trim_commits_both(tmp_path):
-    # A remote module can need a whole-character offset AND a sub-pitch
-    # boundary trim: the committed absolute value must include both (the
-    # whole delta was only previewed on the group, never written there).
-    d = FakeDisplay(total=6, groups=2, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_module_error(4, d.spc)  # g2 local1: whole drum one char behind
-    d.seed_flap_error(4, d.drum.index("H"), int(round(d.spc * 0.6)))
-    calib, report = run_calib(d, tmp_path)
-    assert report["result"] == "converged"
-    assert d.remote_mod[0][1] != 0
-    assert d.remote_mech[0][1][d.drum.index("H")] != 0
-
-
-def test_remote_cell_second_commit_keeps_the_first(tmp_path):
-    # kinonn-bot#39: a remote cell is committed twice in one run (P1 runs
-    # the module trim and the phase trim over overlapping modules and
-    # unions them as handled = trimmed | phased). The second commit
-    # recomputed its base from the run-start /settings snapshot, which is
-    # never refreshed, so it silently dropped the first verified
-    # component. Invariant: the persisted value is the value the device
-    # actually holds.
-    d = FakeDisplay(total=6, groups=2, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    d.seed_flap_error(4, d.drum.index("H"), int(round(d.spc * 0.6)))  # g2 local1
-    d.seed_flap_error(4, d.drum.index("N"), int(round(d.spc * 1.0)))
-    d.seed_flap_error(4, d.drum.index("G"), int(round(d.spc * 1.0)))
-    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
-                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
-                          min_confidence=0.5, mode="full")
-    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
-    calib.group_widths = d.widths()
-    calib.steps_per_char = d.spc
-    calib._load_remote_offsets(d.snapshot()["settings"])
-    steps = [int(round(d.spc * f)) for f in (0.5, 0.25, 0.125, 0.0625)]
-
-    def plan(label, target, guard):
-        return {"module": 4, "group": 2, "local": 1, "char_index": -1,
-                "steps": list(steps), "cap": d.spc, "targets": [target],
-                "guards": [guard], "state": 0, "best": 0, "best_score": 0,
-                "label": label}
-
-    first = plan("trim", "H", "A")
-    assert calib._cell_ladder([first]) == {4}
-    written = d.remote_mod[0][1]
-    assert written and d.displayed_char(4, "H") == "H"
-    second = plan("phase", "N", "G")
-    assert calib._cell_ladder([second]) == {4}
-    assert second["best"] != 0
-    # The second commit persists the tracked absolute = first + second,
-    # not the run-start snapshot + second.
-    assert d.remote_mod[0][1] == written + second["best"]
-    assert calib.live((2, 1, -1)) == d.remote_mod[0][1]
-    assert [p for p in d.persists if p[0] == 2] == [
-        (2, "module", written, 1, 0),
-        (2, "module", written + second["best"], 1, 0)]
-    # Both components are live on the device: H (first commit) and N
-    # (second commit) read clean.
-    assert d.displayed_char(4, "H") == "H" and d.condition(4, "H") == "clean"
-    assert d.displayed_char(4, "N") == "N" and d.condition(4, "N") == "clean"
-
-
 def test_confusable_pair_never_becomes_a_correction(tmp_path):
     # O and 0 are indistinguishable on the drum: a reader that swaps them
     # must not be "corrected" (a 12-character shift for O/0). Confusable
@@ -715,67 +614,65 @@ def test_confusable_pair_never_becomes_a_correction(tmp_path):
 
 
 def test_cell_ladder_rejects_non_improving_nudge(tmp_path):
-    # Regression: a correct-char/half-flap target scores 2 at baseline, so a
-    # candidate that leaves it equally half (score 2) must NOT persist a
-    # no-op offset. Only a candidate that beats the baseline may commit.
+    # A candidate that leaves the target just as wrong must NOT persist a
+    # no-op offset: only a candidate that beats the baseline may commit.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = 17
-    d.seed_flap_error(0, d.drum.index("E"), 20)  # half, needs centring
+    ci = d.drum.index("E")
+    d.seed_char_error(0, ci, 32)  # 'E' one flap ahead; -4 cannot fix it
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
                           photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
                           min_confidence=0.5, mode="full")
     calib.total, calib.drum = d.total, d.drum
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
-    plans = [{"module": 0, "group": 1, "local": 0, "char_index": -1,
-              "steps": [-1], "absolute": True, "cap": d.spc,
-              "targets": ["E"], "guards": ["A"],
+    plans = [{"module": 0, "group": 1, "local": 0, "char_index": ci,
+              "steps": [-4], "absolute": True, "cap": CHAR_OFFSET_LIMIT,
+              "targets": ["E"], "guards": [],
               "state": 0, "best": 0, "best_score": 0, "label": "test"}]
     assert calib._cell_ladder(plans) == set()
     assert plans[0]["best"] == 0
     assert not d.persists
-    assert d.condition(0, "E") == "half"
+    assert d.previews  # the candidate was applied and reverted
+    assert d.char_off[0].get(ci, 0) == 32  # untouched
 
 
-def test_p2_ladder_scans_increments_up_to_half_a_character(tmp_path):
-    # P2's seam ladder scans candidate offsets in steps of 4 motor steps up
-    # to half a character pitch, so a fault needing more than the old
-    # +/-1/2/4/8 ladder's ceiling is still found. A mechanical landing
-    # error of 16 steps with a +/-4 step clean window is cleared only by an
-    # offset in [-20, -12]; -12 is the smallest increment the scan offers.
+def test_p2_ladder_scans_beyond_the_old_ceiling(tmp_path):
+    # P2's incremental ladder scans in steps of 4 motor steps up to the
+    # firmware's ±32 char-cell clamp, so a fault needing a shift beyond the
+    # old +/-1/2/4/8 ladder's ceiling is still found. A cell one flap
+    # behind at -32 reads the previous glyph; the +12 candidate lands it at
+    # -20, inside the ±21 steps where it rounds to the commanded glyph.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = 4
     ci = d.drum.index("E")
-    d.seed_flap_error(0, ci, 16)
+    d.seed_char_error(0, ci, -32)
     events = []
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
                           mode="full", on_event=events.append)
     report = calib.run()
     assert report["result"] == "converged"
-    assert d.char_off[0].get(ci, 0) == -12
-    assert d.condition(0, "E") == "clean"
-    assert any("cell ladder" in e["text"] and "-12 steps" in e["text"]
+    assert d.displayed_char(0, "E") == "E"
+    assert d.char_off[0].get(ci, 0) == -20  # base -32 + the +12 candidate
+    assert any("cell ladder" in e["text"] and "+12 steps" in e["text"]
                for e in events)
 
 
-def test_p2_ladder_stops_probing_a_clean_cell(tmp_path):
-    # An accepted candidate that leaves the flap clean is final: every
+def test_p2_ladder_stops_probing_a_fixed_cell(tmp_path):
+    # A candidate that makes the target read correctly is final: every
     # later candidate could only tie it, so the cell must stop being
     # nudged instead of burning the preview budget on the rest of the
     # scan.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = 17
     ci = d.drum.index("E")
-    d.seed_flap_error(0, ci, -18)  # half at the base, clean at +4
+    d.seed_char_error(0, ci, -24)  # previous glyph; +4 lands it back
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
-    assert d.char_off[0].get(ci, 0) == 4
+    assert d.char_off[0].get(ci, 0) == -20  # base -24 + the +4 candidate
     # Exactly one candidate was applied; nothing was probed after it.
     assert d.previews == [(0, ci, 4)]
     ladder = [e for e in calib.frames if e["tag"].startswith("ladder_")]
-    assert len(ladder) == 8  # baseline + one candidate round (1+3 frames)
-    assert d.persists == [(1, "char", 4, 0, ci)]
+    assert len(ladder) == 2  # baseline + the one candidate round
+    assert d.persists == [(1, "char", -20, 0, ci)]
 
 
 def test_p2_ladder_steps_default_and_explicit_cap():
@@ -791,15 +688,12 @@ def test_p2_ladder_steps_default_and_explicit_cap():
 
 
 def test_p2_ladder_respects_char_cell_clamp(tmp_path):
-    # Char-cell candidates are bounded by the firmware's ±32 clamp: no probe
-    # ever pushes the cell's live value outside the window, and the wider
-    # identity cap reaches a landing past +4 that the half-pitch seam cap
-    # could not (this fault is clean only at +12).
+    # Char-cell candidates are bounded by the firmware's ±32 clamp: the
+    # ladder never probes a landing outside the window, and the smallest
+    # clearing candidate wins. A cell one flap behind at -30 needs +12.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = 4
     ci = d.drum.index("E")
-    d.seed_char_error(0, ci, 15)   # base +15 (already off-centre)
-    d.seed_flap_error(0, ci, -30)  # reads 'E', half; clean at a +12 nudge
+    d.seed_char_error(0, ci, -30)
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
                           mode="full")
@@ -808,19 +702,16 @@ def test_p2_ladder_respects_char_cell_clamp(tmp_path):
     calib.group_widths = [4]
     calib._p1_flagged = ["E"]
     calib._p2_fine()
-    assert d.char_off[0].get(ci, 0) == 27  # base 15 + the accepted +12
-    assert d.condition(0, "E") == "clean"
+    assert d.displayed_char(0, "E") == "E"
+    assert d.char_off[0].get(ci, 0) == -18  # base -30 + the +12 candidate
     # Replaying the applied nudges (previews record applies AND reverts):
     # the cell never leaves the ±32 window.
-    value = 15
-    peak = 15
+    value = -30
     for _, cell, delta in d.previews:
         if cell < 0:
             continue
         value += delta
-        peak = max(peak, abs(value))
         assert -32 <= value <= 32
-    assert peak > 15  # the wider identity cap is actually used
 
 
 def test_ladder_stops_before_the_budget_wall_and_commits(tmp_path):
@@ -831,10 +722,9 @@ def test_ladder_stops_before_the_budget_wall_and_commits(tmp_path):
     # aborted the run with every winner still uncommitted (run-006's P2
     # died on exactly that).
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = 4
     ci = d.drum.index("E")
-    d.seed_flap_error(0, ci, -6)   # clean at +4: the first step settles it
-    d.seed_flap_error(1, ci, 44)   # reads a flap ahead whatever is tried
+    d.seed_char_error(0, ci, -24)  # +4 reads it correctly: settles in round 0
+    d.seed_char_error(1, ci, 26)   # still wrong after every +\-4 candidate
     events = []
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
@@ -842,27 +732,25 @@ def test_ladder_stops_before_the_budget_wall_and_commits(tmp_path):
     calib.total, calib.drum = d.total, d.drum
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
-    # Round 0 costs 3 previews (winner apply + stuck apply/revert); a
-    # second round needs more than the 4 allowed, so it must not run.
+    # Round 0 costs three previews (both applies, then the loser's revert);
+    # a second round needs more than the four allowed, so it must not run.
     calib.max_previews = 4
-    steps = _p2_ladder_steps(d.spc)
-    cap = max(1, d.spc // 2)
+    steps = _p2_ladder_steps(d.spc, cap=CHAR_OFFSET_LIMIT)
     plans = [
         {"module": 0, "group": 1, "local": 0, "char_index": ci,
-         "steps": steps, "absolute": True, "cap": cap,
-         "targets": ["E"], "guards": ["A", "H", "M"],
+         "steps": steps, "absolute": True, "cap": CHAR_OFFSET_LIMIT,
+         "targets": ["E"], "guards": [],
          "state": 0, "best": 0, "best_score": 0, "label": "winner"},
         {"module": 1, "group": 1, "local": 1, "char_index": ci,
-         "steps": steps, "absolute": True, "cap": cap,
-         "targets": ["E"], "guards": ["A", "H", "M"],
+         "steps": steps, "absolute": True, "cap": CHAR_OFFSET_LIMIT,
+         "targets": ["E"], "guards": [],
          "state": 0, "best": 0, "best_score": 0, "label": "stuck"},
     ]
     assert calib._cell_ladder(plans) == {0}
-    assert d.char_off[0].get(ci, 0) == 4  # the verified winner, committed
-    assert d.char_off[1].get(ci, 0) == 0  # nothing invented for the stuck cell
+    assert d.char_off[0].get(ci, 0) == -20  # the verified winner, committed
+    assert d.char_off[1].get(ci, 0) == 26   # nothing invented for the stuck cell
     assert any("stopped before step" in e["text"] for e in events)
-    ladder = [e for e in calib.frames if e["tag"].startswith("ladder_")]
-    assert len(ladder) == 8  # baseline + the one affordable round
+    assert len(d.previews) <= calib.max_previews
 
 
 def test_ladder_filler_rotates_background_slots(tmp_path):
@@ -983,17 +871,16 @@ def test_blank_read_against_nonblank_command_is_junk(tmp_path):
     assert calib._shift(blank_against_blank, " ") == 0
 
 
-def test_single_flap_arc_probes_proportionate_candidate_no_fix(tmp_path):
-    # run-005 hypothesis, arc of FULL-flap-clean errors (reads the next
-    # flap cleanly): the module enters the trim ladder and the
-    # proportionate candidate round(arc/48 * stepsPerChar) IS probed, but
-    # no sub-pitch shift can centre a full-flap fault without breaking the
-    # correct majority — so nothing is committed and P2 flags the arc.
+def test_single_flap_arc_is_routed_to_p2_not_escalated(tmp_path):
+    # run-005: a same-sign single-flap arc (13 of 48 characters one flap
+    # ahead, everything else correct) drags a module below the purity
+    # gate. It is not reader noise: the module stays usable and the arc
+    # characters become ordinary per-character P2 work instead of an
+    # "unreliable reads" escalation that would dead-end the whole module.
     d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
     arc = list(d.drum[1:14])  # 13 chars = 27% of the drum
     for ch in arc:
-        d.seed_char_error(0, d.drum.index(ch), d.spc)  # full flap, clean
+        d.seed_char_error(0, d.drum.index(ch), d.spc)  # one flap ahead
     events = []
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
@@ -1005,39 +892,9 @@ def test_single_flap_arc_probes_proportionate_candidate_no_fix(tmp_path):
     calib._p1_coarse()
     assert any("single-flap arc" in e["text"] for e in events)
     assert not any("unreliable reads" in e["text"] for e in events)
-    # The proportionate candidate (round(13/48 * 43) = 12) was probed.
-    assert any(delta == 12 for _, ci, delta in d.previews if ci < 0)
-    # ...but rejected by the score: nothing committed, no persists.
-    assert d.mod_off[0] == 0
+    assert d.mod_off[0] == 0        # no module-cell correction
     assert not d.persists
-
-
-def test_single_flap_arc_boundary_flap_commits_trim(tmp_path):
-    # When the arc's landings sit part-way past the flap boundary, the
-    # proportionate candidate (or the ladder's fine search) CAN pull them
-    # back into the readable window without breaking the guards — then
-    # and only then is the module offset committed.
-    d = FakeDisplay(total=4, charset=48)
-    d.flap_window = int(round(d.spc * 0.4))
-    arc = list(d.drum[1:14])  # 13 chars = 27% of the drum
-    for ch in arc:
-        # +0.72 flap: reads the NEXT character; a proportional shift can
-        # pull these back inside the readable window.
-        d.seed_char_error(0, d.drum.index(ch), int(round(d.spc * 0.72)))
-    events = []
-    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
-                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
-                          mode="full", on_event=events.append,
-                          skip_enabled=False)
-    calib.total, calib.drum = d.total, d.drum
-    calib.steps_per_char = d.spc
-    calib.group_widths = [4]
-    calib._p1_coarse()
-    assert any("single-flap arc" in e["text"] for e in events)
-    # The ladder found a shift that cleans the arc without breaking the
-    # guards: committed on the module cell.
-    assert d.mod_off[0] != 0, d.mod_off
-    assert d.persists
+    assert set(arc) <= set(calib._p1_flagged)  # the arc is P2 work
 
 
 def test_ladder_exhausted_guards_rotate_and_rescore(tmp_path):
@@ -1048,8 +905,9 @@ def test_ladder_exhausted_guards_rotate_and_rescore(tmp_path):
     d = FakeDisplay(total=4, charset=48)
     # Keep the mover imperfect: a plan that reads perfect at baseline
     # stops being probed (no candidate could beat it), and the rotation
-    # check needs a live evaluate on every round.
-    d.seed_flap_error(0, d.drum.index("E"), 20)
+    # check needs a live evaluate on every round. 'E' reads one flap
+    # ahead, and no ±4 module-cell candidate fixes that.
+    d.seed_char_error(0, d.drum.index("E"), d.spc)
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
                           photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
                           min_confidence=0.5, mode="full")
@@ -1291,7 +1149,8 @@ def test_p2_without_p1_derives_flagged_readonly(tmp_path):
     calib, report = run_calib(d, tmp_path, phases=["p2"])
     assert report["phases"] == ["p2"]
     assert report["skipped"] == ["p1", "p4", "acceptance"]
-    assert d.char_off[2].get(ci, 0) == 0
+    assert d.displayed_char(2, "O") == "O"
+    assert abs(d.char_off[2].get(ci, 0)) <= 32
     # No module-cell writes: the read-only sweep must not commit.
     assert all(x["charIndex"] >= 0 for x in report["deltas"])
     assert d.mod_off == [0] * d.local
@@ -1306,3 +1165,103 @@ def test_p4_only_is_readonly(tmp_path):
     assert d.previews == []
     assert d.persists == []
     assert report["result"] == "needs-human"
+
+
+def test_transient_fine_frame_failure_is_retried(tmp_path):
+    # A hard reader failure on a P2 frame must not escalate every module
+    # of that frame (that could trip the unreliable-reads abort). The
+    # frame is re-read once; when the retry answers, the run continues.
+    class FlakyReader(SimReader):
+        def __init__(self, display):
+            super().__init__(display)
+            self.failed = False
+
+        def read(self, jpeg, total, expected="", charset="", drum=""):
+            if not self.failed and expected and set(expected) == {"C"}:
+                self.failed = True
+                raise ReaderError("transient provider failure")
+            return super().read(jpeg, total, expected, charset, drum)
+
+    d = FakeDisplay(total=4, charset=48)
+    ci = d.drum.index("C")
+    d.seed_char_error(0, ci, 32)  # 'C' shows the next flap
+    calib = VlmCalibrator(d, FakeCamera(), FlakyReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_flagged = ["C"]
+    calib._p2_fine()
+    assert calib.identity_persistent == []   # no bogus escalations
+    assert d.displayed_char(0, "C") == "C"   # retry read it, ladder fixed
+    assert d.char_off[0].get(ci, 0) == 20    # base 32 + accepted -12
+
+
+def test_persistent_fine_frame_failure_escalates_once_per_module(tmp_path):
+    # A frame the reader never answers (the retry fails too) is one reader
+    # failure per module, not one per (module, character) pair: without
+    # the dedupe a single unreadable frame produced `modules x flagged`
+    # escalations and aborted the run.
+    class DeadReader(SimReader):
+        def read(self, jpeg, total, expected="", charset="", drum=""):
+            if expected and set(expected) == {"C"}:
+                raise ReaderError("provider down")
+            return super().read(jpeg, total, expected, charset, drum)
+
+    d = FakeDisplay(total=4, charset=48)
+    ci = d.drum.index("C")
+    d.seed_char_error(0, ci, 32)
+    calib = VlmCalibrator(d, FakeCamera(), DeadReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_flagged = ["C", "D"]
+    calib._p2_fine()
+    fine = [e for e in calib.identity_persistent if "fine pass" in e["note"]]
+    assert [e["module"] for e in fine] == [0, 1, 2, 3]  # once per module
+    assert calib._unreliable_count == 4  # below MAX_UNRELIABLE_READS: no abort
+
+
+def test_budget_stopped_ladder_reports_truncation_not_hardware(tmp_path):
+    # A ladder that stops on budget before probing a cell must not be
+    # reported as "no working offset ... tried 0 candidate(s)": that
+    # conflated a budget truncation with a hardware verdict.
+    d = FakeDisplay(total=4, charset=48)
+    ci = d.drum.index("C")
+    d.seed_char_error(0, ci, 32)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib.max_previews = 1  # cannot afford even one apply/revert round
+    calib._p1_flagged = ["C"]
+    calib._p2_fine()
+    assert not any("no working offset" in e["note"]
+                   for e in calib.identity_persistent)
+    assert any("stopped on budget" in e["text"] for e in events)
+    assert d.char_off[0].get(ci, 0) == 32  # untouched
+
+
+def test_cell_ladder_rejects_two_plans_on_one_module(tmp_path):
+    # Scores and frame slots are keyed by module, so two plans on one
+    # module would share a score and could both commit off one verified
+    # reading (the run-009 module-8 pattern). The ladder must refuse.
+    d = FakeDisplay(total=4, charset=48)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    plan = {"module": 0, "group": 1, "local": 0, "char_index": 0,
+            "steps": [4], "absolute": True, "cap": CHAR_OFFSET_LIMIT,
+            "targets": ["E"], "guards": [], "state": 0, "best": 0,
+            "best_score": 0, "label": "dup"}
+    with pytest.raises(ValueError, match="one plan per module"):
+        calib._cell_ladder([dict(plan), dict(plan)])

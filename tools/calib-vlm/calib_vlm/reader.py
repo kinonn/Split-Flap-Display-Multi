@@ -20,15 +20,17 @@ from .prompts import (REPORT_READING_TOOL, correction_text,
                       reader_system_text, reader_user_text)
 from .vlm import VLMError, image_part, text_part
 
-CONDITIONS = ("clean", "half", "double", "blank", "unreadable")
+CONDITIONS = ("clean", "blank", "unreadable")
 
 _CONDITION_ALIASES = {
     "clean": "clean", "ok": "clean", "good": "clean", "clear": "clean",
     "perfect": "clean", "centered": "clean", "centred": "clean",
-    "half": "half", "half-flap": "half", "half_flap": "half",
-    "half flap": "half", "partial": "half", "split": "half",
-    "double": "double", "double-flap": "double", "double_flap": "double",
-    "double flap": "double", "two": "double", "overlap": "double",
+    "half": "unreadable", "half-flap": "unreadable",
+    "half_flap": "unreadable", "half flap": "unreadable",
+    "partial": "unreadable", "split": "unreadable",
+    "double": "unreadable", "double-flap": "unreadable",
+    "double_flap": "unreadable", "double flap": "unreadable",
+    "two": "unreadable", "overlap": "unreadable",
     "blank": "blank", "empty": "blank", "space": "blank", "none": "blank",
     "unreadable": "unreadable", "unknown": "unreadable",
     "unclear": "unreadable", "": "unreadable",

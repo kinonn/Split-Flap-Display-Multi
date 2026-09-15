@@ -284,3 +284,38 @@ def test_photo_endpoint_rejects_separator_names(client):
     # A separator-free name is still a normal lookup (404 when missing),
     # never a 400.
     assert client.get("/api/photos/nope.png").status_code == 404
+
+
+def test_restore_snapshot_rejected_while_running(client, monkeypatch,
+                                                 idle_harness):
+    # Restoring the run-start snapshot mid-run would revert offsets the
+    # calibrator has already committed and is tracking, so the next
+    # commit would persist a value computed from a stale base.
+    monkeypatch.setattr(server.harness, "status", "running")
+    assert client.post("/api/run/restore-snapshot").status_code == 409
+    monkeypatch.setattr(server.harness, "status", "aborting")
+    assert client.post("/api/run/restore-snapshot").status_code == 409
+
+
+def test_restore_snapshot_still_works_when_idle(client, monkeypatch,
+                                                idle_harness, tmp_path):
+    run_dir = tmp_path / "runs" / "run-999"
+    run_dir.mkdir(parents=True)
+    (run_dir / "snapshot.json").write_text(
+        '{"settings": {"drumOrder": " A"}}', encoding="utf-8")
+    monkeypatch.setattr(server.harness, "run_dir", str(run_dir))
+    seen = {}
+
+    class FakeDisplay:
+        def __init__(self, host):
+            seen["host"] = host
+
+        def restore(self, snapshot):
+            seen["snapshot"] = snapshot
+            return {"type": "success"}
+
+    monkeypatch.setattr(server, "Display", FakeDisplay)
+    r = client.post("/api/run/restore-snapshot")
+    assert r.status_code == 200
+    assert r.json() == {"type": "success"}
+    assert seen["snapshot"]["settings"] == {"drumOrder": " A"}

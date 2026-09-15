@@ -13,3 +13,4 @@ __pycache__/
 .idea
 calib-ui-data/
 tools/calib-agent/app/data/
+tools/calib-vlm/tmp-debug/

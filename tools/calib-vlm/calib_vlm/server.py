@@ -760,6 +760,13 @@ def photo(name: str):
 
 @app.post("/api/run/restore-snapshot")
 def restore_snapshot():
+    # Refuse while a run owns the display. Restoring the run-start
+    # snapshot mid-run silently reverts offsets the calibrator has
+    # already committed and updated its tracked base from, so the next
+    # commit would persist a value computed from a stale base. The other
+    # display-touching endpoints guard the same way.
+    if harness.state()["status"] in ("running", "aborting"):
+        raise HTTPException(409, "run in progress; snapshot restore refused")
     path = os.path.join(harness.state()["run_dir"], "snapshot.json")
     try:
         with open(path, encoding="utf-8") as fh:

@@ -25,9 +25,11 @@ class FakeDisplay:
     steps_per_char) drum positions forward; a module offset re-anchors the
     magnet reference and so shifts the whole drum the OPPOSITE way (this
     mirrors the firmware: position = magnetPos + moduleOffset on magnet
-    detection, then forward-only steps to charPosition). A non-multiple
-    phase is a flap-seam condition. `remote_mod`/`remote_char` are the
-    master-side offset tables exposed through /settings for remote groups.
+    detection, then forward-only steps to charPosition). Every landing is
+    a full glyph: this hardware cannot show a half- or double-seated flap,
+    so a visible character always reads `clean`. `remote_mod`/
+    `remote_char` are the master-side offset tables exposed through
+    /settings for remote groups.
     """
 
     def __init__(self, total: int = 4, groups: int = 1, charset: int = 37,
@@ -78,13 +80,6 @@ class FakeDisplay:
         self.res_remote_mod = [[0] * 8 for _ in range(5)]
         self.res_remote_char = [[[0] * 48 for _ in range(8)]
                                 for _ in range(5)]
-        # Per-character mechanical landing error (steps): models a flap that
-        # physically sits off its slot. A sub-pitch module trim can pull a
-        # boundary flap back; `flap_window` is how far off-centre a landing
-        # can be and still read clean (0 = only perfectly centred).
-        self.mech_err: list[dict[int, int]] = [dict() for _ in range(self.local)]
-        self.remote_mech = [[[0] * 48 for _ in range(8)] for _ in range(5)]
-        self.flap_window = 0
         self.frame = " " * total
         self.fid = 0
         self.hold_active = False
@@ -116,20 +111,17 @@ class FakeDisplay:
         """Net displayed-vs-commanded step offset (firmware sign).
 
         Uses the live (persisted + preview residue) values, like the
-        firmware's `getLive*Offset()` accessors, plus the flap's mechanical
-        landing error.
+        firmware's `getLive*Offset()` accessors.
         """
         group, local = self._group_local(i)
         if group == 1:
             return ((self.char_off[local].get(ci, 0)
                      + self.res_char[local].get(ci, 0))
-                    + self.mech_err[local].get(ci, 0)
                     - (self.mod_off[local] + self.res_mod[local]))
         return (self.remote_char[group - 2][local][ci]
-                + self.remote_mech[group - 2][local][ci]
                 + self.res_remote_char[group - 2][local][ci]
-                - self.remote_mod[group - 2][local]
-                - self.res_remote_mod[group - 2][local])
+                - (self.remote_mod[group - 2][local]
+                   + self.res_remote_mod[group - 2][local]))
 
     # -- fault seeding --------------------------------------------------------
     def seed_module_error(self, i: int, steps: int):
@@ -152,14 +144,6 @@ class FakeDisplay:
         else:
             self.remote_char[group - 2][local][ci] += steps
 
-    def seed_flap_error(self, i: int, ci: int, steps: int):
-        """Mechanical landing error for one flap (steps)."""
-        group, local = self._group_local(i)
-        if group == 1:
-            self.mech_err[local][ci] = self.mech_err[local].get(ci, 0) + steps
-        else:
-            self.remote_mech[group - 2][local][ci] += steps
-
     # -- simulation -----------------------------------------------------------
     def displayed_char(self, i: int, cmd: str) -> str:
         if cmd not in self.drum:
@@ -169,15 +153,8 @@ class FakeDisplay:
         return self.drum[(ci + delta) % len(self.drum)]
 
     def condition(self, i: int, cmd: str) -> str:
-        if cmd not in self.drum:
-            return "blank"
-        ci = self.drum.index(cmd)
-        total = self.offset_for(i, ci)
-        delta = round(total / self.spc)
-        if delta % len(self.drum) != 0:
-            return "double"
-        phase = total - delta * self.spc
-        return "clean" if abs(phase) <= self.flap_window else "half"
+        # No half/double states on this hardware: a visible glyph is clean.
+        return "clean" if cmd in self.drum else "blank"
 
     # -- Display interface ----------------------------------------------------
     def status(self) -> dict:
