@@ -47,3 +47,6 @@ PlatformIO (Arduino framework) firmware in `src/`, web UI in `src/web/`
 - `npm run build` FORMATS code, builds web assets, AND uploads to a connected board —
   don't run it just to compile. Use `pio run -e esp32_c3` for a compile-only check.
 - `.pio/` (build + libdeps) and `build/web/` are machine-local; do not commit them.
+- Text files are LF everywhere — repo *and* working tree (`.gitattributes` `eol=lf`, matching
+  `.editorconfig` and prettier). Don't reintroduce CRLF: a CRLF⇄LF flip behind git's back leaves
+  stale index stat info, so files show as "modified" with an empty `git diff` until `git add` runs.
