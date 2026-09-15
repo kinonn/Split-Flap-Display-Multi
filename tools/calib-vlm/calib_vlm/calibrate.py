@@ -1219,6 +1219,25 @@ class VlmCalibrator:
             p["best_score"] = baseline.get(p["module"], 0)
         cache: dict = {"scores": dict(baseline)}
         for index in range(steps_at):
+            # A remaining round can cost one nudge per plan that still has
+            # a candidate (the apply) plus one per loser (the revert), and
+            # shows `frames_per_eval` frames. When the budgets cannot pay
+            # for that, stop probing and fall through to the commit loop:
+            # running the round anyway let _batch_nudge's budget guard
+            # abort the whole run with every already-verified winner still
+            # uncommitted (run-006's P2 died on exactly that).
+            active = [p for p in plans
+                      if not p.get("settled") and index < len(p["steps"])]
+            if active and (
+                    self.previews + 2 * len(active) > self.max_previews
+                    or self.frames_used + frames_per_eval > self.max_frames):
+                self.event("error",
+                           f"cell ladder stopped before step {index + 1}: "
+                           f"budget nearly spent ({self.previews}/"
+                           f"{self.max_previews} previews, {self.frames_used}/"
+                           f"{self.max_frames} frames); committing the "
+                           f"offsets verified so far")
+                break
             apply = []
             moved: set[int] = set()
             for p in plans:

@@ -739,7 +739,12 @@ def run_events(offset: int = 0, limit: int = 500):
 
 @app.get("/api/photos/{name}")
 def photo(name: str):
-    if "/" in name or name.startswith("."):
+    # A photo name is a bare file name: reject separators outright. The
+    # old "/"-only check let a Windows client smuggle "a\..\..\x.png"
+    # through, which os.path.join resolves outside the run dir there
+    # (basename() is the platform's own idea of "no separators").
+    if "\\" in name or name != os.path.basename(name) \
+            or name.startswith("."):
         raise HTTPException(400, "bad photo name")
     if not name.endswith(".png"):
         raise HTTPException(404, "no such photo")

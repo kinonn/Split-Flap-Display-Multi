@@ -6,7 +6,7 @@ import pytest
 
 from calib.display import CalibError
 from calib_vlm.calibrate import (BATCH_MAX_NUDGES, REMOTE_BATCH_MAX_NUDGES,
-                                 VlmCalibrator)
+                                 VlmCalibrator, _p2_ladder_steps)
 
 from tests.fixtures import FakeCamera, FakeDisplay, SimReader
 
@@ -805,6 +805,48 @@ def test_p2_ladder_clamps_candidates_to_half_a_character(tmp_path):
         lo, hi = min(lo, value), max(hi, value)
     assert lo == 15 - 20
     assert hi == 15 + 4
+
+
+def test_ladder_stops_before_the_budget_wall_and_commits(tmp_path):
+    # A ladder can run out of preview budget with candidates still
+    # untested: it must stop probing while a round is still affordable
+    # and let the commit loop persist the offsets already verified.
+    # Before the guard the unaffordable round ran anyway and _batch_nudge
+    # aborted the run with every winner still uncommitted (run-006's P2
+    # died on exactly that).
+    d = FakeDisplay(total=4, charset=48)
+    d.flap_window = 4
+    ci = d.drum.index("E")
+    d.seed_flap_error(0, ci, -6)   # clean at +4: the first step settles it
+    d.seed_flap_error(1, ci, 44)   # reads a flap ahead whatever is tried
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append)
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    # Round 0 costs 3 previews (winner apply + stuck apply/revert); a
+    # second round needs more than the 4 allowed, so it must not run.
+    calib.max_previews = 4
+    steps = _p2_ladder_steps(d.spc)
+    cap = max(1, d.spc // 2)
+    plans = [
+        {"module": 0, "group": 1, "local": 0, "char_index": ci,
+         "steps": steps, "absolute": True, "cap": cap,
+         "targets": ["E"], "guards": ["A", "H", "M"],
+         "state": 0, "best": 0, "best_score": 0, "label": "winner"},
+        {"module": 1, "group": 1, "local": 1, "char_index": ci,
+         "steps": steps, "absolute": True, "cap": cap,
+         "targets": ["E"], "guards": ["A", "H", "M"],
+         "state": 0, "best": 0, "best_score": 0, "label": "stuck"},
+    ]
+    assert calib._cell_ladder(plans) == {0}
+    assert d.char_off[0].get(ci, 0) == 4  # the verified winner, committed
+    assert d.char_off[1].get(ci, 0) == 0  # nothing invented for the stuck cell
+    assert any("stopped before step" in e["text"] for e in events)
+    ladder = [e for e in calib.frames if e["tag"].startswith("ladder_")]
+    assert len(ladder) == 8  # baseline + the one affordable round
 
 
 def test_ladder_filler_rotates_background_slots(tmp_path):
