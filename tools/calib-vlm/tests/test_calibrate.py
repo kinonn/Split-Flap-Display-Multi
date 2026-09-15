@@ -43,7 +43,9 @@ def test_coarse_identity_converges(tmp_path):
 def test_per_char_identity_converges(tmp_path):
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
-    d.seed_char_error(2, ci, -d.spc)  # only 'O' is one char behind on m2
+    # Only 'O' is one char behind on m2, with the cell at the clamp edge:
+    # the incremental ladder must walk it back inside ±32 in one step.
+    d.seed_char_error(2, ci, -32)
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.char_off[2].get(ci, 0) == 0
@@ -55,12 +57,12 @@ def test_per_char_identity_converges(tmp_path):
 
 
 def test_per_char_identity_overflow_escalates_cleanly(tmp_path):
-    # A per-character fault whose fix is a whole number of characters (a
-    # 37-char drum 30 positions away is +7 chars = 385 motor steps here)
-    # cannot live in a char cell the firmware clamps to ±32: P2 must
-    # escalate instead of writing a clamped, wrong offset that would leave
-    # the display worse than before. Driven through the real P2 pass (a
-    # full run routes a many-glyph fault to the module cell first).
+    # A per-character fault that needs a whole flap (a 37-char drum 30
+    # positions away is +7 chars = 385 motor steps here) cannot be reached
+    # by any candidate inside the firmware's ±32 char-cell clamp: the
+    # incremental ladder probes first, then escalates reporting the probes
+    # - it never writes a clamped, wrong offset that would leave the
+    # display worse than before.
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
     far = d.drum[(ci + 30) % len(d.drum)]
@@ -75,9 +77,10 @@ def test_per_char_identity_overflow_escalates_cleanly(tmp_path):
     calib._p1_flagged = ["O"]
     calib._p2_fine()
     assert d.char_off[2].get(ci, 0) == 0   # cell untouched, not clamped
-    assert not d.previews and not d.persists
+    assert d.previews                      # ...but the ladder did probe
+    assert not d.persists
     notes = [e["note"] for e in calib.identity_persistent]
-    assert any("does not fit a char cell" in n for n in notes)
+    assert any("incremental ladder" in n and "char cell" in n for n in notes)
 
 
 def test_remote_per_char_overflow_escalates_cleanly(tmp_path):
@@ -96,9 +99,10 @@ def test_remote_per_char_overflow_escalates_cleanly(tmp_path):
     calib._p1_flagged = ["H"]
     calib._p2_fine()
     assert d.remote_char[0][2][ci] == 0    # not corrupted to ±32
+    assert d.batches                       # remote ladder probes were sent
     assert not d.previews and not d.persists
     notes = [e["note"] for e in calib.identity_persistent]
-    assert any("does not fit a char cell" in n for n in notes)
+    assert any("incremental ladder" in n and "char cell" in n for n in notes)
 
 
 def test_alignment_half_flap_converges_exhaustive(tmp_path):
@@ -237,13 +241,15 @@ def test_module_trim_fixes_remote_boundary_flaps(tmp_path):
 
 def test_module_trim_skips_mixed_direction_faults(tmp_path):
     # One flap ahead and one behind cannot be fixed by a single whole-drum
-    # shift: the trim must not touch that module.
+    # shift: the module trim must not touch that module (later phases may
+    # still walk the individual char cells).
     d = FakeDisplay(total=4, charset=48)
     d.flap_window = int(round(d.spc * 0.4))
     d.seed_flap_error(1, d.drum.index("H"), int(round(d.spc * 0.6)))
     d.seed_flap_error(1, d.drum.index("D"), -int(round(d.spc * 0.6)))
     calib, report = run_calib(d, tmp_path)
-    assert all(n["module"] != 1 for batch in d.batches for n in batch)
+    assert all(not (n["module"] == 1 and n["charIndex"] < 0)
+               for batch in d.batches for n in batch)
 
 
 def test_module_trim_dry_run_touches_nothing(tmp_path):
@@ -294,19 +300,19 @@ def test_remote_group_converges(tmp_path):
     assert d.remote_mod[0][1] == 0
 
 
-def test_ahead_by_one_char_converges_small_negative(tmp_path):
-    # The aborted-run regression: commanded E, showed F (one char AHEAD).
-    # Signed-minimal fix is -steps_per_char (2 chunks), not a 47-char
-    # near-full revolution forward (was 64 chunks / ~5 min of grinding).
+def test_ahead_by_one_char_converges_within_clamp(tmp_path):
+    # The aborted-run regression: commanded E, showed F (one char AHEAD)
+    # with the cell at the clamp edge. The incremental ladder walks it back
+    # with a single <=32-step candidate, never a near-full-revolution
+    # forward grind and never a >32-step jump.
     d = FakeDisplay(total=4)
     ci = d.drum.index("E")
-    d.seed_char_error(1, ci, d.spc)  # 'E' shows the NEXT char on m1
+    d.seed_char_error(1, ci, 32)  # 'E' shows the NEXT char on m1
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.char_off[1].get(ci, 0) == 0
     char_previews = [(c, d_) for _, c, d_ in d.previews if c >= 0]
     assert all(abs(delta) <= 32 for _, delta in char_previews)
-    assert len(char_previews) <= 2  # -spc fits in two <=32 chunks, not 64
 
 
 def test_module_cell_fault_applied_in_one_preview(tmp_path):
@@ -608,15 +614,16 @@ def test_read_log_line_reports_expected_vs_read(tmp_path):
 
 
 def test_fine_identity_that_does_not_fit_escalates(tmp_path):
-    # A per-character fault whose exact fix would leave the char cell outside
-    # the firmware's ±32 clamp is hardware: escalate, never write clamped.
+    # A per-character fault that needs a whole flap is unreachable from any
+    # candidate inside the firmware's ±32 char-cell clamp: the ladder probes
+    # it, finds no clean landing, and escalates - never written clamped.
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
     d.seed_char_error(2, ci, 30 * d.spc)
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "needs-human"
     notes = [e["note"] for e in report["identity"]["persistent"]]
-    assert any("char cell" in n for n in notes)
+    assert any("incremental ladder" in n and "char cell" in n for n in notes)
     assert d.char_off[2].get(ci, 0) == 30 * d.spc  # untouched
 
 
@@ -771,17 +778,28 @@ def test_p2_ladder_stops_probing_a_clean_cell(tmp_path):
     assert d.persists == [(1, "char", 4, 0, ci)]
 
 
-def test_p2_ladder_clamps_candidates_to_half_a_character(tmp_path):
-    # The scan never pushes a char cell past half a character pitch: a
-    # candidate whose absolute value would exceed the clamp is skipped,
-    # and a fault that can only be cleared past the clamp stays
-    # unresolved - the cell is left exactly as it was, never written with
-    # a clamped wrong value.
+def test_p2_ladder_steps_default_and_explicit_cap():
+    # The seam default caps at half a character pitch; identity faults pass
+    # the firmware's ±32 char-cell clamp so the scan can reach the edge.
+    steps = _p2_ladder_steps(43)
+    assert max(abs(s) for s in steps) == 20  # half-pitch cap (43 // 2 = 21)
+    assert steps[-4:] == [2, -2, 1, -1]      # narrow-window fallback
+    wide = _p2_ladder_steps(43, cap=32)
+    assert wide[:4] == [4, -4, 8, -8]
+    assert max(abs(s) for s in wide) == 32
+    assert wide[-4:] == [2, -2, 1, -1]
+
+
+def test_p2_ladder_respects_char_cell_clamp(tmp_path):
+    # Char-cell candidates are bounded by the firmware's ±32 clamp: no probe
+    # ever pushes the cell's live value outside the window, and the wider
+    # identity cap reaches a landing past +4 that the half-pitch seam cap
+    # could not (this fault is clean only at +12).
     d = FakeDisplay(total=4, charset=48)
     d.flap_window = 4
     ci = d.drum.index("E")
     d.seed_char_error(0, ci, 15)   # base +15 (already off-centre)
-    d.seed_flap_error(0, ci, -30)  # still reads 'E', half, at 15 - 30
+    d.seed_flap_error(0, ci, -30)  # reads 'E', half; clean at a +12 nudge
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
                           dwell_ms=0, timeout_s=5, min_confidence=0.5,
                           mode="full")
@@ -790,21 +808,19 @@ def test_p2_ladder_clamps_candidates_to_half_a_character(tmp_path):
     calib.group_widths = [4]
     calib._p1_flagged = ["E"]
     calib._p2_fine()
-    assert d.char_off[0].get(ci, 0) == 15  # untouched
-    assert not d.persists
+    assert d.char_off[0].get(ci, 0) == 27  # base 15 + the accepted +12
+    assert d.condition(0, "E") == "clean"
     # Replaying the applied nudges (previews record applies AND reverts):
-    # the cell never leaves the half-pitch clamp. Positive candidates
-    # past +4 are skipped (|15 + 8| > 21) while the negative direction
-    # scans all the way to -20 (|15 - 20| <= 21).
+    # the cell never leaves the ±32 window.
     value = 15
-    lo = hi = 15
+    peak = 15
     for _, cell, delta in d.previews:
         if cell < 0:
             continue
         value += delta
-        lo, hi = min(lo, value), max(hi, value)
-    assert lo == 15 - 20
-    assert hi == 15 + 4
+        peak = max(peak, abs(value))
+        assert -32 <= value <= 32
+    assert peak > 15  # the wider identity cap is actually used
 
 
 def test_ladder_stops_before_the_budget_wall_and_commits(tmp_path):
@@ -903,9 +919,9 @@ def test_ladder_skips_reshow_when_nothing_moved(tmp_path):
 def test_majority_residual_routes_to_module_fix(tmp_path):
     # run-005 regression: a module whose reads are +1 on ~70% of the drum
     # misses the 80% purity gate and was escalated as "unreliable"; every
-    # residual then dead-ended in P2 ("identity fix does not fit a char
-    # cell" — a whole character can never fit the ±32 clamp). A >=50%
-    # plurality single-char residual is fixed on the module cell instead.
+    # residual then dead-ended in P2 (a whole-character fix cannot fit the
+    # ±32 char-cell clamp). A >=50% plurality single-char residual is fixed
+    # on the module cell instead.
     d = FakeDisplay(total=4, charset=48)
     d.seed_module_error(0, d.spc)  # whole drum one character ahead
     # Cancel a minority (~30%) of characters so purity lands ~70%.
@@ -1099,7 +1115,8 @@ def test_unreadable_escalation_counts_toward_abort(tmp_path):
         calib._escalate(1, "X", "unreadable during fine pass")
     assert calib._unreliable_count == MAX_UNRELIABLE_READS
     # Non-reader escalations (char-cell clamp) must NOT count.
-    calib._escalate(1, "X", "identity fix does not fit a char cell")
+    calib._escalate(1, "X", "incremental ladder found no clean offset "
+                            "on the char cell")
     assert calib._unreliable_count == MAX_UNRELIABLE_READS
 
 
@@ -1194,6 +1211,35 @@ def test_report_has_timing_context_and_traceback(tmp_path):
     assert any("P1 coarse" in p for p in phases)
     assert all(set(p) >= {"phase", "seconds", "frames", "vlmCalls",
                           "previews", "persists"} for p in report["timing"]["phases"])
+    # Each row carries the cost of the phase NAMED in it: the last row is
+    # the last phase that ran, not the trailing cleanup mark that closes
+    # its interval (run-008 reported every cost one row late).
+    assert "acceptance" in phases[-1]
+
+
+def test_phase_timing_labels_each_row_with_its_own_phase(tmp_path):
+    # Marks announce the phase they START, so a slice belongs to the
+    # earlier mark: a phase's row must carry that phase's own cost, not
+    # whatever ran after it (run-008 shipped the table one row late - the
+    # sub-pitch ladder's 14 previews and 2 persists sat under "P2 fine",
+    # P4's 142 s under the closing cleanup mark).
+    d = FakeDisplay(total=4)
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
+                          photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                          min_confidence=0.5, mode="full")
+    calib._phase_marks = [
+        {"name": "A", "elapsed": 10.0, "frames": 1, "vlmCalls": 1,
+         "previews": 0, "persists": 0},
+        {"name": "B", "elapsed": 30.0, "frames": 5, "vlmCalls": 6,
+         "previews": 1, "persists": 0},
+        {"name": "C", "elapsed": 45.0, "frames": 9, "vlmCalls": 8,
+         "previews": 2, "persists": 1},
+    ]
+    rows = [(r["phase"], r["seconds"], r["frames"], r["persists"])
+            for r in calib._phase_timing()]
+    assert rows == [("startup", 10.0, 1, 0),
+                    ("A", 20.0, 4, 0),
+                    ("B", 15.0, 4, 1)]
 
 
 def test_phases_reject_unknown_names(tmp_path):
