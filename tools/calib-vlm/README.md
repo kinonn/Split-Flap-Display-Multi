@@ -263,7 +263,10 @@ the shift/purity table (no writes).
   default 5400) wall-clock cap and abort checks throughout. Exceeding a
   budget stops the run; already-committed phases are kept (commit per
   phase), volatile residue is reverted, and `snapshot.json` remains for
-  a manual rollback.
+  a manual rollback. A cell ladder that cannot afford another probe
+  round stops early and commits the offsets it has already verified, so
+  a nearly-spent preview/frame budget costs the untested candidates and
+  not the winners found so far.
 
 ## Run artifacts
 

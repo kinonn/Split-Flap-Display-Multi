@@ -271,3 +271,16 @@ def test_event_log_pages_without_truncation(client):
     assert len(page2["events"]) == 150
     assert page2["events"][0]["text"] == "e200"
     assert page2["events"][-1]["text"] == "e349"
+
+
+def test_photo_endpoint_rejects_separator_names(client):
+    # A photo name is a bare file name: on Windows a backslash is a
+    # separator too, so "a\..\..\x.png" must not slip past a "/"-only
+    # check (os.path.join resolves it outside the run dir there).
+    # %5C is the encoded backslash.
+    for name in ("a%5C..%5C..%5Csecret.png", "a%5Cb.png"):
+        r = client.get(f"/api/photos/{name}")
+        assert r.status_code == 400, (name, r.status_code, r.text)
+    # A separator-free name is still a normal lookup (404 when missing),
+    # never a 400.
+    assert client.get("/api/photos/nope.png").status_code == 404
