@@ -36,32 +36,13 @@ MAX_SWEEPS = 3
 # unreliable/unreadable escalations means camera/framing/lighting is bad
 # and continuing would burn wear/budget tuning noise.
 MAX_UNRELIABLE_READS = 5
-# Deltas tried per suspect cell (motor steps), coarse first.
-TRY_DELTAS = (4, -4, 2, -2, 8, -8, 1, -1)
-# P2 char-cell ladder: every per-character fault - a wrong glyph and a
-# `half`/`double` seam alike - is scanned in fixed motor-step increments
-# instead of one-shot exact deltas. The cap defaults to half a character
-# pitch (`stepsPerChar` / 2 - any further and the flap sits too close to
-# the neighbouring character); identity faults pass the firmware's ±32
-# char-cell clamp so the scan can reach it. A clean window narrower than
-# the increment can fall between two candidates, so the half-step probes
-# follow as a fallback chain.
+# P2 char-cell ladder: every per-character fault is scanned in fixed
+# motor-step increments instead of one-shot exact deltas. The cap defaults
+# to half a character pitch (`stepsPerChar` / 2); identity faults pass the
+# firmware's ±32 char-cell clamp so the scan can reach it. A window
+# narrower than the increment can fall between two candidates, so the
+# half-step probes follow as a fallback chain.
 P2_LADDER_STEP = 4
-# A module misaligned (half/double, identity still right) on this many
-# uniform frames is a whole-drum phase fault: tune the module cell once
-# instead of scattering per-char alignment searches across the drum.
-ALIGN_VOTE_MIN = 2
-# Sub-pitch module-offset trims: a module offset slides every character's
-# landing by the same steps, so a fraction of one flap pulls characters
-# sitting just past their flap boundary back onto their own flap without
-# moving well-centred characters. Multiples of a full character stay on the
-# coarse whole-character module path.
-MODULE_TRIM_FRACTIONS = (0.5, 0.25, 0.125, 0.0625)
-# Distinct wrong glyphs evaluated per suspect module during the trim.
-MODULE_TRIM_TARGETS = 3
-# Correct neighbours checked so a trim that fixes the targets by breaking
-# the surrounding characters is rejected.
-MODULE_TRIM_GUARDS = 3
 # Firmware limits (src/CalibApi.h + SplitFlapWebServer.cpp): char offset
 # cells are motor steps clamped to ±32, and /api/calib/preview rejects a
 # single |delta| > 32 with HTTP 400.
@@ -88,10 +69,11 @@ SWEEP_TRUST_PURITY = 0.80    # dominant-shift share needed to trust it
 # clamp can never hold a whole-character fix (run-005: +1 on ~68% of the
 # drum, 28 "does not fit a char cell" escalations, needs-human).
 SWEEP_MAJORITY_SHARE = 0.50
-# Single-flap arc fault: at least this share of the DRUM showing the same
-# ±1 residual (run-005 m0: 13 of 48 characters one flap ahead while the
-# rest read correct). Such a module enters the sub-pitch trim ladder with
-# a proportionate candidate; it is never applied blind.
+# Single-flap arc: at least this share of the DRUM showing the same ±1
+# residual (run-005 m0: 13 of 48 characters one flap ahead while the rest
+# read correct). The module is below the purity gate but is NOT reader
+# noise: keep it usable (mode 0) so each arc character becomes ordinary
+# per-character P2 work instead of escalating the whole module.
 SWEEP_ARC_SHARE = 0.125
 # Glyphs that render identically on the drum: a difference between partners
 # is "no information", never evidence and never a correction.
@@ -116,15 +98,11 @@ CONFUSABLES = {
 # realign to the same glyphs on the next evaluate round.
 LADDER_FILLERS = ("E", "M", "T", "K", "H", "W", "N")
 # Default character exclusion list: glyphs the operator asks to skip
-# everywhere (sweep, ladder targets/guards/fillers, P2, P4, acceptance).
+# everywhere (sweep, ladder targets/fillers, P2, P4, acceptance).
 # Tiny punctuation flaps (".", "'", "-") read unreliably at camera
 # distance, so they are excluded by default; the UI can edit the list or
 # disable exclusions entirely. Enabled by default.
 DEFAULT_SKIP_CHARS = (".", "'", "-")
-# Sub-pitch cell trims (coarse -> fine, cumulative). Applied to module cells
-# for boundary residuals and to char cells for per-character faults; all
-# candidates stay below one character pitch.
-# (MODULE_TRIM_FRACTIONS defined once above with the alignment constants.)
 
 
 def confusable(a: str, b: str) -> bool:
@@ -139,10 +117,10 @@ def _p2_ladder_steps(steps_per_char: int,
     Increments of P2_LADDER_STEP, coarse first and alternating sign, then
     the narrow-window fallback (half the increment, then one step). Each
     candidate is applied from the base, so the smallest offset that
-    clears the flap wins. `cap` bounds the candidate magnitude: it
-    defaults to half a character pitch (the seam window past which the
-    flap sits too close to the neighbouring character), while an identity
-    fault passes the firmware's char-cell clamp so the scan can reach it.
+    reads the commanded glyph wins. `cap` bounds the candidate magnitude:
+    it defaults to half a character pitch (a larger correction would move
+    the landing toward the neighbouring flap), while an identity fault
+    passes the firmware's char-cell clamp so the scan can reach it.
     """
     if cap is None:
         cap = max(1, steps_per_char // 2)
@@ -358,8 +336,7 @@ class VlmCalibrator:
         self._last_frame_id: int = 0
         # Motor steps between two drum characters (stepsPerRot / drum
         # length), read from /settings. Identity fixes move a whole
-        # character (delta * steps_per_char); alignment fixes move a few
-        # steps (TRY_DELTAS).
+        # character (delta * steps_per_char).
         self.steps_per_char = 1
         self.group_widths = [0]
         # Remote offsets from the master's /settings snapshot (rModOffs,
@@ -975,106 +952,34 @@ class VlmCalibrator:
         self.previews += len(nudges)
         self._wait_settled(self.timeout_s)
 
-    def _module_trim(self, votes: dict[int, list[str]],
-                     seen: dict[int, dict[str, str]],
-                     glyphs: list[str],
-                     offset_base: dict[int, int] | None = None) -> set[int]:
-        """Sub-pitch module-offset trim, run in parallel across modules.
-
-        A module offset shifts every landing by a fraction of a character,
-        so a trim smaller than one flap pulls boundary characters (showing
-        the next flap) back without moving the characters that are centred.
-        Every suspect module applies its own candidate in the SAME mixed
-        frames/reads, and the batch preview homes them in one pass, so the
-        cost is `rounds x frames`, not `modules x rounds x frames`.
-
-        Modules wrong on every tested glyph (a whole-drum shift) or on
-        glyphs pointing both ways (no single shift helps) are left to the
-        coarse/per-character paths. Returns the modules that improved.
-
-        Mode gating: dry-run touches nothing (the surviving votes become
-        proposals in the later paths); full applies candidates and commits
-        the verified winner (local via preview+persist, remote via persist).
-        """
-        if self.mode == "dry-run":
-            return set()
-        plans = []
-        wrong_sets = {m: set(g) for m, g in votes.items()}
-        for module in sorted(votes):
-            wrong = [g for g in glyphs if g in wrong_sets[module]]
-            if not wrong or len(wrong) >= len(glyphs):
-                continue
-            errors = []
-            for glyph in wrong:
-                delta = self._drum_delta(seen[module].get(glyph, "?"), glyph)
-                if delta:
-                    errors.append(delta)
-            if not errors:
-                continue
-            if len({-1 if e < 0 else 1 for e in errors}) != 1:
-                continue  # mixed direction: no single offset can help
-            wrong_set = set(wrong)
-            right = [g for g in glyphs if g not in wrong_set]
-            # Guards: correct glyphs spread across the drum. A trim shifts
-            # every other character too, so any candidate that breaks the
-            # surrounding characters is rejected before it is committed.
-            if right:
-                stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
-                guards = right[::stride][:MODULE_TRIM_GUARDS]
-            else:
-                guards = [self._pick_fallback(wrong_set)]
-            local = self._local_index(module)
-            magnitudes = [max(1, int(round(self.steps_per_char * f)))
-                          for f in MODULE_TRIM_FRACTIONS]
-            # Proportionate arc candidate (run-005 hypothesis): a
-            # single-flap fault on >= 12.5% of the drum may respond to a
-            # proportional slice of the drum pitch
-            # (round(arc_count / drumLen * stepsPerChar)). Added FIRST so
-            # the ladder always evaluates it; the score decides — it is
-            # kept only when it beats the baseline without breaking a
-            # guard, and reverted otherwise. A full-flap-clean arc cannot
-            # be fixed by any sub-pitch shift, so this degrades to one
-            # extra evaluate round before the module is flagged for P2.
-            share = len(wrong) / max(1, len(self.drum))
-            prop = int(round(share * self.steps_per_char))
-            if prop:
-                magnitudes = [prop] + magnitudes
-            direction = -1 if errors[0] > 0 else 1
-            plans.append({
-                "module": module,
-                "group": self._group_of(module),
-                "local": local,
-                "char_index": -1,
-                "direction": direction,
-                "steps": [direction * m for m in magnitudes],
-                "cap": self.steps_per_char,
-                "offset_base": (offset_base or {}).get(module, 0),
-                "targets": wrong[:MODULE_TRIM_TARGETS],
-                "guards": guards[:MODULE_TRIM_GUARDS],
-                "state": 0,
-                "best": 0,
-                "best_score": 0,
-                "label": f"g{self._group_of(module)} m{local} c-1",
-            })
-        if not plans:
-            return set()
-        return self._cell_ladder(plans)
-
     def _cell_ladder(self, plans: list[dict]) -> set[int]:
         """Parallel coarse-to-fine ladder over independent cell offsets.
 
         Plans are cells (module offsets or per-character cells). Every plan
         applies its own candidate in the SAME mixed frames/reads and the
         batch preview homes the touched modules in one pass, so the cost is
-        `steps x frames`, not `plans x steps x frames`. A candidate is kept
-        only when it raises the plan's score (targets correct+clean minus
-        guard breakage), so the smallest clearing shift wins. A cell that
-        reaches a perfect score stops being probed (later candidates can
-        only tie it), and an exhausted cell holds at its best offset
-        instead of snapping back toward the base every remaining round.
+        `steps x frames`, not `plans x steps x frames`. Callers pass at
+        most ONE plan per module (a frame commands one character per
+        module); same-module cells are tuned in separate calls. A character
+        plan scores only whether its target glyph reads correctly (this
+        hardware cannot show a half- or double-seated flap); module plans
+        keep the conservative correct+clean-minus-guard-breakage score. A
+        candidate is kept only when it raises the plan's score, so the
+        smallest clearing shift wins. A cell that reaches a perfect score
+        stops being probed (later candidates can only tie it), and an
+        exhausted cell holds at its best offset instead of snapping back
+        toward the base every remaining round.
         """
         if not plans or self.mode == "dry-run":
             return set()
+        if len({p["module"] for p in plans}) != len(plans):
+            # A frame commands exactly one character per module and scores
+            # are keyed by module, so two plans on one module would share a
+            # score and a frame slot: both could "win" from one verified
+            # reading and commit unverified offsets (the run-009 module-8
+            # pattern). Callers split same-module cells into waves.
+            raise ValueError("_cell_ladder needs one plan per module; "
+                             "split same-module cells into separate calls")
         steps_at = max(len(p["steps"]) for p in plans)
         # Seed every cell's base BEFORE nudging: the applied candidates must
         # land in the residue so a commit persists overlay + residue.
@@ -1180,17 +1085,19 @@ class VlmCalibrator:
                     entry = readings[index].modules[m]
                     if self._trusted(entry) \
                             and entry.char == p["targets"][index]:
-                        scores[m] += 2
-                        if entry.condition in ("clean", "blank"):
+                        scores[m] += 1 if p["char_index"] >= 0 else 2
+                        if (p["char_index"] < 0
+                                and entry.condition in ("clean", "blank")):
                             scores[m] += 1
-                for gi in range(guards_at):
-                    if gi >= len(p["guards"]):
-                        continue
-                    entry = readings[targets_at + gi].modules[m]
-                    if (not self._trusted(entry)
-                            or entry.char != p["guards"][gi]
-                            or entry.condition not in ("clean", "blank")):
-                        scores[m] -= 6
+                if p["char_index"] < 0:
+                    for gi in range(guards_at):
+                        if gi >= len(p["guards"]):
+                            continue
+                        entry = readings[targets_at + gi].modules[m]
+                        if (not self._trusted(entry)
+                                or entry.char != p["guards"][gi]
+                                or entry.condition not in ("clean", "blank")):
+                            scores[m] -= 6
             if cache is not None and moved is not None:
                 cache["seqs"] = {p["module"]: tuple(f[p["module"]]
                                                     for f in frames)
@@ -1201,9 +1108,8 @@ class VlmCalibrator:
         self.event("phase", f"parallel cell ladder ({len(plans)} cells, "
                             f"{steps_at} steps)")
         # Baseline score BEFORE any nudge: a candidate is kept only when it
-        # beats where the cell started. Without this a correct-char/half-flap
-        # target (score 2) would accept the first candidate that leaves it
-        # equally half (score 2 > 0) and persist a no-op offset.
+        # beats where the cell started, so an equally-wrong landing can
+        # never persist a no-op offset.
         baseline = evaluate()
         for p in plans:
             p["best_score"] = baseline.get(p["module"], 0)
@@ -1227,6 +1133,11 @@ class VlmCalibrator:
                            f"{self.max_previews} previews, {self.frames_used}/"
                            f"{self.max_frames} frames); committing the "
                            f"offsets verified so far")
+                for p in active:
+                    # Tell the caller this cell was cut short rather than
+                    # probed to exhaustion: that is a budget truncation,
+                    # not a hardware verdict.
+                    p["stopped_early"] = True
                 break
             apply = []
             moved: set[int] = set()
@@ -1273,10 +1184,14 @@ class VlmCalibrator:
                         revert.append((p["group"], p["local"],
                                        p["char_index"], diff))
                 # A perfect score cannot be beaten (every target reads
-                # correct+clean with the guards intact): stop probing this
-                # cell so its remaining candidates cost nothing - no
-                # nudges, no re-reads (the cached score holds).
-                if p["best_score"] >= 3 * len(p["targets"]):
+                # correctly; module plans additionally require clean flaps
+                # with the guards intact): stop probing this cell so its
+                # remaining candidates cost nothing - no nudges, no
+                # re-reads (the cached score holds).
+                perfect = (len(p["targets"])
+                           if p["char_index"] >= 0
+                           else 3 * len(p["targets"]))
+                if p["best_score"] >= perfect:
                     p["settled"] = True
             self._batch_nudge(revert)
 
@@ -1296,15 +1211,13 @@ class VlmCalibrator:
             elif self.mode == "full":
                 # Remote previews are RAM-only: persist the tracked
                 # absolute (overlay + residue), i.e. exactly what the
-                # device holds after the ladder (run-start base + the
-                # whole-character offset previewed above + this ladder's
-                # best). INVARIANT: the persisted value equals the value
-                # the device actually holds, so a later commit on the same
-                # cell (P1 runs the module trim and the phase trim over
-                # overlapping modules) builds on this one instead of
-                # dropping it. Re-reading the run-start /settings snapshot
-                # here would discard every earlier verified commit, since
-                # that snapshot is never refreshed during a run.
+                # device holds after the ladder (committed base + this
+                # ladder's best). INVARIANT: the persisted value equals the
+                # value the device actually holds, so a later commit on the
+                # same cell builds on this one instead of dropping it.
+                # Re-reading the run-start /settings snapshot here would
+                # discard every earlier verified commit, since that
+                # snapshot is never refreshed during a run.
                 target = self.live(key)
                 self._guard_budgets()
                 self.display.persist(p["group"], kind, target,
@@ -1379,51 +1292,8 @@ class VlmCalibrator:
         mode, count = counts.most_common(1)[0]
         return mode, count / sum(counts.values()), sum(counts.values())
 
-    def _module_phase_trim(self, phase_cells: dict[int, list[str]],
-                           readings, chars: list[str],
-                           offset_base: dict[int, int] | None = None) -> set[int]:
-        """Fine module-cell search for a whole-drum seam (phase) fault.
-
-        Identity is right but several characters show half/double: a small
-        module-cell nudge centres the seam. The reader reports no magnitude,
-        so scan the classic fine ladder around the base (both directions).
-        """
-        plans = []
-        magnitudes = TRY_DELTAS
-        for m, cells in sorted(phase_cells.items()):
-            right = [ch for ch in chars
-                     if ch not in cells
-                     and readings[m].get(ch) is not None
-                     and self._trusted(readings[m][ch])
-                     and readings[m][ch].char == ch]
-            if right:
-                stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
-                guards = right[::stride][:MODULE_TRIM_GUARDS]
-            else:
-                guards = [self._pick_fallback(set(cells))]
-            plans.append({
-                "module": m,
-                "group": self._group_of(m),
-                "local": self._local_index(m),
-                "char_index": -1,
-                "steps": list(magnitudes),
-                "absolute": True,
-                "cap": self.steps_per_char,
-                "offset_base": (offset_base or {}).get(m, 0),
-                "targets": cells[:MODULE_TRIM_TARGETS],
-                "guards": guards,
-                "state": 0,
-                "best": 0,
-                "best_score": 0,
-                "label": f"g{self._group_of(m)} m{self._local_index(m)} "
-                         f"phase",
-            })
-        if plans:
-            return self._cell_ladder(plans)
-        return set()
-
     def _p1_coarse(self):
-        """Reverse uniform sweep -> one-shot module offsets + sub-pitch trim."""
+        """Reverse uniform sweep -> one-shot module offsets."""
         self.event("phase", f"P1 coarse: reverse uniform sweep "
                             f"({len(self.drum)} characters)")
         readings, chars = self._sweep()
@@ -1448,12 +1318,13 @@ class VlmCalibrator:
                                f"m{m}: majority shift {mode:+d} "
                                f"({purity:.0%} of {total}); module-cell fix")
                     continue
-                # Single-flap arc fault: dominant state still CORRECT but a
+                # Single-flap arc: dominant state still CORRECT but a
                 # >= 12.5% same-sign ±1 arc. A whole-drum shift applied
                 # blind would trade the arc for a bigger fault on the
-                # correct majority — instead the module enters the residual
-                # map so the sub-pitch trim ladder can probe a proportionate
-                # candidate and only keep it if the score improves.
+                # correct majority; instead the module stays at mode 0 and
+                # the arc characters flow into the residual map as ordinary
+                # per-character P2 work (never an "unreliable reads"
+                # escalation, which would dead-end the whole module).
                 arc = [(ch, s) for ch, s in shifts[m].items()
                        if s is not None and abs(s) == 1]
                 if (mode == 0 and total >= SWEEP_MIN_SAMPLES
@@ -1464,7 +1335,7 @@ class VlmCalibrator:
                     self.event("read",
                                f"m{m}: single-flap arc ({len(arc)} chars, "
                                f"{len(arc) / len(self.drum):.0%} of drum, "
-                               f"{arc[0][1]:+d}); trim candidate")
+                               f"{arc[0][1]:+d}); per-char work")
                     continue
                 self._escalate(m, "?",
                                f"unreliable reads ({total} samples, "
@@ -1500,58 +1371,11 @@ class VlmCalibrator:
                     out[ch] = 0 if shifts[m][ch] == modes[m] \
                         else shifts[m][ch]
             residual[m] = out
-        # Sub-pitch module trim for a minority of same-sign +/-1 residuals.
-        votes: dict[int, list[str]] = {}
-        seen: dict[int, dict[str, str]] = {}
-        minority = max(1, len(chars) // 2)
-        for m, res in residual.items():
-            outliers = [ch for ch in chars if res.get(ch) not in (None, 0)]
-            if not outliers or len(outliers) > minority:
-                continue
-            vals = [res[ch] for ch in outliers]
-            if any(abs(v) != 1 for v in vals):
-                continue
-            if len({v > 0 for v in vals}) != 1:
-                continue
-            votes[m] = outliers
-            seen[m] = {ch: readings[m][ch].char for ch in outliers}
-        if votes:
-            self.event("phase", f"P1 sub-pitch module trim "
-                                f"({len(votes)} modules)")
-            trimmed = self._module_trim(votes, seen, chars, whole)
-        else:
-            trimmed = set()
-        # Whole-drum seam fault: several half/double cells on one module.
-        phase_cells: dict[int, list[str]] = {}
-        for m in modes:
-            cells = []
-            for ch in chars:
-                entry = readings[m].get(ch)
-                if entry is None or not self._trusted(entry):
-                    continue
-                if entry.char != ch and not confusable(entry.char, ch):
-                    continue
-                if entry.condition in ("half", "double"):
-                    cells.append(ch)
-            if cells:
-                phase_cells[m] = cells
-        phase_votes = {m: cells for m, cells in phase_cells.items()
-                       if len(cells) >= ALIGN_VOTE_MIN}
-        if phase_votes:
-            self.event("phase", f"P1 module phase trim "
-                                f"({len(phase_votes)} modules)")
-            phased = self._module_phase_trim(phase_votes, readings, chars,
-                                             whole)
-        else:
-            phased = set()
-        handled = trimmed | phased
         # Commit whole-character fixes: local previews sit in the residue,
         # remote previews are RAM-only on the group, so persist the absolute
         # value from the recorded base there.
         for m, delta in whole.items():
-            if not delta or m in handled:
-                # Trimmed/phased modules already committed base + delta +
-                # ladder in one absolute write.
+            if not delta:
                 continue
             group, local = self._group_of(m), self._local_index(m)
             key = self._ensure_cell(group, local, -1)
@@ -1575,7 +1399,7 @@ class VlmCalibrator:
             self._usable(
                 {ch for m in modes for ch in chars
                  if residual[m].get(ch) not in (None, 0)}
-                | {ch for cells in phase_cells.values() for ch in cells}),
+                ),
             key=self.drum.index)
 
     def _derive_flagged_readonly(self):
@@ -1616,24 +1440,11 @@ class VlmCalibrator:
                     out[ch] = 0 if shifts[m][ch] == modes[m] \
                         else shifts[m][ch]
             residual[m] = out
-        phase_cells: dict[int, list[str]] = {}
-        for m in modes:
-            cells = []
-            for ch in chars:
-                entry = readings[m].get(ch)
-                if entry is None or not self._trusted(entry):
-                    continue
-                if entry.char != ch and not confusable(entry.char, ch):
-                    continue
-                if entry.condition in ("half", "double"):
-                    cells.append(ch)
-            if cells:
-                phase_cells[m] = cells
         self._p1_flagged = sorted(
             self._usable(
                 {ch for m in modes for ch in chars
                  if residual[m].get(ch) not in (None, 0)}
-                | {ch for cells in phase_cells.values() for ch in cells}),
+                ),
             key=self.drum.index)
         self.event("read", f"P2 input: {len(self._p1_flagged)} flagged "
                            f"character(s) from read-only sweep")
@@ -1667,24 +1478,33 @@ class VlmCalibrator:
             _, reading = self._show_read(ch * self.total, f"fine_{ord(ch)}")
             for m, entry in enumerate(reading.modules):
                 readings[m][ch] = entry
+            if all(e.source == "error" for e in reading.modules):
+                # The reader could not answer this frame at all (hard
+                # provider/camera failure). Retry it once: without this a
+                # single transient failure escalated every module of the
+                # frame and could trip the unreliable-reads abort.
+                _, retry = self._show_read(ch * self.total,
+                                           f"fine_{ord(ch)}r")
+                for m, entry in enumerate(retry.modules):
+                    readings[m][ch] = entry
         plans = []
+        unreadable: set[int] = set()
         for m in range(self.total):
             for ch in flagged:
                 entry = readings[m].get(ch)
                 if entry is None or not self._trusted(entry):
-                    self._escalate(m, ch, "unreadable during fine pass")
+                    # One escalation per module for the whole pass: an
+                    # unreadable frame is one reader failure, not one per
+                    # character.
+                    if m not in unreadable:
+                        unreadable.add(m)
+                        self._escalate(m, ch, "unreadable during fine pass")
                     continue
                 if confusable(entry.char, ch):
                     continue
-                if entry.char == ch and entry.condition == "clean":
+                if entry.char == ch:
                     continue
                 ci = self.drum.index(ch)
-                skipped = self._skipped()
-                right = [g for g in self.drum
-                         if g != " " and g != ch and g != entry.char
-                         and g not in skipped]
-                stride = max(1, len(right) // (MODULE_TRIM_GUARDS + 1))
-                guards = right[::stride][:MODULE_TRIM_GUARDS]
                 # Every char-cell fault - a wrong glyph included - is walked
                 # up the incremental ladder: candidate offsets in steps of
                 # P2_LADDER_STEP up to the firmware's ±32 char-cell clamp. A
@@ -1703,7 +1523,9 @@ class VlmCalibrator:
                     "absolute": True,
                     "cap": CHAR_OFFSET_LIMIT,
                     "targets": [ch],
-                    "guards": guards,
+                    # Character plans are scored on glyph identity alone:
+                    # no condition bonus, no guard frames.
+                    "guards": [],
                     "state": 0,
                     "best": 0,
                     "best_score": 0,
@@ -1712,18 +1534,49 @@ class VlmCalibrator:
                 })
         if not plans:
             return
-        self._cell_ladder(plans)
-        # A cell the ladder could not land correct+clean is hardware/reader
-        # work: escalate and report the probes it tried, never leave a
-        # silently unresolved offset.
+        # A ladder frame commands exactly ONE character per module, so two
+        # char cells on the same module cannot be exercised in the same
+        # frames: tune them in waves (one cell per module per wave) while
+        # cells on different modules stay parallel.
+        by_module: dict[int, list[dict]] = {}
         for p in plans:
-            if p["best_score"] >= 3 * len(p["targets"]):
+            by_module.setdefault(p["module"], []).append(p)
+        waves = max(len(cells) for cells in by_module.values())
+        for index in range(waves):
+            self._cell_ladder([cells[index] for cells in by_module.values()
+                               if index < len(cells)])
+        # A cell the ladder could not land on the commanded glyph is
+        # hardware/reader work: escalate and report the probes it tried,
+        # never leave a silently unresolved offset.
+        for p in plans:
+            if p["best_score"] >= len(p["targets"]):
+                continue
+            if p.get("stopped_early"):
+                # The ladder ran out of budget: report the truncation, not
+                # a hardware verdict (this used to claim "no working
+                # offset ... tried 0 candidate(s)").
+                self.event("error",
+                           f"m{p['module']} c{p['char_index']}: ladder "
+                           f"stopped on budget before resolving this "
+                           f"cell; left unresolved")
                 continue
             attempted = p.get("attempted") or []
+            if not attempted:
+                # Probed to exhaustion without a single applicable
+                # candidate: every offset in the scan would leave the cell
+                # outside the firmware's clamp (or the base is already
+                # unreachable), so this IS a hardware verdict.
+                self._escalate(
+                    p["module"], p["targets"][0],
+                    f"incremental ladder found no working offset on the "
+                    f"char cell (no candidate could be applied from base "
+                    f"{p.get('cap_base', 0)}; best {p['best']:+d}, "
+                    f"score {p['best_score']})")
+                continue
             reach = max((abs(a) for a in attempted), default=0)
             self._escalate(
                 p["module"], p["targets"][0],
-                f"incremental ladder found no clean offset on the char "
+                f"incremental ladder found no working offset on the char "
                 f"cell (tried {len(attempted)} candidate(s) up to ±{reach}; "
                 f"best {p['best']:+d}, score {p['best_score']})")
 
@@ -1757,7 +1610,7 @@ class VlmCalibrator:
                     continue
                 if confusable(entry.char, ch):
                     continue
-                if entry.char != ch or entry.condition == "double":
+                if entry.char != ch:
                     self._escalate(m, ch, f"boundary check: "
                                           f"{entry.char!r}/{entry.condition}")
 

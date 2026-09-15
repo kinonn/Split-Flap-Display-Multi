@@ -67,7 +67,7 @@ entry per module, left to right:
 | field | meaning |
 | --- | --- |
 | `char` | the glyph that module actually shows (space = blank flap) |
-| `condition` | `clean`, `half`, `double`, `blank`, `unreadable` |
+| `condition` | `clean`, `blank`, `unreadable` |
 | `confidence` | 0..1 for the character reading |
 
 The prompt is blind (the commanded frame is never shown to the model), so
@@ -79,6 +79,8 @@ every position as `inferred` + `realigned` (never silently trusted). An
 answer *longer* than the display gets one corrective re-ask. On repeated
 reader failures (3 in a row) the run stops; a single failure degrades to
 an all-`unreadable` reading so the phase can escalate instead of crash.
+Transient provider failures (429/5xx, dropped connections) are retried with
+exponential backoff inside the VLM client before a frame is given up.
 
 ## Calibration steps
 
@@ -86,8 +88,9 @@ The run is a deterministic state machine (`calib_vlm/calibrate.py`):
 P0 -> reverse uniform sweep (P1 coarse) -> P2 fine -> P4 verify -> acceptance.
 Fixes are applied as volatile previews, verified, then committed **per phase**
 (module offsets once P1 confirms them, char cells once P2 confirms). A full
-`/settings` snapshot is saved first (manual rollback via the UI), and hold is
-engaged at the start and released in a `finally`.
+`/settings` snapshot is saved first (manual rollback via the UI; restoring is
+refused while a run is active, since it would revert offsets the calibrator is
+tracking), and hold is engaged at the start and released in a `finally`.
 
 ### P0 — registration
 
@@ -120,38 +123,35 @@ pairs excluded):
   (escalating it would dead-end every affected character in P2: the
   firmware's ±32 char-cell clamp can never hold a whole-character fix).
 - **single-flap arc** (dominant state correct, but >= 12.5% of the drum
-  shows the same ±1 residual) -> the module enters the sub-pitch trim
-  ladder with an extra proportionate candidate
-  `round(arc_count / drumLen * stepsPerChar)`; the ladder keeps it only if
-  it beats the baseline without breaking a guard, otherwise the arc is
-  flagged for P2. Blank reads against non-blank commands are junk samples
-  and excluded from the histogram entirely.
+  shows the same ±1 residual) -> not reader noise: the module stays usable
+  (mode 0) and the arc characters flow into the P2 residual map as
+  ordinary per-character work. Blank reads against non-blank commands are
+  junk samples and excluded from the histogram entirely.
 - **worse than that** -> the reads are unreliable: re-read the deviant frames
   once, then escalate `needs-human` (reader/hardware), never "correct" noise.
-- **a few same-sign +/-1 residuals** (a minority of the module's characters)
-  -> a **sub-pitch module trim**: candidates `P/2, P/4, P/8, P/16`
-  (`P = stepsPerChar`), cumulative in the outlier direction, scored on the
-  outlier characters plus spread guard characters; the smallest shift that
-  clears every outlier without breaking a guard wins.
-- **several `half`/`double` cells** -> a module-cell phase search
-  (`+/-1/2/4/8`) centres the seam.
+- Every remaining identity mismatch — a neighboring glyph included — is
+  routed directly to its own per-character cell. This hardware does not
+  produce half- or double-seated flaps, so a neighboring glyph is an
+  identity/position error on that one glyph, never a module-level seam.
 
-Files still wrong or unreadable after P1 become P2 work. Whole-character fixes
-and trim winners are committed as module cells before P2 starts.
+Files still wrong or unreadable after P1 become P2 work. Whole-character
+fixes are committed as module cells before P2 starts.
 
 ### P2 — fine: per-character offsets
 
-Re-reads the flagged characters (identity mismatches and seam cells) at the
-committed P1 base and walks **every** char-cell fault — a wrong glyph
-included — up the **incremental ladder** (parallel across cells): candidate
-offsets `+/-4/8/12/...` motor steps in increments of 4 up to the firmware's
-`+/-32` char-cell clamp, then the narrow-window fallback `+/-2, +/-1`. Each
-candidate is applied from the base and kept only when it beats the cell's
-baseline without breaking a guard, so the smallest offset that reads
-correct+clean wins; a cell that reads clean stops being probed (the rest of
-its scan could only tie it). A one-shot exact identity delta is never
-written: a fault that needs a whole flap is escalated as hardware, reporting
-the probes it tried, rather than sent as a clamped, wrong offset.
+Re-reads the flagged characters at the committed P1 base and walks **every**
+identity mismatch up the **incremental ladder** (parallel across cells):
+candidate offsets `+/-4/8/12/...` motor steps in increments of 4 up to the
+firmware's `+/-32` char-cell clamp, then the narrow-window fallback `+/-2,
+ +/-1`. Each candidate is kept when the target glyph reads correctly. Guards
+and half/double condition scoring are not used for character cells because
+each stored offset affects only that glyph on that module. A one-shot exact
+identity delta is never written: a fault outside the clamp is escalated
+instead of being silently clamped. A frame the reader fails outright is
+re-read once, and a frame that stays unreadable escalates once per module
+(not once per cell), while a cell the ladder could not finish probing within
+the budget is reported as truncated rather than as a hardware fault — so a
+single provider hiccup cannot cascade into the unreliable-reads abort.
 
 Char-cell deltas are chunked to +/-32 within one batch pass, the flagged frames
 are re-read to verify, and the confirmed char cells are committed.
@@ -161,7 +161,7 @@ are re-read to verify, and the confirmed char cells are committed.
 Repeats a few uniform frames and requires identical reads, then walks a sample
 of **short forward hops** across drum boundaries (every 7th character), checking
 character and condition — the reverse sweep only exercises near-full
-revolutions, so binding/double-flap on small moves needs this pass.
+revolutions, so a landing that is off only for a short hop is only visible here.
 
 ### Acceptance
 
@@ -199,42 +199,32 @@ the shift/purity table (no writes).
   master's loop-task drain forwards only the first 8, dropping the rest
   silently), so each scope is chunked to those caps.
 - Cells are tuned by a parallel **cell ladder**: every plan applies its own
-  candidate in the same mixed frames/reads (one `preview-batch` per step),
-  and the score is `target read correct+clean` per target minus a penalty
-  per broken guard glyph, so a candidate is kept only when it beats the
+  candidate in the same mixed frames/reads (one `preview-batch` per step).
+  Character-cell plans score target glyph identity only; module-cell plans
+  retain `correct+clean` target scoring and a penalty per broken guard glyph,
+  so a candidate is kept only when it beats the
   cell's baseline — a non-improving nudge is reverted before the next
   step. A cell that reaches a perfect score stops being probed (later
   candidates could only tie it) and an exhausted cell holds at its best
-  offset. Candidates are coarse-to-fine: sub-pitch fractions of one
-  character for boundary flaps, `+4, -4, +2, -2, +8, -8, +1, -1` motor
-  steps for a whole-drum seam (identity right, several cells reading
-  half/double), the incremental `+/-4/8/12/16/20` scan (increments of 4 up
-  to half a character pitch, `+/-2, +/-1` as the narrow-window fallback)
-  for a per-character `half`/`double` flap, and the exact signed-minimal
-  identity delta for a per-character P2 fault.
-- P1 runs a **parallel sub-pitch module trim** before any per-character
-  cell is touched: a module wrong on only a few glyphs is usually a
-  boundary/phase problem, so candidates `0.75/0.5/0.25/0.125` of one
-  character are tried on the module cell, scored by the target glyphs
-  plus spread "guard" glyphs (so a trim that fixes the boundary by
-  breaking the neighbours is rejected). Suspect modules are independent,
-  so each applies its own candidate in the same mixed frames/reads and
-  `POST /api/calib/preview-batch` applies them all and re-homes the
-  touched modules in **one** pass — cost is `rounds x frames`, not
-  `modules x rounds x frames`. Batches with `scope: 2..6` are forwarded by
-  the master over ESP-NOW and applied RAM-only on the remote group (no NVS
-  write; the group acks when homing finishes), and a winning remote trim is
-  persisted once via `/api/calib/offsets`.
+  offset. Character-cell candidates are the incremental `+/-4/8/12/...`
+  scan (increments of 4 up to the firmware's ±32 clamp, then `+/-2, +/-1`
+  as the narrow-window fallback); module-cell plans keep the guard-scored
+  candidates used for module-wide corrections. A whole round goes out as
+  one `POST /api/calib/preview-batch`, which re-homes the touched modules
+  in **one** pass — cost is `rounds x frames`, not `cells x rounds x
+  frames`. A frame commands one character per module, so two cells on the
+  same module are tuned in separate waves. Batches with `scope: 2..6` are
+  forwarded by the master over ESP-NOW and applied RAM-only on the remote
+  group (no NVS write; the group acks when homing finishes).
 - Local group (1): volatile `/api/calib/preview` nudges, re-read, then
   persist the verified absolute value via `/api/calib/offsets`.
-- Remote groups: volatile fleet preview (above) for the trim; other cell
+- Remote groups: volatile fleet preview for the ladder rounds; other cell
   work uses persist-verify-revert. The initial base comes from the master's
   `rModOffs` / `rChrOff0..4` settings (the `status` endpoint only exposes
   local live offsets), but every commit persists the **tracked absolute**
   (base + all preview deltas applied to that cell), never the run-start
   snapshot: the persisted value must equal the value the device holds, or
-  a second commit on the same cell (P1's module trim and phase trim
-  overlap) would drop the first verified component.
+  a second commit on the same cell would drop the first verified component.
 - Baseline hygiene: every run starts with `POST /api/calib/reload`, which
   reverts any RAM-only preview residue from earlier runs; `full` mode does
   the same on the way out (persisted winners remain, ghost residue on

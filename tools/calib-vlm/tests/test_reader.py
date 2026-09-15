@@ -76,6 +76,8 @@ def test_system_prompt_lists_character_set():
     assert prompts.LOOKALIKE_HINT in system
     assert "check carefully before choosing" in system
     assert "Do not invent characters" in system
+    assert '"half"' not in system
+    assert '"double"' not in system
 
 
 def test_compacted_blanks_realigned_against_expected():
@@ -149,7 +151,7 @@ def test_condition_and_char_normalization():
     assert reading.modules[1].confidence == pytest.approx(1.0)
     assert reading.modules[2].char == "?"       # not in the charset
     assert reading.modules[2].condition == "unreadable"
-    assert reading.modules[3].condition == "half"
+    assert reading.modules[3].condition == "unreadable"
 
 
 def test_error_reading_is_all_unreadable():

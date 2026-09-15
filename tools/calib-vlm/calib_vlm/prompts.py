@@ -22,13 +22,8 @@ Rules that matter:
   must contain exactly {total} entries, no more, no fewer.
 - "char" must be one of the allowed characters listed above. Use a space
   " " for a blank/empty flap. Do not invent characters.
-- "condition" describes the mechanical state of that module:
-  - "clean": the glyph is fully visible and centred, no flap seam
-    crossing it.
-  - "half": a horizontal seam cuts the glyph, or the module shows part
-    of one character above the seam and part of another below it.
-  - "double": two seams, or two partial characters, are visible on the
-    module at once.
+- "condition" describes whether the module can be read:
+  - "clean": the glyph is readable.
   - "blank": the module shows an empty/plain flap.
   - "unreadable": you cannot tell what is shown (blur, glare, angle).
 - "confidence" is 0..1 for your reading of MY CHARACTER (not the
@@ -118,8 +113,7 @@ REPORT_READING_TOOL = {
                                      "description": "single character, space for blank"},
                             "condition": {
                                 "type": "string",
-                                "enum": ["clean", "half", "double", "blank",
-                                         "unreadable"],
+                                "enum": ["clean", "blank", "unreadable"],
                             },
                             "confidence": {"type": "number"},
                         },
