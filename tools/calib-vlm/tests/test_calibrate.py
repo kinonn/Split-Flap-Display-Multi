@@ -730,6 +730,83 @@ def test_cell_ladder_rejects_non_improving_nudge(tmp_path):
     assert d.condition(0, "E") == "half"
 
 
+def test_p2_ladder_scans_increments_up_to_half_a_character(tmp_path):
+    # P2's seam ladder scans candidate offsets in steps of 4 motor steps up
+    # to half a character pitch, so a fault needing more than the old
+    # +/-1/2/4/8 ladder's ceiling is still found. A mechanical landing
+    # error of 16 steps with a +/-4 step clean window is cleared only by an
+    # offset in [-20, -12]; -12 is the smallest increment the scan offers.
+    d = FakeDisplay(total=4, charset=48)
+    d.flap_window = 4
+    ci = d.drum.index("E")
+    d.seed_flap_error(0, ci, 16)
+    events = []
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full", on_event=events.append)
+    report = calib.run()
+    assert report["result"] == "converged"
+    assert d.char_off[0].get(ci, 0) == -12
+    assert d.condition(0, "E") == "clean"
+    assert any("cell ladder" in e["text"] and "-12 steps" in e["text"]
+               for e in events)
+
+
+def test_p2_ladder_stops_probing_a_clean_cell(tmp_path):
+    # An accepted candidate that leaves the flap clean is final: every
+    # later candidate could only tie it, so the cell must stop being
+    # nudged instead of burning the preview budget on the rest of the
+    # scan.
+    d = FakeDisplay(total=4, charset=48)
+    d.flap_window = 17
+    ci = d.drum.index("E")
+    d.seed_flap_error(0, ci, -18)  # half at the base, clean at +4
+    calib, report = run_calib(d, tmp_path)
+    assert report["result"] == "converged"
+    assert d.char_off[0].get(ci, 0) == 4
+    # Exactly one candidate was applied; nothing was probed after it.
+    assert d.previews == [(0, ci, 4)]
+    ladder = [e for e in calib.frames if e["tag"].startswith("ladder_")]
+    assert len(ladder) == 8  # baseline + one candidate round (1+3 frames)
+    assert d.persists == [(1, "char", 4, 0, ci)]
+
+
+def test_p2_ladder_clamps_candidates_to_half_a_character(tmp_path):
+    # The scan never pushes a char cell past half a character pitch: a
+    # candidate whose absolute value would exceed the clamp is skipped,
+    # and a fault that can only be cleared past the clamp stays
+    # unresolved - the cell is left exactly as it was, never written with
+    # a clamped wrong value.
+    d = FakeDisplay(total=4, charset=48)
+    d.flap_window = 4
+    ci = d.drum.index("E")
+    d.seed_char_error(0, ci, 15)   # base +15 (already off-centre)
+    d.seed_flap_error(0, ci, -30)  # still reads 'E', half, at 15 - 30
+    calib = VlmCalibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                          dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                          mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_flagged = ["E"]
+    calib._p2_fine()
+    assert d.char_off[0].get(ci, 0) == 15  # untouched
+    assert not d.persists
+    # Replaying the applied nudges (previews record applies AND reverts):
+    # the cell never leaves the half-pitch clamp. Positive candidates
+    # past +4 are skipped (|15 + 8| > 21) while the negative direction
+    # scans all the way to -20 (|15 - 20| <= 21).
+    value = 15
+    lo = hi = 15
+    for _, cell, delta in d.previews:
+        if cell < 0:
+            continue
+        value += delta
+        lo, hi = min(lo, value), max(hi, value)
+    assert lo == 15 - 20
+    assert hi == 15 + 4
+
+
 def test_ladder_filler_rotates_background_slots(tmp_path):
     # Regression (run-003 M0): a constant "E" filler stalls a misaligned
     # background module — target "E" physically showing "F" resolves to
@@ -911,6 +988,10 @@ def test_ladder_exhausted_guards_rotate_and_rescore(tmp_path):
     # a non-nudged plan must be scored FRESH each evaluate (the glyph
     # sequence changed), never from the cached score.
     d = FakeDisplay(total=4, charset=48)
+    # Keep the mover imperfect: a plan that reads perfect at baseline
+    # stops being probed (no candidate could beat it), and the rotation
+    # check needs a live evaluate on every round.
+    d.seed_flap_error(0, d.drum.index("E"), 20)
     calib = VlmCalibrator(d, FakeCamera(), SimReader(d),
                           photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
                           min_confidence=0.5, mode="full")

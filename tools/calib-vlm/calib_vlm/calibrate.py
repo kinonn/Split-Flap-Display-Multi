@@ -27,10 +27,10 @@ from .reader import (ModuleReading, ReaderError, Reading, annotate_modules,
 
 SUPPORTED_CONTRACT = 1
 # Wear/time budgets.
-MAX_FRAMES = 300
-MAX_VLM_CALLS = 300
-MAX_PREVIEWS = 200
-MAX_PERSISTS = 400
+MAX_FRAMES = 500
+MAX_VLM_CALLS = 500
+MAX_PREVIEWS = 300
+MAX_PERSISTS = 500
 MAX_SWEEPS = 3
 # Abort when the reader cannot be trusted: more than this many
 # unreliable/unreadable escalations means camera/framing/lighting is bad
@@ -38,6 +38,13 @@ MAX_SWEEPS = 3
 MAX_UNRELIABLE_READS = 5
 # Deltas tried per suspect cell (motor steps), coarse first.
 TRY_DELTAS = (4, -4, 2, -2, 8, -8, 1, -1)
+# P2 seam ladder: a per-character `half`/`double` flap reports no
+# magnitude, so candidate offsets are scanned in fixed motor-step
+# increments, up to half a character pitch (`stepsPerChar` / 2 - any
+# further and the flap sits too close to the neighbouring character).
+# A clean window narrower than the increment can fall between two
+# candidates, so the half-step probes follow as a fallback chain.
+P2_LADDER_STEP = 4
 # A module misaligned (half/double, identity still right) on this many
 # uniform frames is a whole-drum phase fault: tune the module cell once
 # instead of scattering per-char alignment searches across the drum.
@@ -121,6 +128,24 @@ DEFAULT_SKIP_CHARS = (".", "'", "-")
 def confusable(a: str, b: str) -> bool:
     """True when two glyphs cannot be told apart on the drum."""
     return a != b and b in CONFUSABLES.get(a, ())
+
+
+def _p2_ladder_steps(steps_per_char: int) -> list[int]:
+    """Signed candidate offsets for the P2 seam ladder.
+
+    Increments of P2_LADDER_STEP up to half a character pitch, coarse
+    first and alternating sign, then the narrow-window fallback (half the
+    increment, then one step). Each candidate is applied from the base,
+    so the smallest offset that clears the flap wins.
+    """
+    cap = max(1, steps_per_char // 2)
+    mags = list(range(P2_LADDER_STEP, cap + 1, P2_LADDER_STEP))
+    fine: list[int] = []
+    for mag in (P2_LADDER_STEP // 2, 1):
+        if mag and mag <= cap and mag not in mags and mag not in fine:
+            fine.append(mag)
+    return ([sign * mag for mag in mags for sign in (1, -1)]
+            + [sign * mag for mag in fine for sign in (1, -1)])
 
 
 def _preview_chunks(delta: int, limit: int = PREVIEW_DELTA_MAX) -> list[int]:
@@ -1053,7 +1078,10 @@ class VlmCalibrator:
         batch preview homes the touched modules in one pass, so the cost is
         `steps x frames`, not `plans x steps x frames`. A candidate is kept
         only when it raises the plan's score (targets correct+clean minus
-        guard breakage), so the smallest clearing shift wins.
+        guard breakage), so the smallest clearing shift wins. A cell that
+        reaches a perfect score stops being probed (later candidates can
+        only tie it), and an exhausted cell holds at its best offset
+        instead of snapping back toward the base every remaining round.
         """
         if not plans or self.mode == "dry-run":
             return set()
@@ -1194,13 +1222,23 @@ class VlmCalibrator:
             apply = []
             moved: set[int] = set()
             for p in plans:
-                step = p["steps"][index] if index < len(p["steps"]) else 0
-                candidate = step if p.get("absolute") else p["best"] + step
-                if p.get("cap_abs"):
-                    if abs(p["cap_base"] + candidate) > p["cap"]:
-                        candidate = p["best"]
-                elif abs(candidate) >= p["cap"]:
-                    candidate = p["best"]  # stay inside the safe window
+                step = p["steps"][index] if index < len(p["steps"]) else None
+                if step is None or p.get("settled"):
+                    # Exhausted list, or the cell already reads perfect:
+                    # hold at the best offset found. (The old
+                    # `... else 0` treated an exhausted ABSOLUTE plan as
+                    # candidate 0, poking the cell back toward the base and
+                    # back again every remaining round for plans with
+                    # fewer steps than the ladder's longest.)
+                    candidate = p["best"]
+                else:
+                    candidate = step if p.get("absolute") \
+                        else p["best"] + step
+                    if p.get("cap_abs"):
+                        if abs(p["cap_base"] + candidate) > p["cap"]:
+                            candidate = p["best"]
+                    elif abs(candidate) >= p["cap"]:
+                        candidate = p["best"]  # stay inside the safe window
                 p["candidate"] = candidate
                 diff = candidate - p["state"]
                 p["state"] = candidate
@@ -1222,6 +1260,12 @@ class VlmCalibrator:
                     if diff:
                         revert.append((p["group"], p["local"],
                                        p["char_index"], diff))
+                # A perfect score cannot be beaten (every target reads
+                # correct+clean with the guards intact): stop probing this
+                # cell so its remaining candidates cost nothing - no
+                # nudges, no re-reads (the cached score holds).
+                if p["best_score"] >= 3 * len(p["targets"]):
+                    p["settled"] = True
             self._batch_nudge(revert)
 
         improved = set()
@@ -1644,10 +1688,15 @@ class VlmCalibrator:
                         continue
                     # One-shot: the exact landing correction, then verify.
                     steps = [full]
+                    cap = CHAR_OFFSET_LIMIT
                 else:
                     # Right glyph, seam off-phase: the reader reports no
-                    # magnitude, so scan the fine ladder both directions.
-                    steps = [s * mag for mag in (1, 2, 4, 8) for s in (1, -1)]
+                    # magnitude, so scan the incremental ladder - candidate
+                    # offsets in steps of P2_LADDER_STEP up to half a
+                    # character pitch (the clamp: past that the flap sits
+                    # too close to the neighbouring character).
+                    steps = _p2_ladder_steps(self.steps_per_char)
+                    cap = max(1, self.steps_per_char // 2)
                 plans.append({
                     "module": m,
                     "group": self._group_of(m),
@@ -1655,7 +1704,7 @@ class VlmCalibrator:
                     "char_index": ci,
                     "steps": steps,
                     "absolute": True,
-                    "cap": CHAR_OFFSET_LIMIT,
+                    "cap": cap,
                     "targets": [ch],
                     "guards": guards,
                     "state": 0,

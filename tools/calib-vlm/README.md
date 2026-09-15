@@ -148,8 +148,13 @@ committed P1 base:
   `_drum_delta(seen, c) * stepsPerChar`; if the resulting absolute value would
   exceed the firmware's +/-32 clamp, escalate as hardware.
 - **right glyph, `half`/`double`** -> the reader reports no magnitude, so scan
-  the fine ladder `+/-1/2/4/8` on the char cell (parallel across cells) and
-  keep the first clean value.
+  the **incremental ladder** on the char cell (parallel across cells):
+  candidate offsets `+/-4/8/12/16/20` motor steps — increments of 4 up to
+  half a character pitch, the clamp past which the flap sits too close to
+  the neighbouring character — and keep the smallest offset that reads
+  clean. A cell that reads clean stops being probed (the rest of its scan
+  could only tie it), and a clean window narrower than the increment is
+  covered by the `+/-2, +/-1` fallback probes.
 
 Char-cell deltas are chunked to +/-32 within one batch pass, the flagged frames
 are re-read to verify, and the confirmed char cells are committed.
@@ -201,11 +206,15 @@ the shift/purity table (no writes).
   and the score is `target read correct+clean` per target minus a penalty
   per broken guard glyph, so a candidate is kept only when it beats the
   cell's baseline — a non-improving nudge is reverted before the next
-  step. Candidates are coarse-to-fine: sub-pitch fractions of one
+  step. A cell that reaches a perfect score stops being probed (later
+  candidates could only tie it) and an exhausted cell holds at its best
+  offset. Candidates are coarse-to-fine: sub-pitch fractions of one
   character for boundary flaps, `+4, -4, +2, -2, +8, -8, +1, -1` motor
   steps for a whole-drum seam (identity right, several cells reading
-  half/double), the exact signed-minimal identity delta for a
-  per-character P2 fault.
+  half/double), the incremental `+/-4/8/12/16/20` scan (increments of 4 up
+  to half a character pitch, `+/-2, +/-1` as the narrow-window fallback)
+  for a per-character `half`/`double` flap, and the exact signed-minimal
+  identity delta for a per-character P2 fault.
 - P1 runs a **parallel sub-pitch module trim** before any per-character
   cell is touched: a module wrong on only a few glyphs is usually a
   boundary/phase problem, so candidates `0.75/0.5/0.25/0.125` of one
