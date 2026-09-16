@@ -107,12 +107,24 @@ class VLMClient:
         raise VLMError(last)
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
-             tool_choice: str | None = None) -> dict:
+             tool_choice: str | None = None,
+             max_tokens: int | None = None) -> dict:
         """Returns the assistant message: {"content": str|None,
-        "tool_calls": [{"id": str, "name": str, "arguments": dict}]}."""
+        "tool_calls": [{"id": str, "name": str, "arguments": dict}]}.
+
+        ``max_tokens`` caps this one generation (None = server default).
+        Callers that only need a short answer (e.g. a 12-character OCR
+        read) should cap it: a model that degenerates into a repetition
+        loop — observed with greedy decoding on rows of one repeated
+        character — otherwise runs to the server's default limit, which
+        costs seconds per frame for output nobody reads. Cross-checked
+        with mlx-vlm's OpenAI schema: max_tokens is per-request.
+        """
         import json
 
         payload: dict = {"model": self.model, "messages": messages}
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
         if tools:
             payload["tools"] = tools
             if self._allow_forced_tool_choice:
