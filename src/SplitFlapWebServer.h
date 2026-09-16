@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CalibApi.h"
 #include "JsonSettings.h"
 #include "PendingActions.h"
 #include "SplitFlapDisplay.h"
@@ -11,6 +12,8 @@
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <atomic>
+#include <mutex>
 #include <time.h>
 
 class SplitFlapEspNow;
@@ -64,6 +67,30 @@ class SplitFlapWebServer {
 
     void setEspNow(SplitFlapEspNow *espNow) { this->espNow = espNow; }
 
+    // Calibration API state (vision-guided auto-calibration, see
+    // tools/calib-agent/PRODUCTION.md). The web (AsyncTCP) task only stages
+    // show/preview work in PendingActions; the loop task drains it and owns
+    // the display, then flips these flags. All cross-task members are
+    // atomic or mutex-guarded.
+    bool getCalibBusy() const { return calibBusy_.load(std::memory_order_acquire); }
+    void setCalibBusy(bool busy) { calibBusy_.store(busy, std::memory_order_release); }
+    // Busy covers actively-executing calibration work AND work still queued
+    // in the PendingActions mailbox (not yet picked up by the loop task), so
+    // status polls in the queue-to-pickup gap never see busy==false with a
+    // stale lastFrameId. Reload/push drains and outstanding remote push
+    // acks are included: a persist re-homes motors (locally and on pushed
+    // remotes) for seconds after the HTTP 200. Defined in
+    // SplitFlapWebServer.cpp (needs the complete SplitFlapEspNow type).
+    bool isCalibBusy();
+    int getCalibFrameId() const { return calibFrameId_.load(std::memory_order_acquire); }
+    int nextCalibFrameId() { return calibFrameId_.fetch_add(1) + 1; }
+    String getCalibLastFrame();
+    void setCalibLastFrame(const String &frame, int frameId);
+    int getCalibLastFrameId();
+    // Total fleet width (local modules in single-group mode, sum across
+    // groups when the master is enabled). Used to validate show frames.
+    int getCalibTotalModules();
+
     // Cross-task mailbox: web handlers only REQUEST deferred work here; the
     // Arduino loop task drains it and performs the actual display/ESP-NOW
     // work as the single owner of the I2C bus (see PendingActions.h).
@@ -104,4 +131,19 @@ class SplitFlapWebServer {
     int wifiCheckInterval;
     PendingActions pendingActions_;
     AsyncWebServer server; // Declare server as a class member
+
+    // Calibration show/preview completion state. Written by the loop task
+    // after it finishes display work, read by the AsyncTCP status/frame
+    // handlers.
+    std::atomic<bool> calibBusy_{false};
+    std::atomic<int> calibFrameId_{0};
+    std::mutex calibMutex_;
+    String calibLastFrame_;
+    int calibLastFrameId_ = 0;
+    // Mode to restore when calibration hold is released (issue
+    // kinonn-bot#35). Saved on engage; never-engaged falls back to 0.
+    // Guarded by calibMutex_ (web task only).
+    CalibHoldTracker calibHold_;
+
+    void registerCalibRoutes();
 };

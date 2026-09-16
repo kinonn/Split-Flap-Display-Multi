@@ -1,5 +1,7 @@
-# Automatically normalize line endings for all text files (recommends LF in repo)
-* text=auto
+# Normalize line endings to LF in both the repository and the working tree.
+# Prevents CRLF checkouts on Windows, which conflict with .editorconfig and
+# prettier (endOfLine: lf) and cause phantom "modified" git status entries.
+* text=auto eol=lf
 
 # Shell scripts must strictly use LF to execute on macOS/Linux
 *.sh text eol=lf

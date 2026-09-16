@@ -29,6 +29,7 @@ extern int g_publishCalls;
 extern PubSubClient *g_lastClient;
 extern int g_distributeCalls;
 extern std::string g_lastDistributed;
+extern bool g_lastDistributeCalib;
 extern int g_writeStringCalls;
 extern std::string g_lastWritten;
 extern float g_lastWriteSpeed;
@@ -58,6 +59,10 @@ static std::map<String, JsonSetting> testSchema() {
         {"masterGroupCount", JsonSetting(1)},
         {"maxVel", JsonSetting(15.0f)},
         {"moduleCount", JsonSetting(8)},
+        // Calibration hold (mode 4) is read by the real processPendingMessage()
+        // before it dispatches staged text (kinonn-bot#43): without it the
+        // production path throws Key-not-found out of the settings stub.
+        {"mode", JsonSetting(0)},
     };
 }
 
@@ -132,6 +137,9 @@ int main() {
         mqtt.loop();
         CHECK(g_distributeCalls == 1);
         CHECK(g_lastDistributed == "fleet message");
+        // A staged MQTT message is not a calibration show: it must not arm
+        // the fleet ack fence that /api/calib/show relies on (kinonn-bot#42).
+        CHECK(g_lastDistributeCalib == false);
         CHECK(g_writeStringCalls == 0); // multi-group: no local writeString
         CHECK(g_publishCalls >= 1);     // state topic still published
     }
