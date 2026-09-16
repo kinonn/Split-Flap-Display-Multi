@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Split-Flap OCR Benchmark</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #141414; color: #eee;
+         margin: 0 auto; max-width: 1100px; padding: 16px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; }
+  h3 { font-size: .95rem; margin: 12px 0 4px; color: #ccc; }
+  .card { background: #1f1f1f; border-radius: 10px; padding: 14px; margin: 12px 0; }
+  label { display: block; margin: 8px 0 2px; font-size: .9rem; color: #bbb; }
+  input, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444;
+                  background: #111; color: #eee; box-sizing: border-box; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  button { padding: 9px 14px; border: 0; border-radius: 6px; margin: 6px 6px 0 0;
+           cursor: pointer; font-weight: 600; }
+  .go { background: #2e7d32; color: #fff; } .stop { background: #b3261e; color: #fff; }
+  .mid { background: #455a64; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .hint { color: #999; font-size: .85rem; }
+  code { font-size: .95rem; }
+  #log { height: 220px; overflow-y: auto; background: #0d0d0d; border-radius: 6px;
+         padding: 8px; font-family: monospace; font-size: .8rem; }
+  #log .err { color: #ff8a80; } #log .ok { color: #a5d6a7; }
+  #log .run { color: #82b1ff; } #log .warn { color: #ffcc80; }
+  #report { white-space: pre-wrap; font-family: monospace; font-size: .8rem;
+            background: #0d0d0d; border-radius: 6px; padding: 8px; max-height: 320px;
+            overflow-y: auto; }
+  .tablewrap { max-height: 420px; overflow: auto; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+  #rowsTable { font-family: monospace; }
+  th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #2c2c2c;
+           white-space: nowrap; }
+  th { position: sticky; top: 0; background: #263238; z-index: 1; }
+  tr.rowsel { background: #333c44; cursor: pointer; }
+  td.mono, th.mono { font-family: monospace; }
+  .mm0 { color: #81c784; font-weight: 700; }
+  .mm1 { color: #ffd54f; font-weight: 700; }
+  .mmX { color: #ef5350; font-weight: 700; }
+  .muted { color: #777; }
+  .chip { display: inline-block; padding: 3px 9px; margin: 2px; border-radius: 12px;
+          font-size: .78rem; font-family: monospace; background: #263238; }
+  .chip.match { outline: 2px solid #66bb6a; } .chip.mismatch { outline: 2px solid #ef5350; }
+  .chip.unreadable { background: #4e342e; } .chip.blank { background: #37474f; }
+  .chip.inferred { opacity: .75; }
+  .flag { display: inline-block; background: #4e342e; color: #ffcc80; border-radius: 8px;
+          padding: 1px 7px; margin-right: 4px; font-size: .72rem; }
+  .hist { display: flex; align-items: center; gap: 6px; font-family: monospace;
+          font-size: .75rem; margin: 1px 0; }
+  .hist .hl { width: 22px; text-align: right; color: #999; }
+  .hist .bar { height: 12px; border-radius: 3px; min-width: 2px; }
+  .hist .bar.vlm { background: #64b5f6; } .hist .bar.saw { background: #8d6e63; }
+  .hist .cnt { color: #bbb; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .good { color: #81c784; } .bad { color: #ef5350; } .warnc { color: #ffd54f; }
+  #summary b { color: #fff; }
+  #detailImg { max-width: 100%; border-radius: 6px; border: 1px solid #444; }
+</style>
+</head>
+<body>
+<h1>Split-Flap OCR Benchmark <span class="hint">(VLM reads vs recorded baseline)</span></h1>
+
+<div class="card">
+  <h2>1. Configure</h2>
+  <div class="row">
+    <div><label>Reader provider preset</label>
+      <select id="preset">
+        <option value="https://opencode.ai/zen/go/v1">OpenCode Go</option>
+        <option value="https://api.openai.com/v1">OpenAI</option>
+        <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+        <option value="http://localhost:11434/v1">Ollama (local)</option>
+        <option value="custom">Custom URL…</option>
+      </select></div>
+    <div><label>Model (must support vision + tool calling)</label>
+      <input id="llm_model" placeholder="deepseek-v4-flash-vision-exp" /></div>
+  </div>
+  <label>Base URL</label><input id="llm_base_url" />
+  <label>API key (stored server-side, never shown)</label>
+  <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off" />
+  <div class="row3">
+    <div><label>Module count (expected read width)</label>
+      <input id="module_count" type="number" min="1" max="64" /></div>
+    <div><label>Parallel VLM calls</label>
+      <input id="concurrency" type="number" min="1" max="8" /></div>
+    <div></div>
+  </div>
+  <div class="row">
+    <div><label>Read mode</label>
+      <select id="read_mode">
+        <option value="auto">Auto — tool call, falls back to OCR text</option>
+        <option value="tool">Tool call only (needs function calling)</option>
+        <option value="text">OCR text only (e.g. PaddleOCR)</option>
+      </select></div>
+    <div><label>OCR prompt (text mode)</label>
+      <input id="ocr_prompt" spellcheck="false" placeholder="OCR:" /></div>
+  </div>
+  <div class="row">
+    <div><label>Image max width (text mode)</label>
+      <input id="image_max_width" type="number" min="256" max="4096" /></div>
+    <div><label>JPEG quality (text mode, 1-100)</label>
+      <input id="image_quality" type="number" min="1" max="100" /></div>
+  </div>
+  <div class="row">
+    <div><label>Image format (text mode)</label>
+      <select id="image_format">
+        <option value="jpeg">JPEG</option>
+        <option value="png">PNG (lossless)</option>
+      </select></div>
+    <div><label>Max output tokens (text mode, 0 = uncapped)</label>
+      <input id="ocr_max_tokens" type="number" min="0" max="4096" /></div>
+  </div>
+  <p class="hint">These apply to the OCR text path only — the tool-call
+     path keeps production parity (1024 px, q80, annotated photo). A low
+     token cap keeps repetition-loop rows fast; the parser only reads the
+     first characters anyway.</p>
+  <label>Charset (allowed drum characters — space first)</label>
+  <input id="charset" spellcheck="false" />
+  <div><button class="mid" onclick="save()">Save</button></div>
+  <p class="hint" id="cfgmsg"></p>
+</div>
+
+<div class="card">
+  <h2>2. Dataset</h2>
+  <p class="hint">A JSONL file with one record per line:
+    <code>{"photo": "sw_37_f255.png", "want": "%%%%%%%%%%%%", "saw": "%%%%%%%#%%%%"}</code>.
+    Photos are expected in the same directory.</p>
+  <div class="row">
+    <div><label>Directory (holds reads.jsonl + photos)</label>
+      <input id="dataset_dir" spellcheck="false" /></div>
+    <div><label>File name</label><input id="dataset_file" placeholder="reads.jsonl" /></div>
+  </div>
+  <div>
+    <button class="mid" onclick="discover()">Discover run dirs</button>
+    <button class="mid" onclick="validateDataset()">Validate</button>
+  </div>
+  <label>Discovered datasets (from sibling tool run dirs)</label>
+  <select id="discover_list" onchange="pickDiscovered()">
+    <option value="">—</option>
+  </select>
+  <p class="hint" id="dsmsg"></p>
+</div>
+
+<div class="card">
+  <h2>3. Run</h2>
+  <div class="row">
+    <div><label>Quick test: only first N rows (empty = all)</label>
+      <input id="run_limit" type="number" min="1" placeholder="all" /></div>
+    <div></div>
+  </div>
+  <div>
+    <button class="go" id="startBtn" onclick="start()">Start benchmark</button>
+    <button class="stop" onclick="abort()">Abort</button>
+  </div>
+  <p class="hint" id="runmsg"></p>
+</div>
+
+<div class="card">
+  <h2>4. Summary <span class="hint">(VLM vs baseline)</span></h2>
+  <div id="summary" class="hint">No run yet.</div>
+</div>
+
+<div class="card" id="detailCard" style="display:none">
+  <h2>Inspect: <span id="detailTitle"></span></h2>
+  <img id="detailImg" alt="Dataset photo" />
+  <p class="hint" id="detailMeta"></p>
+  <p>want: <code id="detailWant"></code> &nbsp; baseline: <code id="detailSaw"></code>
+     &nbsp; read: <code id="detailRead"></code></p>
+  <div id="detailChips"></div>
+  <p class="hint" id="detailRaw"></p>
+  <p class="hint" id="detailWarnings"></p>
+</div>
+
+<div class="card">
+  <h2>5. Rows <span class="hint" id="rowcount"></span></h2>
+  <div class="tablewrap">
+    <table id="rowsTable">
+      <thead><tr>
+        <th>#</th><th>photo</th><th>want</th><th>read</th>
+        <th>baseline</th><th>VLM errs</th><th>baseline errs</th><th>time (s)</th><th>flags</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>6. Past runs</h2>
+  <div><button class="mid" onclick="loadRuns()">Refresh</button></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>run</th><th>status</th><th>model</th><th>photos</th>
+        <th>VLM total</th><th>VLM avg</th><th>baseline total</th><th>baseline avg</th><th>avg time (s)</th>
+      </tr></thead>
+      <tbody id="runs"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>7. Log</h2>
+  <div id="log"></div>
+</div>
+
+<div class="card">
+  <h2>8. Report</h2>
+  <div>
+    <button class="mid" onclick="downloadJson()">Download report JSON</button>
+    <button class="mid" onclick="downloadCsv()">Download rows CSV</button>
+  </div>
+  <div id="report">–</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",
+    '"':"&quot;","'":"&#39;"}[c]));
+}
+function showCh(ch) { return ch === " " ? "\u2423" : ch; }
+function showStr(s) { return s === null || s === undefined ? "" : [...String(s)].map(showCh).join(""); }
+function mmClass(v) { return v === 0 ? "mm0" : (v === 1 ? "mm1" : "mmX"); }
+
+async function load() {
+  const c = await api("/api/config");
+  $("llm_model").value = c.llm_model || "";
+  $("llm_base_url").value = c.llm_base_url || "";
+  $("dataset_dir").value = c.dataset_dir || "";
+  $("dataset_file").value = c.dataset_file || "reads.jsonl";
+  $("module_count").value = c.module_count ?? 12;
+  $("concurrency").value = c.concurrency ?? 1;
+  $("read_mode").value = c.read_mode || "auto";
+  $("ocr_prompt").value = c.ocr_prompt || "OCR:";
+  $("image_max_width").value = c.image_max_width ?? 1024;
+  $("image_quality").value = c.image_quality ?? 80;
+  $("image_format").value = c.image_format || "jpeg";
+  $("ocr_max_tokens").value = c.ocr_max_tokens ?? 128;
+  $("charset").value = c.charset ?? "";
+  const known = [...$("preset").options].map((o) => o.value);
+  $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
+}
+$("preset").onchange = () => {
+  if ($("preset").value !== "custom") $("llm_base_url").value = $("preset").value;
+};
+function cfgPayload() {
+  return {
+    llm_base_url: $("llm_base_url").value.trim(),
+    llm_model: $("llm_model").value.trim(),
+    llm_api_key: $("llm_api_key").value,
+    dataset_dir: $("dataset_dir").value.trim(),
+    dataset_file: $("dataset_file").value.trim() || "reads.jsonl",
+    charset: $("charset").value,
+    module_count: Number($("module_count").value || 12),
+    concurrency: Number($("concurrency").value || 1),
+    read_mode: $("read_mode").value,
+    ocr_prompt: $("ocr_prompt").value.trim() || "OCR:",
+    image_max_width: Number($("image_max_width").value || 1024),
+    image_quality: Number($("image_quality").value || 80),
+    image_format: $("image_format").value,
+    ocr_max_tokens: Number($("ocr_max_tokens").value ?? 128),
+  };
+}
+async function save() {
+  try {
+    await api("/api/config", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(cfgPayload())});
+    $("cfgmsg").textContent = "Saved.";
+    $("llm_api_key").value = "";
+  } catch (e) { $("cfgmsg").textContent = "Save failed: " + e.message; }
+}
+async function discover() {
+  try {
+    const s = await api("/api/dataset/discover");
+    const sel = $("discover_list");
+    sel.innerHTML = '<option value="">—</option>';
+    for (const d of s.dirs) {
+      const o = document.createElement("option");
+      o.value = d; o.textContent = d; sel.appendChild(o);
+    }
+    if (!s.dirs.length) $("dsmsg").textContent = "No sibling run dirs found; type the path directly.";
+  } catch (e) { $("dsmsg").textContent = "Discover failed: " + e.message; }
+}
+function pickDiscovered() {
+  const v = $("discover_list").value;
+  if (v) $("dataset_dir").value = v;
+}
+async function validateDataset() {
+  try {
+    await save();
+    const d = await api("/api/dataset/validate", {method: "POST"});
+    const w = d.widths ? `${d.widths.min}..${d.widths.max}` : "?";
+    const pref = d.prefixes.map((p) => `${p.prefix}(${p.rows})`).join(" ");
+    $("dsmsg").textContent =
+      `${d.rows} rows (${d.runnable} runnable) · width ${w} · ` +
+      `${d.missing_count} missing photo(s) · ${d.problems_count} bad line(s) · ` +
+      `${d.flagged_count} flagged · prefixes: ${pref}`;
+    if (d.problems.length) $("dsmsg").textContent += " | " + d.problems.slice(0, 3).join(" | ");
+  } catch (e) { $("dsmsg").textContent = "Validate failed: " + e.message; }
+}
+async function start() {
+  try {
+    await save();
+    const limit = $("run_limit").value;
+    await api("/api/run/start", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({limit: limit ? Number(limit) : null})});
+    $("runmsg").textContent = "Running…";
+  } catch (e) { $("runmsg").textContent = "Start failed: " + e.message; }
+}
+async function abort() { await api("/api/run/abort", {method: "POST"}); }
+
+let rowsData = [];
+let lastRunSeq = null, lastDone = -1, lastSummaryRun = null, lastReportRun = null;
+
+function renderRows() {
+  const tbody = $("rows");
+  tbody.innerHTML = "";
+  $("rowcount").textContent = `(${rowsData.length})`;
+  for (const r of rowsData) {
+    const tr = document.createElement("tr");
+    const flags = (r.flags || []).map((f) => `<span class="flag">${esc(f)}</span>`).join("");
+    const readCell = r.error
+      ? `<span class="bad">${esc(r.error)}</span>`
+      : `<span class="mono">${esc(showStr(r.read))}</span>`;
+    const mmV = r.mm_vlm === null || r.mm_vlm === undefined ? "–"
+      : `<span class="${mmClass(r.mm_vlm)}">${r.mm_vlm}</span>`;
+    const mmS = r.mm_saw === null || r.mm_saw === undefined ? "–"
+      : `<span class="${r.mm_saw === 0 ? "mm0" : (r.mm_saw === 1 ? "mm1" : "mmX")}">${r.mm_saw}</span>`;
+    const timeCell = r.elapsed_s === null || r.elapsed_s === undefined ? "–" : r.elapsed_s;
+    tr.innerHTML = `<td>${r.index + 1}</td><td>${esc(r.photo)}</td>` +
+      `<td>${esc(showStr(r.want))}</td><td>${readCell}</td>` +
+      `<td>${esc(showStr(r.saw))}</td><td>${mmV}</td><td>${mmS}</td>` +
+      `<td>${timeCell}</td><td>${flags}</td>`;
+    tr.onclick = () => inspect(r.index);
+    tbody.appendChild(tr);
+  }
+}
+
+async function inspect(index) {
+  try {
+    const r = await api("/api/run/row/" + index);
+    $("detailCard").style.display = "block";
+    $("detailTitle").textContent = `${r.index + 1}: ${r.photo}`;
+    $("detailImg").src = "/api/dataset/photo/" + encodeURIComponent(r.photo) + "?t=" + Date.now();
+    const mm = r.error ? `error: ${r.error}` :
+      `VLM ${r.mm_vlm} mismatch(es) · baseline ${r.mm_saw} · ${r.elapsed_s}s`;
+    $("detailMeta").textContent = mm +
+      (r.read_mode ? ` · ${r.read_mode} read` : "") +
+      (r.adjusted ? " · adjusted" : "") +
+      (r.realigned ? " · realigned" : "");
+    $("detailRaw").textContent = r.raw ? "raw reply: " + r.raw : "";
+    $("detailWant").textContent = JSON.stringify(r.want_norm ?? r.want);
+    $("detailSaw").textContent = JSON.stringify(r.saw_norm ?? "");
+    $("detailRead").textContent = JSON.stringify(r.read_norm ?? r.read ?? "");
+    const chips = $("detailChips");
+    chips.innerHTML = "";
+    const want = r.want_norm || r.want || "";
+    (r.modules || []).forEach((m, i) => {
+      const el = document.createElement("span");
+      const exp = want[i] ?? "?";
+      const match = m.char === exp && m.source !== "error";
+      el.className = "chip " + (m.condition || "") + (match ? " match" : " mismatch") +
+        (m.source === "inferred" ? " inferred" : "");
+      const conf = m.source === "text" ? "" : ` ${(m.confidence ?? 0).toFixed(2)}`;
+      el.textContent = `m${i} want '${showCh(exp)}' → '${showCh(m.char)}' ` +
+        `${m.condition}${conf}` +
+        (m.source === "inferred" ? " [inferred]" : "");
+      chips.appendChild(el);
+    });
+    if (!r.modules?.length) chips.innerHTML = '<span class="muted">no module readings (read failed)</span>';
+    $("detailWarnings").textContent = (r.warnings || []).join("; ");
+    document.querySelectorAll("#rows tr").forEach((tr) => tr.classList.remove("rowsel"));
+  } catch (e) {
+    $("detailMeta").textContent = "Inspect failed: " + e.message;
+    $("detailCard").style.display = "block";
+  }
+}
+
+function renderSummary(s) {
+  const v = s.vlm || {}, b = s.saw || {}, h = s.head_to_head || {};
+  const rowsHtml = `
+    <table>
+      <thead><tr><th>method</th><th>rows</th><th>total errs</th><th>avg errs</th>
+        <th>median</th><th>exact</th><th>exact %</th></tr></thead>
+      <tbody>
+        <tr><td>VLM read</td><td>${v.n ?? 0}</td><td>${v.total ?? "–"}</td>
+            <td>${v.mean ?? "–"}</td><td>${v.median ?? "–"}</td>
+            <td>${v.exact ?? 0}</td><td>${v.exact_pct ?? "–"}</td></tr>
+        <tr><td>baseline</td><td>${b.n ?? 0}</td><td>${b.total ?? "–"}</td>
+            <td>${b.mean ?? "–"}</td><td>${b.median ?? "–"}</td>
+            <td>${b.exact ?? 0}</td><td>${b.exact_pct ?? "–"}</td></tr>
+      </tbody>
+    </table>`;
+  const histKeys = Object.keys(v.histogram || {});
+  const maxHist = Math.max(1, ...histKeys.map((k) =>
+    Math.max(v.histogram[k] || 0, (b.histogram || {})[k] || 0)));
+  const histHtml = histKeys.map((k) => {
+    const vc = (v.histogram || {})[k] || 0, sc = (b.histogram || {})[k] || 0;
+    return `<div class="hist"><span class="hl">${k}</span>
+      <span class="bar vlm" style="width:${(vc / maxHist) * 260}px"></span>
+      <span class="cnt">${vc}</span>
+      <span class="bar saw" style="width:${(sc / maxHist) * 260}px"></span>
+      <span class="cnt">${sc}</span></div>`;
+  }).join("");
+  const posV = v.per_position || [], posS = b.per_position || [];
+  const posHtml = `<table><thead><tr><th>position</th>` +
+    posV.map((_, i) => `<th>${i}</th>`).join("") + `</tr></thead><tbody>` +
+    `<tr><td>VLM %</td>` + posV.map((p) => `<td>${p ?? "–"}</td>`).join("") + `</tr>` +
+    `<tr><td>baseline %</td>` + posS.map((p) => `<td>${p ?? "–"}</td>`).join("") + `</tr>` +
+    `</tbody></table>`;
+  const delta = h.delta_mean === null || h.delta_mean === undefined ? "–"
+    : (h.delta_mean > 0 ? `<span class="good">+${h.delta_mean}</span>`
+       : (h.delta_mean < 0 ? `<span class="bad">${h.delta_mean}</span>` : "0"));
+  const confHtml = (s.confusions || []).length
+    ? `<table><thead><tr><th>want</th><th>read</th><th>count</th></tr></thead><tbody>` +
+      s.confusions.map((c) => `<tr><td class="mono">'${esc(showCh(c.want))}'</td>
+        <td class="mono">'${esc(showCh(c.got))}'</td><td>${c.count}</td></tr>`).join("") +
+      `</tbody></table>` : '<span class="muted">none</span>';
+  const prefHtml = (s.prefixes || []).length
+    ? `<table><thead><tr><th>prefix</th><th>rows</th><th>VLM avg</th><th>baseline avg</th>
+        <th>VLM exact</th><th>VLM exact %</th></tr></thead><tbody>` +
+      s.prefixes.map((p) => `<tr><td>${esc(p.prefix)}</td><td>${p.rows}</td>
+        <td>${p.vlm_avg ?? "–"}</td><td>${p.saw_avg ?? "–"}</td>
+        <td>${p.vlm_exact ?? 0}</td><td>${p.vlm_exact_pct ?? "–"}</td></tr>`).join("") +
+      `</tbody></table>` : '<span class="muted">none</span>';
+  const verdict = (v.total !== null && v.total !== undefined && b.total !== null && b.total !== undefined)
+    ? (v.total < b.total
+        ? `<span class="good">VLM better</span> by ${b.total - v.total} mismatch(es)`
+        : (v.total > b.total ? `<span class="bad">VLM worse</span> by ${v.total - b.total} mismatch(es)`
+           : "VLM equal to baseline"))
+    : "–";
+  $("summary").innerHTML = `
+    <p><b>VLM</b> total ${v.total ?? "–"} mismatches (avg ${v.mean ?? "–"}) vs
+       <b>baseline</b> total ${b.total ?? "–"} (avg ${b.mean ?? "–"}) over
+       ${s.scored_vlm ?? 0} scored rows — ${verdict}.</p>
+    ${rowsHtml}
+    <div class="cols">
+      <div><h3>Mismatch histogram <span class="hint">(VLM vs baseline rows per count)</span></h3>${histHtml}</div>
+      <div><h3>Per-position mismatch rate %</h3>${posHtml}
+        <h3>Head-to-head</h3>
+        <p>better ${h.better ?? 0} · equal ${h.equal ?? 0} · worse ${h.worse ?? 0}
+           · mean Δ(baseline−VLM) ${delta}</p></div>
+    </div>
+    <div class="cols">
+      <div><h3>Top confusion pairs (VLM)</h3>${confHtml}</div>
+      <div><h3>By photo-name prefix</h3>${prefHtml}</div>
+    </div>
+    <p class="hint">rows attempted ${s.rows ?? 0} · scored VLM ${s.scored_vlm ?? 0} ·
+       scored baseline ${s.scored_saw ?? 0} · errors ${s.errors ?? 0} ·
+       adjusted ${s.adjusted ?? 0}</p>`;
+}
+
+async function loadRuns() {
+  try {
+    const s = await api("/api/runs");
+    const tbody = $("runs");
+    tbody.innerHTML = "";
+    for (const r of s.runs) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${esc(r.run)}</td><td>${esc(r.status ?? "")}</td>
+        <td>${esc(r.llm_model ?? "")}</td><td>${r.scored_vlm ?? "–"}</td>
+        <td>${r.vlm_total ?? "–"}</td><td>${r.vlm_avg ?? "–"}</td>
+        <td>${r.saw_total ?? "–"}</td><td>${r.saw_avg ?? "–"}</td>
+        <td>${r.avg_time_s ?? "–"}</td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+let seenEvents = 0;
+function appendLogEvent(e) {
+  const log = $("log");
+  const div = document.createElement("div");
+  if (e.kind === "error") div.className = "err";
+  else if (e.kind === "done") div.className = "ok";
+  else if (e.kind === "run") div.className = "run";
+  div.textContent = `[${e.t}${e.elapsed != null ? ` +${e.elapsed}s` : ""}] ${e.kind}: ${e.text}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function downloadJson() {
+  api("/api/run/report").then((rep) => {
+    download("ocr-vlm-report.json", JSON.stringify(rep, null, 2), "application/json");
+  });
+}
+function downloadCsv() {
+  const head = "index,photo,want,read,saw,mm_vlm,mm_saw,flags,error\n";
+  const body = rowsData.map((r) => [r.index, r.photo, r.want, r.read ?? "", r.saw ?? "",
+    r.mm_vlm ?? "", r.mm_saw ?? "", (r.flags || []).join(" "), r.error ?? ""]
+    .map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+  download("ocr-vlm-rows.csv", head + body, "text/csv");
+}
+function download(name, text, type) {
+  const blob = new Blob([text], {type});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function poll() {
+  try {
+    const s = await api("/api/run/state");
+    if (lastRunSeq !== null && s.run_seq !== lastRunSeq) {
+      rowsData = []; renderRows();
+      $("summary").innerHTML = "No run yet.";
+      $("report").textContent = "–";
+      $("detailCard").style.display = "none";
+      $("log").innerHTML = "";
+      seenEvents = 0; lastDone = -1; lastSummaryRun = null; lastReportRun = null;
+    }
+    lastRunSeq = s.run_seq;
+
+    // Full log via /api/run/events paging (state only carries the tail).
+    try {
+      let off = seenEvents;
+      for (;;) {
+        const page = await api("/api/run/events?offset=" + off + "&limit=500");
+        if (page.offset !== off) break;
+        for (const e of page.events) appendLogEvent(e);
+        off = page.offset + page.events.length;
+        if (off >= page.total || !page.events.length) break;
+      }
+      seenEvents = off;
+    } catch (e) { /* keep rendered tail */ }
+
+    if (s.done !== lastDone) {
+      lastDone = s.done;
+      const r = await api("/api/run/rows");
+      rowsData = r.rows;
+      renderRows();
+    }
+    if (s.summary && s.run_seq !== lastSummaryRun) {
+      lastSummaryRun = s.run_seq;
+      renderSummary(s.summary);
+    }
+    if (["done", "aborted", "failed"].includes(s.status) && s.run_seq !== lastReportRun) {
+      lastReportRun = s.run_seq;
+      try { $("report").textContent = JSON.stringify(await api("/api/run/report"), null, 2); }
+      catch (e) { /* ignore */ }
+      loadRuns();
+    }
+    const ds = s.dataset && s.dataset.path ? ` · ${s.dataset.path}` : "";
+    $("runmsg").textContent = `status: ${s.status} · ${s.done}/${s.total} rows · ` +
+      `${s.errors} error(s)${ds}`;
+    $("startBtn").disabled = s.status === "running" || s.status === "aborting";
+  } catch (e) { /* server restarting? keep polling */ }
+  setTimeout(poll, 1500);
+}
+
+load();
+loadRuns();
+poll();
+</script>
+</body>
+</html>

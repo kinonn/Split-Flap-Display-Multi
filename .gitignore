@@ -9,6 +9,9 @@ tools/calib-agent/app/.venv/
 tools/calib-vlm/.venv/
 tools/calib-vlm/data/
 tools/calib-vlm/.pytest_cache/
+tools/ocr-vlm/.venv/
+tools/ocr-vlm/data/
+tools/ocr-vlm/.pytest_cache/
 __pycache__/
 .idea
 calib-ui-data/
