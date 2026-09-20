@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn>=0.30",
     "opencv-python-headless>=4.8",
     "splitflap-calib-vlm",
+    "torch>=2.14.0",
 ]
 
 [project.scripts]

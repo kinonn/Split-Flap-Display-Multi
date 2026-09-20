@@ -1,0 +1,49 @@
+[project]
+name = "splitflap-calib-auto"
+version = "0.1.0"
+description = "Unified standalone auto-calibration tool: CNN or VLM recognizer, golden-set curation, CNN training, VLM benchmarking"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.26",
+    "requests>=2.31",
+    "torch>=2.2",
+]
+
+[project.scripts]
+calib-auto-server = "calib_auto.server:main"
+
+# PyTorch CUDA builds live on a dedicated index, not PyPI (PyPI only
+# ships CPU wheels for Windows/macOS). Route torch to the CUDA index on
+# Linux/Windows so `uv sync` installs GPU-enabled builds; macOS falls
+# back to PyPI (no CUDA builds published for it). CPU-only machines
+# still work — CUDA torch runs fine on CPU, it is just a bigger
+# download. See https://docs.astral.sh/uv/guides/integration/pytorch/
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["calib_auto"]

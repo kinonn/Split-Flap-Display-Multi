@@ -23,6 +23,14 @@ that is shorter/longer than the display width is padded/truncated and
 flagged — the same policy as the tool reader, never a silently dropped
 row. Positional blanks that an OCR text output does not encode are
 therefore lost: the row keeps the raw reply and reads worse, honestly.
+
+Detected modes (``montage``, ``cells-detect``, ``strip-detect``) first
+locate the display with OpenCV (``ocr_vlm/segment.py``) and use the real
+module grid, so per-module reads are position-exact, per-cell crops are
+centred, blanks are decided locally (no model call, no blank
+hallucination), and the image can be normalized before it is sent. When
+the display is not detected the read falls back to the plain strip path
+and the row is flagged ``no-detect``.
 """
 
 from __future__ import annotations
@@ -38,7 +46,13 @@ from calib_vlm.reader import (ModuleReading, ReaderError, Reading, VlmReader,
                               jpeg_bytes)
 from calib_vlm.vlm import VLMError, text_part
 
+from . import segment
+
 DEFAULT_OCR_PROMPT = "OCR:"
+
+# Cell (per-glyph) mode: trim this fraction off each side of a module crop
+# so a sliver of the neighbouring flap cannot bleed into the image.
+CELL_INSET = 0.02
 
 # Words a model may write where a blank flap sits.
 _BLANK_WORDS = frozenset({"space", "blank", "empty", "nothing", "none"})
@@ -125,6 +139,54 @@ def parse_ocr_text(content, width: int, charset: str) -> tuple[list[str], int, l
     return chars, raw_len, warnings
 
 
+def cell_crops(image, total: int, inset: float = CELL_INSET):
+    """Split a display photo into per-module crops, left to right.
+
+    The module grid is the same convention the tool-call path annotates:
+    module ``i`` spans ``[w*i/total, w*(i+1)/total)``. Reading one crop per
+    request gives every glyph the whole image budget of the vision encoder
+    and removes the sequence/counting problem of reading a long thin strip
+    (merged runs, dropped blanks, miscounted positions).
+    """
+    width = image.shape[1]
+    for i in range(max(1, total)):
+        x0 = int(round(width * i / total))
+        x1 = int(round(width * (i + 1) / total))
+        margin = int(round((x1 - x0) * max(0.0, min(0.2, inset))))
+        if x1 - margin > x0 + margin:
+            x0, x1 = x0 + margin, x1 - margin
+        yield image[:, x0:x1]
+
+def extract_single_glyph(content, charset: str) -> tuple[str, bool]:
+    """Reply for a ONE-glyph cell image -> (character, reply was empty).
+
+    Accepts the common shapes a model returns for a single-glyph crop:
+    a bare character, a decorated one (``**M**``), a short phrase
+    ("The character is M" — the first standalone one-character token
+    wins) and blank words ("space"). An empty reply means a blank cell.
+    """
+    text = "" if content is None else str(content)
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = _FENCE_RE.sub("", stripped).strip()
+    if not stripped:
+        return " ", True
+    plain = stripped.strip(_TOKEN_WRAPPERS)
+    if len(plain) == 1:
+        return _normalize_char(plain, charset), False
+    for token in stripped.split():
+        bare = token.strip(_TOKEN_WRAPPERS + "*")
+        if bare.lower() in _BLANK_WORDS:
+            return " ", False
+        if len(bare) == 1:
+            ch = _normalize_char(bare, charset)
+            if ch != " ":
+                return ch, False
+    # Last resort: the general parser's first character of the reply.
+    chars, raw_len, _ = parse_ocr_text(content, 1, charset)
+    return chars[0], raw_len == 0
+
+
 class TextReader:
     """One photo -> Reading via an OCR prompt (no function calling).
 
@@ -135,12 +197,23 @@ class TextReader:
 
     def __init__(self, vlm, prompt: str = DEFAULT_OCR_PROMPT,
                  max_width: int = 1024, quality: int = 80,
-                 fmt: str = "jpeg", max_tokens: int | None = None):
+                 fmt: str = "jpeg", max_tokens: int | None = None,
+                 image_mode: str = "strip", preprocess: str = "none"):
         self.vlm = vlm
         self.prompt = prompt or DEFAULT_OCR_PROMPT
         self.max_width = max(64, int(max_width))
         self.quality = min(100, max(1, int(quality)))
         self.fmt = "png" if str(fmt).lower() == "png" else "jpeg"
+        # "strip" = the whole photo in one request; "cells" = one glyph per
+        # module per request (exact position mapping, 12x the calls);
+        # "montage"/"cells-detect"/"strip-detect" = OpenCV-located display
+        # grid with per-module crops (see ocr_vlm/segment.py).
+        mode = str(image_mode).lower()
+        self.image_mode = mode if mode in (
+            "strip", "cells") + segment.DETECTED_MODES else "strip"
+        self.preprocess = (str(preprocess).lower()
+                           if str(preprocess).lower()
+                           in segment.PREPROCESS_STYLES else "none")
         # Cap generation (None = provider default). An OCR answer needs a
         # handful of tokens; uncapped, a model that loops on a row of one
         # repeated character runs to the server's default limit (~2048
@@ -149,6 +222,14 @@ class TextReader:
         self.last_calls = 0
         self.last_raw: str | None = None
         self.last_empty = False
+        # Detected-mode metadata, read by the server after every read():
+        # whether a display was found, its box, per-cell blank decisions
+        # and the composed image that was (or would be) sent.
+        self.last_no_detect = False
+        self.last_detected: bool | None = None
+        self.last_display: dict | None = None
+        self.last_blanks: list[bool] | None = None
+        self.last_composed = None
 
     def encode(self, image) -> tuple[bytes, str]:
         """BGR photo -> (bytes, media type) honouring the image settings."""
@@ -172,6 +253,14 @@ class TextReader:
 
     def read(self, image, total: int, expected: str = "",
              charset: str = "", drum: str = "") -> Reading:
+        if self.image_mode == "cells":
+            return self._read_cells(image, total, expected, charset)
+        if self.image_mode in segment.DETECTED_MODES:
+            return self._read_detected(image, total, expected, charset)
+        return self._read_strip_from(image, total, expected, charset)
+
+    def _read_strip_from(self, image, total: int, expected: str,
+                         charset: str) -> Reading:
         data, media = self.encode(image)
         messages = [{"role": "user", "content": [
             text_part(self.prompt), self._image_part(data, media)]}]
@@ -193,6 +282,187 @@ class TextReader:
         return Reading(modules, realigned=raw_len != total,
                        raw_count=raw_len, warnings=warnings)
 
+    # -- OpenCV-detected modes --------------------------------------------------
+
+    def _read_detected(self, image, total: int, expected: str,
+                       charset: str) -> Reading:
+        """Locate the display, crop modules, then read per the mode.
+
+        Detection failure is not fatal: the photo is read as a plain
+        strip (the pre-segmentation behavior) and the caller flags the
+        row, so a bad detector degrades to the old numbers instead of
+        cropping garbage.
+        """
+        self.last_no_detect = False
+        self.last_detected = None
+        self.last_display = None
+        self.last_blanks = None
+        self.last_composed = None
+        display = segment.find_display(image)
+        if display is None:
+            self.last_no_detect = True
+            self.last_detected = False
+            reading = self._read_strip_from(image, total, expected, charset)
+            reading.warnings.insert(
+                0, "display not detected; read the whole photo as strip")
+            return reading
+        boxes = segment.module_boxes(image, display, total)
+        crops = segment.crop_modules(image, boxes)
+        blanks = [segment.is_blank(crop) for crop in crops]
+        self.last_detected = True
+        self.last_display = display.as_dict()
+        self.last_blanks = blanks
+        if self.image_mode == "cells-detect":
+            return self._read_cells_detected(crops, blanks, total, expected,
+                                             charset)
+        if self.image_mode == "strip-detect":
+            return self._read_strip_detected(image, display, total, expected,
+                                             charset)
+        return self._read_montage(crops, blanks, total, expected, charset)
+
+    def _read_strip_detected(self, image, display, total: int, expected: str,
+                             charset: str) -> Reading:
+        h, w = image.shape[:2]
+        x0 = max(0, int(display.x0))
+        x1 = min(w, int(display.x1))
+        y0 = max(0, display.y0)
+        y1 = min(h, display.y1 + 1)
+        styled = segment.apply_style(image[y0:y1, x0:x1], self.preprocess)
+        self.last_composed = cv2.cvtColor(styled, cv2.COLOR_GRAY2BGR)
+        return self._read_strip_from(self.last_composed, total, expected,
+                                     charset)
+
+    def _read_cells_detected(self, crops, blanks, total: int, expected: str,
+                             charset: str) -> Reading:
+        """One request per non-blank module; blanks decided by OpenCV.
+
+        Blank cells never reach the model — the failure that sank the
+        old cells mode was hallucinated output for isolated blank crops.
+        """
+        chars: list[str] = []
+        raws: list[str] = []
+        skipped = 0
+        for crop, blank in zip(crops, blanks):
+            if blank:
+                chars.append(" ")
+                raws.append("[blank]")
+                skipped += 1
+                continue
+            data, media = self.encode(
+                segment.normalize(crop, self.preprocess))
+            messages = [{"role": "user", "content": [
+                text_part(self.prompt), self._image_part(data, media)]}]
+            self.last_calls += 1
+            try:
+                reply = self.vlm.chat(messages, max_tokens=self.max_tokens)
+            except VLMError as exc:
+                raise ReaderError(str(exc)) from exc
+            content = reply.get("content")
+            raws.append("" if content is None else str(content).strip())
+            ch, _empty = extract_single_glyph(content, charset)
+            chars.append(ch)
+        shown = "|".join(raw.replace("\n", "\\n") for raw in raws)
+        self.last_raw = shown[:500]
+        self.last_empty = all(ch == " " for ch in chars)
+        self.last_composed = segment.montage(crops, total,
+                                             style=self.preprocess)
+        warnings: list[str] = []
+        if skipped:
+            warnings.append(f"{skipped}/{total} blank cells decided by "
+                            "OpenCV (no model call)")
+        modules = [
+            ModuleReading(i, ch, "blank" if ch == " " else "clean", 1.0,
+                          "cv" if i < len(blanks) and blanks[i] else "text",
+                          expected[i] if i < len(expected) else " ")
+            for i, ch in enumerate(chars[:total])
+        ]
+        return Reading(modules, realigned=False,
+                       raw_count=sum(1 for ch in chars if ch != " "),
+                       warnings=warnings)
+
+    def _read_montage(self, crops, blanks, total: int, expected: str,
+                      charset: str) -> Reading:
+        """One labeled contact sheet of all modules per request.
+
+        Positions come from the grid layout, so a reply maps to modules
+        by index. A reply that needed padding/truncation is not
+        position-trustworthy and is kept as parsed (flagged), never
+        overridden by the local blank decisions.
+        """
+        sheet = segment.montage(crops, total, style=self.preprocess)
+        self.last_composed = sheet
+        data, media = self.encode(sheet)
+        messages = [{"role": "user", "content": [
+            text_part(self.prompt), self._image_part(data, media)]}]
+        self.last_calls += 1
+        try:
+            reply = self.vlm.chat(messages, max_tokens=self.max_tokens)
+        except VLMError as exc:
+            raise ReaderError(str(exc)) from exc
+        content = reply.get("content")
+        self.last_raw = content if isinstance(content, str) else None
+        chars, raw_len, warnings = parse_ocr_text(content, total, charset)
+        self.last_empty = raw_len == 0
+        corrected = 0
+        if raw_len == total:
+            for i, blank in enumerate(blanks):
+                if blank and chars[i] != " ":
+                    chars[i] = " "
+                    corrected += 1
+        if corrected:
+            warnings.append(f"{corrected} blank cells corrected by OpenCV "
+                            "(cell content ignored)")
+        modules = [
+            ModuleReading(i, ch, "blank" if ch == " " else "clean", 1.0,
+                          "cv" if i < len(blanks) and blanks[i] else "text",
+                          expected[i] if i < len(expected) else " ")
+            for i, ch in enumerate(chars[:total])
+        ]
+        return Reading(modules, realigned=raw_len != total,
+                       raw_count=raw_len, warnings=warnings)
+
+    def _read_cells(self, image, total: int, expected: str,
+                    charset: str) -> Reading:
+        """Per-glyph segmentation: one module crop per request.
+
+        Each reply belongs to exactly one known module, so positions can
+        never drift and an empty reply is simply that cell's blank. The
+        bill is `total` requests per photo instead of one.
+        """
+        chars: list[str] = []
+        raws: list[str] = []
+        empties = 0
+        for crop in cell_crops(image, total):
+            data, media = self.encode(crop)
+            messages = [{"role": "user", "content": [
+                text_part(self.prompt), self._image_part(data, media)]}]
+            self.last_calls += 1
+            try:
+                reply = self.vlm.chat(messages, max_tokens=self.max_tokens)
+            except VLMError as exc:
+                raise ReaderError(str(exc)) from exc
+            content = reply.get("content")
+            raws.append("" if content is None else str(content).strip())
+            ch, empty = extract_single_glyph(content, charset)
+            chars.append(ch)
+            empties += 1 if empty else 0
+        shown = "|".join(raw.replace("\n", "\\n") for raw in raws)
+        self.last_raw = shown[:500]
+        self.last_empty = empties == total
+        warnings: list[str] = []
+        if empties:
+            warnings.append(f"{empties}/{total} cells returned an empty reply "
+                            "(read as blanks)")
+        modules = [
+            ModuleReading(i, ch, "blank" if ch == " " else "clean",
+                          1.0, "text",
+                          expected[i] if i < len(expected) else " ")
+            for i, ch in enumerate(chars[:total])
+        ]
+        return Reading(modules, realigned=False,
+                       raw_count=sum(1 for ch in chars if ch != " "),
+                       warnings=warnings)
+
 
 class ModeReader:
     """Dispatch between the tool reader and the text reader.
@@ -209,13 +479,16 @@ class ModeReader:
                  annotate: bool = True,
                  image_max_width: int = 1024, image_quality: int = 80,
                  image_format: str = "jpeg",
-                 ocr_max_tokens: int | None = None):
+                 ocr_max_tokens: int | None = None,
+                 image_mode: str = "strip", preprocess: str = "none"):
         self.vlm = vlm
         self.mode = mode if mode in ("auto", "tool", "text") else "auto"
         self.tool = VlmReader(vlm, annotate=annotate)
         self.text = TextReader(vlm, ocr_prompt, max_width=image_max_width,
                                quality=image_quality, fmt=image_format,
-                               max_tokens=ocr_max_tokens)
+                               max_tokens=ocr_max_tokens,
+                               image_mode=image_mode,
+                               preprocess=preprocess)
         self._effective = "text" if self.mode == "text" else "tool"
         self._reads = 0
         # Row metadata, read by the server after every read() call.
@@ -223,6 +496,11 @@ class ModeReader:
         self.last_fallback = False
         self.last_empty = False
         self.last_raw: str | None = None
+        self.last_no_detect = False
+        self.last_detected: bool | None = None
+        self.last_display: dict | None = None
+        self.last_blanks: list[bool] | None = None
+        self.last_composed = None
 
     @property
     def annotate(self) -> bool:
@@ -246,6 +524,11 @@ class ModeReader:
         self.last_fallback = False
         self.last_empty = False
         self.last_raw = None
+        self.last_no_detect = False
+        self.last_detected = None
+        self.last_display = None
+        self.last_blanks = None
+        self.last_composed = None
         if self._effective == "tool":
             try:
                 reading = self.tool.read(self._tool_jpeg(image, total), total,
@@ -278,4 +561,9 @@ class ModeReader:
         self.last_mode = "text"
         self.last_raw = self.text.last_raw
         self.last_empty = self.text.last_empty
+        self.last_no_detect = bool(getattr(self.text, "last_no_detect", False))
+        self.last_detected = getattr(self.text, "last_detected", None)
+        self.last_display = getattr(self.text, "last_display", None)
+        self.last_blanks = getattr(self.text, "last_blanks", None)
+        self.last_composed = getattr(self.text, "last_composed", None)
         return reading

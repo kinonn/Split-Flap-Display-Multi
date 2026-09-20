@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calib Auto — VLM approach</title>
+<style>
+  :root { --bg:#14161a; --card:#1d2026; --card2:#23272e; --line:#2e333b;
+          --fg:#d8dce2; --dim:#8a919c; --accent:#4ea1ff; --good:#4ec98a;
+          --warn:#e0b04c; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1200px; margin:0 auto; padding:20px 18px 60px; }
+  h1 { font-size:19px; margin:0 0 2px; } h1 a { color:var(--dim); text-decoration:none; font-size:13px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
+  .cols { display:grid; grid-template-columns: 420px 1fr; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  input, select { width:100%; background:var(--card2); color:var(--fg); border:1px solid var(--line);
+                  border-radius:6px; padding:6px 8px; font:inherit; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  button { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f4e7a; border-color:#2f6ea8; }
+  button.danger { background:#5a2626; border-color:#7a3333; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .msg { font-size:13px; color:var(--warn); margin-top:8px; min-height:18px; }
+  #live { width:100%; border-radius:8px; border:1px solid var(--line); display:block; background:#000; }
+  #log { height:340px; overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace;
+         background:var(--card2); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .ev { white-space:pre-wrap; word-break:break-word; }
+  .ev .t { color:var(--dim); margin-right:6px; }
+  .k-error { color:var(--bad); } .k-done { color:var(--good); }
+  .k-tune { color:var(--accent); } .k-api { color:var(--dim); }
+  .photos { display:flex; gap:8px; overflow-x:auto; margin-top:8px; }
+  .photos img { height:64px; border-radius:6px; border:1px solid var(--line); }
+  .meta { font-size:12px; color:var(--dim); } .meta b { color:var(--fg); }
+  .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px;
+           background:var(--card2); border:1px solid var(--line); margin-right:6px; }
+  .phases label { display:inline-flex; gap:5px; align-items:center; margin-right:12px; color:var(--fg); }
+  .phases input { width:auto; }
+  #testread { margin-top:8px; }
+  #testread .chip { width:26px; height:30px; display:inline-flex; align-items:center; justify-content:center;
+          background:var(--card2); border:1px solid var(--line); border-radius:4px;
+          font:15px ui-monospace,Consolas,monospace; margin-right:3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>VLM approach <a href="/">← back</a></h1>
+  <div class="meta">A vision-language model reads frames via the report_reading tool call.
+    Not sure which model? <a style="color:var(--accent)" href="/bench">Test VLMs first →</a></div>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Provider</h2>
+        <label>Preset</label>
+        <select id="preset" onchange="presetChanged()">
+          <option value="https://opencode.ai/zen/go/v1">OpenCode Go</option>
+          <option value="https://api.openai.com/v1">OpenAI</option>
+          <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+          <option value="http://localhost:11434/v1">Ollama (local)</option>
+          <option value="custom">Custom URL…</option>
+        </select>
+        <label>Base URL</label><input id="llm_base_url">
+        <label>Model (must support vision + tool calling)</label>
+        <input id="llm_model" placeholder="deepseek-v4-flash-vision-exp">
+        <label>API key (stored server-side, never shown)</label>
+        <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off">
+        <div class="btns"><button onclick="saveProvider()">Save provider</button></div>
+        <div class="msg" id="provmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Test a read</h2>
+        <div class="meta">Read one golden photo with this model — a quick
+          suitability check before a full run.</div>
+        <div class="row">
+          <div><label>Golden set</label><select id="test_set"></select></div>
+        </div>
+        <div class="row">
+          <div><label>Photo</label><select id="test_photo"></select></div>
+        </div>
+        <div class="btns"><button onclick="testRead()">Test read</button></div>
+        <div id="testread"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Setup</h2>
+        <label>Display host</label><input id="display_host">
+        <div class="row">
+          <div><label>Camera index</label><input id="camera_index" type="number" min="0" max="16"></div>
+          <div><label>Brightness (0–100)</label><input id="brightness" type="number" min="0" max="100"></div>
+        </div>
+        <div class="row">
+          <div><label>Crop % (top+bottom)</label><input id="crop_percent" type="number" min="0" max="40"></div>
+          <div><label>Start wait s (blank)</label><input id="warmup_s" type="number" min="0" max="30" placeholder="auto"></div>
+        </div>
+        <div class="row">
+          <div><label>Module count</label><input id="module_count" type="number" min="1" max="64"></div>
+          <div><label>Dwell ms</label><input id="dwell_ms" type="number" min="0" max="60000"></div>
+        </div>
+        <label>Sensor exposure (<span id="exposure_val">auto</span>)</label>
+        <input id="camera_exposure" type="range" min="-13" max="0" step="1" value="-7"
+               oninput="$('exposure_val').textContent = exposureOn() ? this.value : 'auto'">
+        <label style="display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:6px">
+          <input type="checkbox" id="exposure_auto" style="width:auto" checked
+                 onchange="$('exposure_val').textContent = exposureOn() ? $('camera_exposure').value : 'auto'">
+          Auto exposure (driver AE; uncheck to fix a manual value)</label>
+        <label>Run mode</label>
+        <select id="mode"><option value="dry-run">dry-run — shift table only</option>
+          <option value="full">full — apply and persist fixes</option></select>
+        <label>Phases</label>
+        <div class="phases">
+          <label><input type="checkbox" class="phase" value="p1" checked> P1 coarse</label>
+          <label><input type="checkbox" class="phase" value="p2" checked> P2 fine</label>
+          <label><input type="checkbox" class="phase" value="p4" checked> P4 verify</label>
+          <label><input type="checkbox" class="phase" value="acceptance" checked> acceptance</label>
+        </div>
+        <div class="row">
+          <div><label>Min confidence</label><input id="min_confidence" type="number" step="0.05" min="0" max="1"></div>
+        </div>
+        <div class="btns">
+          <button onclick="saveSetup()">Save</button>
+          <button onclick="checkCamera()">Check camera</button>
+        </div>
+        <div class="msg" id="setupmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Run</h2>
+        <div class="btns">
+          <button class="primary" id="startBtn" onclick="startRun()">Start calibration</button>
+          <button class="danger" id="abortBtn" onclick="abortRun()" disabled>Abort</button>
+          <button onclick="restoreSnapshot()">Restore snapshot</button>
+        </div>
+        <div class="msg" id="runmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Live view</h2>
+        <label style="display:flex;gap:8px;align-items:center;color:var(--fg);margin:0 0 8px">
+          <input type="checkbox" id="live_toggle" style="width:auto"
+                 onchange="setLive(this.checked)">
+          Live camera view <span class="meta" id="livemsg" style="margin-left:4px"></span></label>
+        <img id="live" alt="live camera view" style="display:none">
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Run log <span class="meta" id="runstate"></span></h2>
+        <div id="log"></div>
+        <div class="photos" id="photos"></div>
+      </div>
+      <div class="card" id="reportCard" style="display:none">
+        <h2 style="margin-top:0">Report</h2>
+        <div id="report"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+let lastEvent = 0, lastRunSeq = -1, logAtBottom = true;
+$("log").addEventListener("scroll", () => {
+  const el = $("log");
+  logAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+});
+
+function presetChanged() {
+  const v = $("preset").value;
+  if (v !== "custom") $("llm_base_url").value = v;
+}
+async function loadConfig() {
+  const c = await api("/api/config");
+  const known = ["https://opencode.ai/zen/go/v1","https://api.openai.com/v1",
+                 "https://openrouter.ai/api/v1","http://localhost:11434/v1"];
+  $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
+  $("llm_base_url").value = c.llm_base_url || "";
+  $("llm_model").value = c.llm_model || "";
+  for (const k of ["display_host","camera_index","brightness","crop_percent","warmup_s",
+                   "module_count","dwell_ms","mode","min_confidence"]) {
+    const el = $(k); if (!el) continue;
+    el.value = c[k] === null || c[k] === undefined ? "" : (Array.isArray(c[k]) ? c[k].join(",") : c[k]);
+  }
+  $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
+  if (c.exposure === null || c.exposure === undefined || c.exposure === "") {
+    $("exposure_auto").checked = true;
+  } else {
+    $("exposure_auto").checked = false;
+    $("camera_exposure").value = c.exposure;
+  }
+  await loadSets();
+  let livePref = "0";
+  try { livePref = localStorage.getItem("calibAutoLiveView") || "0"; } catch (e) {}
+  setLive(livePref !== "0");
+}
+async function loadSets() {
+  try {
+    const g = await api("/api/golden");
+    const sets = g.sets || [];
+    $("test_set").innerHTML = sets.map(s =>
+      `<option value="${s.name}">${s.name} — verified ${s.stats.verified}/${s.stats.total}</option>`).join("");
+    await loadPhotos();
+  } catch (e) {}
+}
+async function loadPhotos() {
+  const name = $("test_set").value;
+  if (!name) { $("test_photo").innerHTML = ""; return; }
+  try {
+    const info = await api("/api/golden/" + encodeURIComponent(name));
+    $("test_photo").innerHTML = info.entries.map(e =>
+      `<option value="${e.photo}">${e.photo}${e.status !== "verified" ? " (pending)" : ""}</option>`).join("");
+  } catch (e) { $("test_photo").innerHTML = ""; }
+}
+$("test_set").addEventListener("change", loadPhotos);
+
+async function saveProvider() {
+  try {
+    const patch = {llm_base_url: $("llm_base_url").value.trim(), llm_model: $("llm_model").value.trim()};
+    if ($("llm_api_key").value) patch.llm_api_key = $("llm_api_key").value;
+    await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+    $("llm_api_key").value = ""; $("provmsg").textContent = "saved";
+  } catch (e) { $("provmsg").textContent = "save failed: " + e.message; }
+}
+async function testRead() {
+  $("testread").innerHTML = "<div class='msg'>reading…</div>";
+  try {
+    const r = await api("/api/read-test", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({set: $("test_set").value, photo: $("test_photo").value})});
+    const chips = (r.modules || []).map(m => {
+      const cls = m.condition === "clean" ? "ok" : m.condition === "blank" ? "" : "bad";
+      const ch = m.char === " " ? "␣" : m.char;
+      return `<span class="chip ${cls}" title="${m.condition} conf ${m.confidence}">${ch}</span>`;
+    }).join("");
+    $("testread").innerHTML =
+      `<div class="meta" style="margin-top:8px">read: <b>${esc(r.read)}</b> · ${r.read_mode} mode · ${r.elapsed_s}s` +
+      (r.usage && r.usage.prompt_tokens ? ` · ${r.usage.prompt_tokens}+${r.usage.completion_tokens} tok` : "") + `</div>` +
+      `<div style="margin-top:6px">${chips}</div>` +
+      (r.warnings && r.warnings.length ? `<div class="msg">${esc(r.warnings.join("; "))}</div>` : "");
+  } catch (e) { $("testread").innerHTML = `<div class="msg">failed: ${esc(e.message)}</div>`; }
+}
+async function saveSetup() {
+  const patch = {};
+  for (const k of ["display_host","camera_index","brightness","crop_percent","warmup_s",
+                   "module_count","dwell_ms","mode","min_confidence"]) {
+    let v = $(k).value;
+    if (["camera_index","module_count","dwell_ms"].includes(k)) v = v === "" ? 0 : Number(v);
+    if (["brightness","crop_percent","min_confidence"].includes(k)) v = v === "" ? 0 : Number(v);
+    if (k === "warmup_s") v = v === "" ? null : Number(v);
+    patch[k] = v;
+  }
+  patch.exposure = exposure();
+  try { await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+        $("setupmsg").textContent = "saved"; }
+  catch (e) { $("setupmsg").textContent = "save failed: " + e.message; }
+}
+function phases() { return [...document.querySelectorAll(".phase:checked")].map(x => x.value); }
+function exposureOn() { return !$("exposure_auto").checked; }
+function exposure() {
+  if (!exposureOn()) return null;   // null = driver auto-exposure
+  const v = Number($("camera_exposure").value);
+  return Number.isFinite(v) ? v : null;
+}
+
+async function checkCamera() {
+  $("setupmsg").textContent = "checking camera…";
+  try {
+    const r = await api("/api/check-camera", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({camera_index: Number($("camera_index").value), brightness: Number($("brightness").value),
+                            crop_percent: Number($("crop_percent").value),
+                            exposure: exposure(), warmup_s: $("warmup_s").value === "" ? null : Number($("warmup_s").value)})});
+    const d = r.diagnostics || {};
+    $("setupmsg").textContent = `ok: ${d.resolution.join("x")}, mean ${d.mean_brightness}, drift ${d.drift}` +
+      (d.auto_exposure ? `, exposure ${d.auto_exposure.mode}${d.auto_exposure.locked ? " (locked)" : ""}` : "") +
+      (d.warnings && d.warnings.length ? " — " + d.warnings.join("; ") : "");
+  } catch (e) { $("setupmsg").textContent = "camera: " + e.message; }
+}
+
+let liveOn = false, liveTimer = null, liveWanted = false;
+function setLive(on) {
+  liveOn = on;
+  liveWanted = on;
+  $("live_toggle").checked = on;
+  try { localStorage.setItem("calibAutoLiveView", on ? "1" : "0"); } catch (e) {}
+  $("live").style.display = on ? "block" : "none";
+  if (on) { $("livemsg").textContent = ""; liveTick(); }
+  else if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+}
+function pauseLive(msg) {          // stop without clearing the user's preference
+  if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+  liveOn = false;
+  $("livemsg").textContent = msg || "";
+}
+async function liveTick() {
+  if (!liveOn) return;
+  try {
+    const exp = exposure();
+    const r = await fetch("/api/camera/frame?camera_index=" + Number($("camera_index").value || 0) +
+                          "&brightness=" + Number($("brightness").value || 50) +
+                          "&crop_percent=" + Number($("crop_percent").value || 0) +
+                          "&warmup_s=" + ($("warmup_s").value === "" ? "" : Number($("warmup_s").value)) +
+                          "&exposure=" + (exp === null ? "auto" : exp));
+    if (r.status === 409) {
+      pauseLive("Camera busy — run in progress.");
+      return;
+    }
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || r.statusText);
+    }
+    const blob = await r.blob();
+    const img = $("live");
+    const old = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+  } catch (e) {
+    pauseLive("Live view off: " + e.message);
+    return;
+  }
+  liveTimer = setTimeout(liveTick, 800);
+}
+
+async function startRun() {
+  await saveSetup(); await saveProvider();
+  pauseLive("Camera busy — run in progress.");
+  try {
+    await api("/api/cal/start", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({approach: "vlm", mode: $("mode").value, phases: phases()})});
+    lastEvent = 0; $("log").innerHTML = ""; $("runmsg").textContent = "running…";
+  } catch (e) { $("runmsg").textContent = "start failed: " + e.message; }
+}
+async function abortRun() { await api("/api/cal/abort", {method:"POST"}); }
+async function restoreSnapshot() {
+  try { await api("/api/cal/restore-snapshot", {method:"POST"});
+        $("runmsg").textContent = "snapshot restored"; }
+  catch (e) { $("runmsg").textContent = "restore: " + e.message; }
+}
+
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function renderEvent(e) {
+  const div = document.createElement("div");
+  div.className = "ev k-" + (e.kind || "log");
+  div.innerHTML = `<span class="t">${e.t || ""}</span>` + esc(e.text || "");
+  $("log").appendChild(div);
+}
+function renderReport(rep) {
+  if (!rep || !rep.result) return;
+  $("reportCard").style.display = "block";
+  const timing = rep.timing || {}, budgets = rep.budgets || {};
+  const modules = (rep.summary && rep.summary.modules) || [];
+  const rows = modules.map(m =>
+    `<tr><td>${m.module}</td><td>${m.offset_delta >= 0 ? "+" : ""}${m.offset_delta}</td>` +
+    `<td>${m.persistent_wrong_glyph ? "⚠" : ""}</td></tr>`).join("");
+  $("report").innerHTML =
+    `<div class="meta">result: <b style="color:${rep.result === "converged" ? "var(--good)" : "var(--warn)"}">${rep.result}</b> — ${esc(rep.reason || "")}</div>` +
+    `<div class="meta" style="margin-top:6px">frames ${budgets.frames || 0} · reads ${budgets.vlmCalls || 0} · ` +
+    `previews ${budgets.previews || 0} · persists ${budgets.persists || 0} · ` +
+    `${timing.wallSeconds || "?"}s wall · ${timing.vlmTokens ? (timing.vlmTokens.prompt_tokens + timing.vlmTokens.completion_tokens) + " tok" : ""}</div>` +
+    (rows ? `<table style="margin-top:8px;border-collapse:collapse;font-size:12px">
+      <tr style="color:var(--dim)"><th style="text-align:left;padding-right:12px">module</th>
+      <th style="text-align:left;padding-right:12px">Δoffset</th><th></th></tr>${rows}</table>` : "");
+}
+async function poll() {
+  try {
+    const st = await api("/api/cal/state");
+    $("runstate").textContent = `${st.status} · ${st.frames} frames`;
+    const busy = ["running","aborting"].includes(st.status);
+    $("startBtn").disabled = busy;
+    $("abortBtn").disabled = !busy;
+    // A run holds the camera: stop polling for frames so the run's own
+    // captures never contend for the device, and resume when it ends.
+    if (busy && liveOn) pauseLive("Camera busy — run in progress.");
+    if (!busy && !liveOn && liveWanted) setLive(true);
+    if (st.run_seq !== lastRunSeq) {
+      lastRunSeq = st.run_seq; lastEvent = 0; $("log").innerHTML = "";
+      $("reportCard").style.display = "none";
+    }
+    const ev = await api(`/api/cal/events?offset=${lastEvent}`);
+    for (const e of ev.events) renderEvent(e);
+    lastEvent = ev.offset + ev.events.length;
+    if (logAtBottom) $("log").scrollTop = $("log").scrollHeight;
+    const ph = $("photos"); const want = (st.photos || []).slice(-6).join(",");
+    if (ph.dataset.key !== want) {
+      ph.dataset.key = want;
+      ph.innerHTML = (st.photos || []).slice(-6).map(p =>
+        `<img src="/api/cal/photo/${encodeURIComponent(p)}?t=${Date.now()}" title="${esc(p)}">`).join("");
+    }
+    if (st.report && st.status === "done") renderReport(st.report);
+  } catch (e) {}
+  setTimeout(poll, 1500);
+}
+loadConfig(); poll();
+</script>
+</body>
+</html>

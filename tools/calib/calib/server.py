@@ -2,9 +2,10 @@
 
 Browser front-end for the P0->P4 ``Calibrator`` in ``calib/loop.py``:
 live event log, photo gallery with per-module verdicts, and the final
-report. Mirrors the ``tools/calib-agent/app`` API shape where it makes
-sense (``/api/run/state``, ``/api/photos/{name}``, template + snapshot
-routes) so the two UIs feel like one — minus everything LLM.
+report. Follows the API shape of the former ``tools/calib-agent/app``
+harness where it makes sense (``/api/run/state``, ``/api/photos/{name}``,
+template + snapshot routes) so the two UIs felt like one — minus
+everything LLM.
 
 Run:
     uv run splitflap-calib-ui   # http://127.0.0.1:8001

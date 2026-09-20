@@ -9,6 +9,7 @@ from calib_vlm.reader import ModuleReading, ReaderError, Reading
 
 from ocr_vlm.server import DEFAULT_CHARSET
 from ocr_vlm.textread import (DEFAULT_OCR_PROMPT, ModeReader, TextReader,
+                              cell_crops, extract_single_glyph,
                               parse_ocr_text)
 
 
@@ -99,10 +100,11 @@ def test_parse_json_replies():
 # -- TextReader ---------------------------------------------------------------
 
 class FakeVlm:
-    """Captures messages; returns one scripted content string."""
+    """Captures messages; returns scripted content (one string, or one per
+    call when a list is given — the last entry repeats after that)."""
 
     def __init__(self, content):
-        self.content = content
+        self.contents: list = content if isinstance(content, list) else [content]
         self.calls: list[list[dict]] = []
         self.last_kwargs: dict = {}
         self.last_usage: dict = {}
@@ -111,7 +113,8 @@ class FakeVlm:
         self.calls.append(messages)
         self.last_kwargs = kwargs
         assert not kwargs.get("tools")  # text mode never sends tools
-        return {"content": self.content, "tool_calls": []}
+        index = min(len(self.calls) - 1, len(self.contents) - 1)
+        return {"content": self.contents[index], "tool_calls": []}
 
 
 def test_text_reader_builds_reading_without_tools():
@@ -166,6 +169,71 @@ def test_text_reader_default_is_uncapped():
 def test_mode_reader_passes_ocr_max_tokens():
     reader = ModeReader(vlm=None, mode="text", ocr_max_tokens=32)
     assert reader.text.max_tokens == 32
+
+
+def test_mode_reader_passes_image_mode():
+    reader = ModeReader(vlm=None, mode="text", image_mode="cells")
+    assert reader.text.image_mode == "cells"
+
+
+# -- cell (per-glyph) segmentation --------------------------------------------
+
+def test_cell_crops_split_into_modules_left_to_right():
+    img = np.zeros((4, 120, 3), dtype=np.uint8)
+    for i in range(12):
+        img[:, i * 10:(i + 1) * 10] = i * 20      # distinct gray per module
+    crops = list(cell_crops(img, 12, inset=0.0))
+    assert len(crops) == 12
+    for i, crop in enumerate(crops):
+        assert crop.shape[0] == 4
+        assert int(crop[0, 0, 0]) == i * 20       # crop i holds module i
+
+
+def test_cell_crops_inset_is_clamped():
+    img = _img(4, 240)                            # 20 px per module
+    crop = next(cell_crops(img, 12, inset=0.9))   # clamps to 20 %
+    assert crop.shape[1] == 20 - 2 * 4            # 4 px trimmed each side
+
+
+def test_extract_single_glyph_shapes():
+    assert extract_single_glyph("M", DEFAULT_CHARSET) == ("M", False)
+    assert extract_single_glyph(" m ", DEFAULT_CHARSET) == ("M", False)
+    assert extract_single_glyph("**M**", DEFAULT_CHARSET) == ("M", False)
+    assert extract_single_glyph('%', DEFAULT_CHARSET) == ("%", False)
+    assert extract_single_glyph("The character is M",
+                                DEFAULT_CHARSET) == ("M", False)
+    assert extract_single_glyph("space", DEFAULT_CHARSET) == (" ", False)
+    assert extract_single_glyph(None, DEFAULT_CHARSET) == (" ", True)
+    assert extract_single_glyph("", DEFAULT_CHARSET) == (" ", True)
+    assert extract_single_glyph("```markdown\n\n```",
+                                DEFAULT_CHARSET) == (" ", True)
+
+
+def test_text_reader_cells_mode_maps_every_module():
+    script = ["A", "B", None, "D", "E", "F", "G", "H", "I", "J",
+              "space", "%"]
+    vlm = FakeVlm(script)
+    reader = TextReader(vlm, image_mode="cells", max_tokens=64)
+    reading = reader.read(_img(260, 1280), total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == "AB DEFGHIJ %"        # None/"space" -> blanks
+    assert len(vlm.calls) == 12                  # one request per glyph
+    assert reader.last_calls == 12               # charged to the call budget
+    assert vlm.last_kwargs.get("max_tokens") == 64
+    assert reading.realigned is False            # positions are exact
+    assert any("1/12 cells" in w for w in reading.warnings)
+    assert reading.modules[3].char == "D"
+    assert sum(1 for m in reading.modules if m.char == " ") == 2
+    # each request carried the configured prompt and one cell-sized image
+    prompt_part, image_part_ = vlm.calls[0][0]["content"]
+    assert prompt_part["text"] == DEFAULT_OCR_PROMPT
+    assert image_part_["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_text_reader_cells_mode_all_empty_reads_blank_row():
+    reader = TextReader(FakeVlm([None]), image_mode="cells")
+    reading = reader.read(_img(260, 1280), total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == " " * 12
+    assert reader.last_empty is True
 
 
 def test_text_reader_converts_vlm_errors():
@@ -340,3 +408,134 @@ def test_text_read_sends_configured_format():
     reader.read(_img(), total=2, charset=DEFAULT_CHARSET)
     _, image_part_ = vlm.calls[0][0]["content"]
     assert image_part_["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+# -- detected modes (OpenCV segmentation) -------------------------------------
+
+def _display_img(w: int = 900, h: int = 220, x0: int = 100, x1: int = 700,
+                 y0: int = 40, y1: int = 180, total: int = 12,
+                 glyphs: str = "", bg: int = 170):
+    """Synthetic split-flap frame the detector can localize."""
+    img = np.full((h, w, 3), bg, np.uint8)
+    img[y0:y1, x0:x1] = 25
+    pitch = (x1 - x0) / total
+    for i in range(1, total):
+        xi = int(round(x0 + i * pitch))
+        img[y0:y1, xi - 2:xi + 3] = 8
+    cy = (y0 + y1) // 2
+    for i, ch in enumerate(glyphs[:total]):
+        if ch in (" ", ""):
+            continue
+        a = int(round(x0 + i * pitch)) + 8
+        b = int(round(x0 + (i + 1) * pitch)) - 8
+        img[cy - 25:cy + 25, a:b] = 255
+    return img
+
+
+def test_text_reader_montage_is_one_request_with_cv_blank_override():
+    img = _display_img(glyphs="AB")
+    vlm = FakeVlm("ABXXXXXXXXXX")              # model guesses glyphs on blanks
+    reader = TextReader(vlm, image_mode="montage", max_tokens=64)
+    reading = reader.read(img, total=12, charset=DEFAULT_CHARSET)
+    assert len(vlm.calls) == 1 and reader.last_calls == 1
+    assert reading.text == "AB          "       # blanks corrected by OpenCV
+    assert any("corrected by OpenCV" in w for w in reading.warnings)
+    assert reading.realigned is False
+    assert reading.modules[0].source == "text"
+    assert reading.modules[5].source == "cv"
+    assert reader.last_detected is True
+    assert reader.last_display["width"] > 500
+    assert reader.last_blanks[0] is False and reader.last_blanks[5] is True
+    assert reader.last_composed is not None
+    # one montage image is sent, not one image per module
+    _, image_part_ = vlm.calls[0][0]["content"]
+    assert image_part_["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_text_reader_montage_keeps_parsed_row_when_adjusted():
+    img = _display_img(glyphs="AB")
+    reader = TextReader(FakeVlm("AB"), image_mode="montage")
+    reading = reader.read(img, total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == "AB          "
+    assert reading.realigned is True            # 2 < 12: padded, flagged
+    assert not any("corrected by OpenCV" in w for w in reading.warnings)
+
+
+def test_text_reader_cells_detect_skips_blank_cells():
+    img = _display_img(glyphs="MN")
+    vlm = FakeVlm(["M", "N"])
+    reader = TextReader(vlm, image_mode="cells-detect", max_tokens=32)
+    reading = reader.read(img, total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == "MN          "
+    assert len(vlm.calls) == 2                  # 10 blank cells never sent
+    assert reader.last_calls == 2
+    assert any("10/12 blank cells" in w for w in reading.warnings)
+    assert reading.realigned is False
+    assert reading.modules[1].source == "text"
+    assert reading.modules[2].source == "cv"
+    assert reader.last_empty is False
+
+
+def test_text_reader_cells_detect_all_blank_skips_every_call():
+    img = _display_img(glyphs="")
+    vlm = FakeVlm("M")
+    reader = TextReader(vlm, image_mode="cells-detect")
+    reading = reader.read(img, total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == " " * 12
+    assert vlm.calls == [] and reader.last_calls == 0
+    assert reader.last_empty is True
+    assert any("12/12 blank cells" in w for w in reading.warnings)
+
+
+def test_text_reader_detected_falls_back_to_strip_without_display():
+    vlm = FakeVlm("AB")
+    reader = TextReader(vlm, image_mode="montage")
+    reading = reader.read(_img(260, 1280), total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == "AB          "
+    assert len(vlm.calls) == 1
+    assert reader.last_no_detect is True
+    assert reader.last_detected is False
+    assert reader.last_composed is None
+    assert any("display not detected" in w for w in reading.warnings)
+
+
+def test_text_reader_strip_detect_sends_the_styled_display_crop():
+    img = _display_img(glyphs="AB")
+    vlm = FakeVlm("AB")
+    reader = TextReader(vlm, image_mode="strip-detect", preprocess="binary")
+    reading = reader.read(img, total=12, charset=DEFAULT_CHARSET)
+    assert reading.text == "AB          "
+    assert len(vlm.calls) == 1
+    data = vlm.calls[0][0]["content"][1]["image_url"]["url"]
+    import base64 as _b64
+    raw = _b64.b64decode(data.split(",", 1)[1])
+    decoded = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape[1] == 600 and decoded.shape[0] == 140
+    assert float(decoded.mean()) > 127          # binary style: black on white
+    assert reader.last_detected is True
+
+
+def test_mode_reader_passes_preprocess_and_detected_metadata():
+    reader = ModeReader(vlm=None, mode="text", image_mode="montage",
+                        preprocess="binary")
+    assert reader.text.preprocess == "binary"
+    assert reader.text.image_mode == "montage"
+    assert ModeReader(vlm=None, mode="text",
+                      preprocess="bogus").text.preprocess == "none"
+
+
+def test_mode_reader_auto_fallback_carries_detected_metadata():
+    tool = FakeTool(error=ReaderError("no tool call"))
+    text = FakeText()
+    text.last_no_detect = True
+    text.last_detected = False
+    text.last_display = {"width": 10}
+    text.last_blanks = [True] * 12
+    text.last_composed = None
+    reader = _mode_reader("auto", tool, text)
+    reader.read(_img(), 12, charset=DEFAULT_CHARSET)
+    assert reader.last_mode == "text"
+    assert reader.last_no_detect is True
+    assert reader.last_detected is False
+    assert reader.last_display == {"width": 10}
+    assert reader.last_blanks == [True] * 12

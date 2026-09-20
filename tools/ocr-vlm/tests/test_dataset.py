@@ -138,3 +138,97 @@ def test_discover(tmp_path):
     ]
     assert discover(filename="other.jsonl", tools_dir=str(tools)) == []
     assert discover(tools_dir=str(tmp_path / "missing")) == []
+
+
+# -- baseline sets (curated ground truth) -------------------------------------
+
+def _baseline_set(directory, rows, photos=True):
+    """A set folder: baseline.jsonl + images/<photo>."""
+    images = directory / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(row) for row in rows]
+    (directory / "baseline.jsonl").write_text("\n".join(lines) + "\n",
+                                               encoding="utf-8")
+    if photos:
+        for row in rows:
+            _touch(images, row["photo"])
+    return directory
+
+
+def _baseline_rows():
+    return [
+        {"photo": "a.png", "content": "A" * 12, "status": "verified",
+         "prior_read": "A" * 11 + "B", "want": "A" * 12},
+        {"photo": "b.png", "content": "B" * 12, "status": "verified",
+         "prior_read": "", "want": "B" * 12},
+        {"photo": "c.png", "content": "C" * 12, "status": "pending",
+         "prior_read": "C" * 12, "want": "C" * 12},
+    ]
+
+
+def test_baseline_verified_only_default(tmp_path):
+    _baseline_set(tmp_path, _baseline_rows())
+    ds = load_dataset(str(tmp_path))          # default name auto-resolves
+
+    assert ds.kind == "baseline"
+    assert ds.filename == "baseline.jsonl"
+    assert len(ds.records) == 2               # pending excluded
+    assert (ds.verified, ds.pending, ds.skipped_pending) == (2, 1, 1)
+    assert ds.records[0].want == "A" * 12     # content is the truth
+    assert ds.records[0].saw == "A" * 11 + "B"   # prior_read is the baseline
+    assert ds.records[1].issues == []         # empty prior_read is fine here
+
+    d = describe(ds)
+    assert d["kind"] == "baseline"
+    assert (d["verified"], d["pending"], d["skipped_pending"]) == (2, 1, 1)
+    assert d["rows"] == 2 and d["runnable"] == 2
+
+
+def test_baseline_include_pending_flags_unverified(tmp_path):
+    _baseline_set(tmp_path, _baseline_rows())
+    ds = load_dataset(str(tmp_path), verified_only=False)
+
+    assert len(ds.records) == 3
+    assert ds.skipped_pending == 0
+    pending_row = [r for r in ds.records if r.photo == "c.png"][0]
+    assert any("unverified" in issue for issue in pending_row.issues)
+
+
+def test_baseline_resolve_prefers_existing_name(tmp_path):
+    from ocr_vlm.dataset import resolve_dataset_file
+
+    (tmp_path / "baseline.jsonl").write_text("", encoding="utf-8")
+    assert resolve_dataset_file(str(tmp_path),
+                                "reads.jsonl") == "baseline.jsonl"
+    (tmp_path / "reads.jsonl").write_text("", encoding="utf-8")
+    assert resolve_dataset_file(str(tmp_path), "reads.jsonl") == "reads.jsonl"
+    assert resolve_dataset_file(str(tmp_path), "other.jsonl") == "other.jsonl"
+
+
+def test_baseline_missing_photo_flagged(tmp_path):
+    rows = [{"photo": "ghost.png", "content": "A" * 12,
+             "status": "verified", "prior_read": "", "want": ""}]
+    _baseline_set(tmp_path, rows, photos=False)
+    ds = load_dataset(str(tmp_path))
+
+    assert ISSUE_PHOTO in ds.records[0].issues
+    assert ds.missing_photos == ["ghost.png"]
+
+
+def test_photo_path_finds_images_subdir(tmp_path):
+    images = tmp_path / "images"
+    images.mkdir()
+    _touch(images, "x.png")
+    found = photo_path(str(tmp_path), "x.png")
+    assert found is not None
+    assert os.path.dirname(found) == str(images)
+    assert photo_path(str(tmp_path), "nope.png") is None
+
+
+def test_discover_finds_baseline_sets(tmp_path):
+    tools = tmp_path / "tools"
+    setdir = tools / "ocr-vlm" / "baselines" / "run-001"
+    setdir.mkdir(parents=True)
+    (setdir / "baseline.jsonl").write_text("", encoding="utf-8")
+    found = discover(filename="baseline.jsonl", tools_dir=str(tools))
+    assert found == [str(setdir)]

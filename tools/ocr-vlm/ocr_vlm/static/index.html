@@ -60,10 +60,14 @@
   .good { color: #81c784; } .bad { color: #ef5350; } .warnc { color: #ffd54f; }
   #summary b { color: #fff; }
   #detailImg { max-width: 100%; border-radius: 6px; border: 1px solid #444; }
+  #detailSeg { max-width: 100%; border-radius: 6px; border: 1px solid #444;
+               margin-top: 6px; }
 </style>
 </head>
 <body>
 <h1>Split-Flap OCR Benchmark <span class="hint">(VLM reads vs recorded baseline)</span></h1>
+<p class="hint" style="margin:4px 0 0">Ground truth comes from curated baseline sets —
+  <a href="/curate">create or curate baseline sets →</a></p>
 
 <div class="card">
   <h2>1. Configure</h2>
@@ -95,6 +99,7 @@
         <option value="auto">Auto — tool call, falls back to OCR text</option>
         <option value="tool">Tool call only (needs function calling)</option>
         <option value="text">OCR text only (e.g. PaddleOCR)</option>
+        <option value="classify">Local classifier — trained on your curated glyphs (no provider, no API key)</option>
       </select></div>
     <div><label>OCR prompt (text mode)</label>
       <input id="ocr_prompt" spellcheck="false" placeholder="OCR:" /></div>
@@ -114,10 +119,35 @@
     <div><label>Max output tokens (text mode, 0 = uncapped)</label>
       <input id="ocr_max_tokens" type="number" min="0" max="4096" /></div>
   </div>
+  <div class="row">
+    <div><label>Segmentation (text mode)</label>
+      <select id="image_mode">
+        <option value="strip">Strip — whole photo, one request</option>
+        <option value="cells">Cells — one glyph per request (module count × slower)</option>
+        <option value="montage">Montage — detected grid, one labeled sheet</option>
+        <option value="cells-detect">Cells-detect — detected grid, one module per request</option>
+        <option value="strip-detect">Strip-detect — rectified display strip</option>
+      </select></div>
+    <div><label>Preprocess (detected modes)</label>
+      <select id="preprocess">
+        <option value="none">None — as captured</option>
+        <option value="contrast">Contrast (CLAHE)</option>
+        <option value="invert">Invert — dark glyph on white</option>
+        <option value="binary">Binary — Otsu, black on white</option>
+      </select></div>
+  </div>
+  <div class="row">
+    <div><label>Debug images</label>
+      <input id="debug_images" type="checkbox" style="width:auto" /></div>
+    <div><span class="hint">save the composed image of every row under
+      <code>runs/run-NNN/composed/</code></span></div>
+  </div>
   <p class="hint">These apply to the OCR text path only — the tool-call
      path keeps production parity (1024 px, q80, annotated photo). A low
      token cap keeps repetition-loop rows fast; the parser only reads the
-     first characters anyway.</p>
+     first characters anyway. Detected modes locate the display with
+     OpenCV, crop the real module grid, decide blank cells locally and
+     flag rows <code>no-detect</code> when they fall back to strip.</p>
   <label>Charset (allowed drum characters — space first)</label>
   <input id="charset" spellcheck="false" />
   <div><button class="mid" onclick="save()">Save</button></div>
@@ -125,23 +155,26 @@
 </div>
 
 <div class="card">
-  <h2>2. Dataset</h2>
-  <p class="hint">A JSONL file with one record per line:
-    <code>{"photo": "sw_37_f255.png", "want": "%%%%%%%%%%%%", "saw": "%%%%%%%#%%%%"}</code>.
-    Photos are expected in the same directory.</p>
-  <div class="row">
-    <div><label>Directory (holds reads.jsonl + photos)</label>
-      <input id="dataset_dir" spellcheck="false" /></div>
-    <div><label>File name</label><input id="dataset_file" placeholder="reads.jsonl" /></div>
-  </div>
-  <div>
-    <button class="mid" onclick="discover()">Discover run dirs</button>
-    <button class="mid" onclick="validateDataset()">Validate</button>
-  </div>
-  <label>Discovered datasets (from sibling tool run dirs)</label>
-  <select id="discover_list" onchange="pickDiscovered()">
-    <option value="">—</option>
+  <h2>2. Baseline dataset</h2>
+  <p class="hint">Testing runs against a curated <b>baseline set</b> — copied photos with
+    human-verified content (ground truth). Pick a set below; a set with no verified entry
+    is not selectable until you curate it. &nbsp;<a href="/curate">open the curator →</a></p>
+  <label>Baseline set (validated sets only)</label>
+  <select id="baseline_list" onchange="pickBaseline()">
+    <option value="">— choose a baseline set —</option>
   </select>
+  <div>
+    <button class="mid" onclick="validateDataset()">Validate set</button>
+    <button class="mid" onclick="loadBaselines()">Refresh sets</button>
+  </div>
+  <div class="row">
+    <div><label>Preview segmentation of a photo (detected modes)</label>
+      <input id="preview_photo" placeholder="e.g. sw_37_f255.png" /></div>
+    <div><label>&nbsp;</label><button class="mid" onclick="previewSeg()">Show preview</button></div>
+  </div>
+  <img id="previewImg" style="display:none; max-width:100%; border-radius:6px;
+       border:1px solid #444; margin-top:8px" alt="Segmentation preview" />
+  <p class="hint" id="previewMsg"></p>
   <p class="hint" id="dsmsg"></p>
 </div>
 
@@ -167,7 +200,12 @@
 <div class="card" id="detailCard" style="display:none">
   <h2>Inspect: <span id="detailTitle"></span></h2>
   <img id="detailImg" alt="Dataset photo" />
+  <div id="detailSegWrap" style="display:none">
+    <h3>What the detected read sent</h3>
+    <img id="detailSeg" alt="Composed segmentation image" />
+  </div>
   <p class="hint" id="detailMeta"></p>
+  <p class="hint" id="detailSegMeta"></p>
   <p>want: <code id="detailWant"></code> &nbsp; baseline: <code id="detailSaw"></code>
      &nbsp; read: <code id="detailRead"></code></p>
   <div id="detailChips"></div>
@@ -194,7 +232,7 @@
   <div class="tablewrap">
     <table>
       <thead><tr>
-        <th>run</th><th>status</th><th>model</th><th>photos</th>
+        <th>run</th><th>status</th><th>model</th><th>pipeline</th><th>photos</th>
         <th>VLM total</th><th>VLM avg</th><th>baseline total</th><th>baseline avg</th><th>avg time (s)</th>
       </tr></thead>
       <tbody id="runs"></tbody>
@@ -236,8 +274,6 @@ async function load() {
   const c = await api("/api/config");
   $("llm_model").value = c.llm_model || "";
   $("llm_base_url").value = c.llm_base_url || "";
-  $("dataset_dir").value = c.dataset_dir || "";
-  $("dataset_file").value = c.dataset_file || "reads.jsonl";
   $("module_count").value = c.module_count ?? 12;
   $("concurrency").value = c.concurrency ?? 1;
   $("read_mode").value = c.read_mode || "auto";
@@ -246,7 +282,11 @@ async function load() {
   $("image_quality").value = c.image_quality ?? 80;
   $("image_format").value = c.image_format || "jpeg";
   $("ocr_max_tokens").value = c.ocr_max_tokens ?? 128;
+  $("image_mode").value = c.image_mode || "strip";
+  $("preprocess").value = c.preprocess || "none";
+  $("debug_images").checked = !!c.debug_images;
   $("charset").value = c.charset ?? "";
+  loadBaselines(c.dataset_dir || "");
   const known = [...$("preset").options].map((o) => o.value);
   $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
 }
@@ -258,8 +298,6 @@ function cfgPayload() {
     llm_base_url: $("llm_base_url").value.trim(),
     llm_model: $("llm_model").value.trim(),
     llm_api_key: $("llm_api_key").value,
-    dataset_dir: $("dataset_dir").value.trim(),
-    dataset_file: $("dataset_file").value.trim() || "reads.jsonl",
     charset: $("charset").value,
     module_count: Number($("module_count").value || 12),
     concurrency: Number($("concurrency").value || 1),
@@ -269,6 +307,10 @@ function cfgPayload() {
     image_quality: Number($("image_quality").value || 80),
     image_format: $("image_format").value,
     ocr_max_tokens: Number($("ocr_max_tokens").value ?? 128),
+    image_mode: $("image_mode").value,
+    preprocess: $("preprocess").value,
+    debug_images: $("debug_images").checked,
+    verified_only: true,      // testing always uses verified (curated) content
   };
 }
 async function save() {
@@ -279,36 +321,101 @@ async function save() {
     $("llm_api_key").value = "";
   } catch (e) { $("cfgmsg").textContent = "Save failed: " + e.message; }
 }
-async function discover() {
+// Baseline sets are the only dataset source the UI offers: testing must
+// run on human-verified content, and a set with no verified entry cannot
+// be selected until it is curated on /curate.
+let baselinePaths = {};
+let baselineSelected = "";
+async function loadBaselines(preferPath) {
   try {
-    const s = await api("/api/dataset/discover");
-    const sel = $("discover_list");
-    sel.innerHTML = '<option value="">—</option>';
-    for (const d of s.dirs) {
+    const s = await api("/api/baselines");
+    const sel = $("baseline_list");
+    const want = preferPath ?? (baselinePaths[sel.value] || "");
+    sel.innerHTML = '<option value="">— choose a baseline set —</option>';
+    for (const set of s.sets) {
+      baselinePaths[set.name] = set.path;
+      const empty = (set.stats.verified || 0) === 0;
       const o = document.createElement("option");
-      o.value = d; o.textContent = d; sel.appendChild(o);
+      o.value = set.name;
+      o.disabled = empty;
+      o.textContent =
+        `${set.name} — verified ${set.stats.verified}/${set.stats.total}` +
+        (empty ? " (not validated yet — curate first)" : "");
+      sel.appendChild(o);
     }
-    if (!s.dirs.length) $("dsmsg").textContent = "No sibling run dirs found; type the path directly.";
-  } catch (e) { $("dsmsg").textContent = "Discover failed: " + e.message; }
+    baselineSelected = "";
+    if (want) {
+      const match = s.sets.find((x) => x.path === want);
+      if (match && (match.stats.verified || 0) > 0) {
+        sel.value = match.name;
+        baselineSelected = match.name;
+      }
+    }
+    if (baselineSelected) {
+      $("dsmsg").textContent =
+        `selected baseline set ${baselineSelected} — "Validate set" re-checks it`;
+    } else if (!s.sets.length) {
+      $("dsmsg").textContent =
+        "no baseline sets yet — create one on the curator page (/curate)";
+    } else {
+      $("dsmsg").textContent = "pick a validated baseline set to test against";
+    }
+  } catch (e) { /* the list is optional */ }
 }
-function pickDiscovered() {
-  const v = $("discover_list").value;
-  if (v) $("dataset_dir").value = v;
+async function pickBaseline() {
+  const name = $("baseline_list").value;
+  if (!name) { baselineSelected = ""; return; }
+  baselineSelected = name;
+  try {
+    await api("/api/config", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({dataset_dir: baselinePaths[name] || "",
+                            dataset_file: "baseline.jsonl",
+                            verified_only: true})});
+  } catch (e) { $("dsmsg").textContent = "select failed: " + e.message; return; }
+  $("preview_photo").value = "";
+  await validateDataset();
 }
 async function validateDataset() {
+  if (!$("baseline_list").value) {
+    $("dsmsg").textContent = "pick a validated baseline set first";
+    return;
+  }
   try {
     await save();
     const d = await api("/api/dataset/validate", {method: "POST"});
     const w = d.widths ? `${d.widths.min}..${d.widths.max}` : "?";
     const pref = d.prefixes.map((p) => `${p.prefix}(${p.rows})`).join(" ");
+    const kind = d.kind === "baseline"
+      ? `baseline set: ${d.verified} verified / ${d.pending} pending` +
+        (d.skipped_pending ? ` (${d.skipped_pending} pending excluded)` : "") + " · "
+      : "";
     $("dsmsg").textContent =
+      kind +
       `${d.rows} rows (${d.runnable} runnable) · width ${w} · ` +
       `${d.missing_count} missing photo(s) · ${d.problems_count} bad line(s) · ` +
       `${d.flagged_count} flagged · prefixes: ${pref}`;
     if (d.problems.length) $("dsmsg").textContent += " | " + d.problems.slice(0, 3).join(" | ");
+    if (!$("preview_photo").value && (d.sample_photos || []).length)
+      $("preview_photo").value = d.sample_photos[0];
   } catch (e) { $("dsmsg").textContent = "Validate failed: " + e.message; }
 }
+function previewSeg() {
+  const photo = $("preview_photo").value.trim();
+  if (!photo) { $("previewMsg").textContent = "Type a photo file name first."; return; }
+  $("previewImg").style.display = "block";
+  $("previewImg").src = "/api/dataset/preview/" + encodeURIComponent(photo) +
+    "?mode=" + encodeURIComponent($("image_mode").value) +
+    "&style=" + encodeURIComponent($("preprocess").value) +
+    "&t=" + Date.now();
+  $("previewMsg").textContent = "rendering…";
+}
 async function start() {
+  if (!baselineSelected) {
+    $("runmsg").textContent =
+      "Pick a validated baseline set first (card 2) — testing only runs on curated content.";
+    return;
+  }
   try {
     await save();
     const limit = $("run_limit").value;
@@ -358,6 +465,24 @@ async function inspect(index) {
       (r.read_mode ? ` · ${r.read_mode} read` : "") +
       (r.adjusted ? " · adjusted" : "") +
       (r.realigned ? " · realigned" : "");
+    const seg = r.segmentation;
+    if (r.composed) {
+      $("detailSegWrap").style.display = "block";
+      $("detailSeg").src = "/api/run/row/" + index + "/composed?t=" + Date.now();
+      $("detailSegMeta").textContent =
+        "composed image sent to the model (saved debug artifact)";
+    } else if (seg) {
+      $("detailSegWrap").style.display = "block";
+      $("detailSeg").src = "/api/dataset/preview/" +
+        encodeURIComponent(r.photo) + "?t=" + Date.now();
+      $("detailSegMeta").textContent = seg.detected
+        ? `segmentation preview (current settings) · display ${seg.display?.width ?? "?"}px · ` +
+          `${seg.blanks ?? "?"} blank cell(s) decided by OpenCV`
+        : "segmentation preview: display not detected (row fell back to strip)";
+    } else {
+      $("detailSegWrap").style.display = "none";
+      $("detailSegMeta").textContent = "";
+    }
     $("detailRaw").textContent = r.raw ? "raw reply: " + r.raw : "";
     $("detailWant").textContent = JSON.stringify(r.want_norm ?? r.want);
     $("detailSaw").textContent = JSON.stringify(r.saw_norm ?? "");
@@ -386,7 +511,7 @@ async function inspect(index) {
   }
 }
 
-function renderSummary(s) {
+function renderSummary(s, ds, pipeline) {
   const v = s.vlm || {}, b = s.saw || {}, h = s.head_to_head || {};
   const rowsHtml = `
     <table>
@@ -440,6 +565,8 @@ function renderSummary(s) {
            : "VLM equal to baseline"))
     : "–";
   $("summary").innerHTML = `
+    ${pipeline ? `<p class="hint"><b>pipeline</b> (recorded for this run):
+       <code>${esc(pipeline)}</code></p>` : ""}
     <p><b>VLM</b> total ${v.total ?? "–"} mismatches (avg ${v.mean ?? "–"}) vs
        <b>baseline</b> total ${b.total ?? "–"} (avg ${b.mean ?? "–"}) over
        ${s.scored_vlm ?? 0} scored rows — ${verdict}.</p>
@@ -457,7 +584,11 @@ function renderSummary(s) {
     </div>
     <p class="hint">rows attempted ${s.rows ?? 0} · scored VLM ${s.scored_vlm ?? 0} ·
        scored baseline ${s.scored_saw ?? 0} · errors ${s.errors ?? 0} ·
-       adjusted ${s.adjusted ?? 0}</p>`;
+       adjusted ${s.adjusted ?? 0}${ds ? " · ground truth: " +
+         (ds.kind === "baseline" ? "curated baseline content"
+                                 : "commanded frame") +
+         (ds.skipped_pending ? ` (${ds.skipped_pending} pending excluded)` : "")
+         : ""}</p>`;
 }
 
 async function loadRuns() {
@@ -468,7 +599,11 @@ async function loadRuns() {
     for (const r of s.runs) {
       const tr = document.createElement("tr");
       tr.innerHTML = `<td>${esc(r.run)}</td><td>${esc(r.status ?? "")}</td>
-        <td>${esc(r.llm_model ?? "")}</td><td>${r.scored_vlm ?? "–"}</td>
+        <td>${esc(r.llm_model ?? "")}</td>
+        <td class="mono" style="max-width:320px; white-space:nowrap;
+            overflow:hidden; text-overflow:ellipsis"
+            title="${esc(r.pipeline ?? "")}">${esc(r.pipeline ?? "–")}</td>
+        <td>${r.scored_vlm ?? "–"}</td>
         <td>${r.vlm_total ?? "–"}</td><td>${r.vlm_avg ?? "–"}</td>
         <td>${r.saw_total ?? "–"}</td><td>${r.saw_avg ?? "–"}</td>
         <td>${r.avg_time_s ?? "–"}</td>`;
@@ -544,7 +679,8 @@ async function poll() {
     }
     if (s.summary && s.run_seq !== lastSummaryRun) {
       lastSummaryRun = s.run_seq;
-      renderSummary(s.summary);
+      renderSummary(s.summary, s.dataset,
+                    (s.pipeline && s.pipeline.text) || s.pipeline || "");
     }
     if (["done", "aborted", "failed"].includes(s.status) && s.run_seq !== lastReportRun) {
       lastReportRun = s.run_seq;
@@ -559,6 +695,13 @@ async function poll() {
   } catch (e) { /* server restarting? keep polling */ }
   setTimeout(poll, 1500);
 }
+
+$("previewImg").onload = () => {
+  $("previewMsg").textContent = "rendered — a detection failure returns the raw photo instead";
+};
+$("previewImg").onerror = () => {
+  $("previewMsg").textContent = "preview failed (photo missing or server error)";
+};
 
 load();
 loadRuns();
