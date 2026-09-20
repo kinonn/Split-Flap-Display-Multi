@@ -1,13 +1,13 @@
 #pragma once
 
 // Shared calibration constants for the vision-guided auto-calibration API
-// (see tools/calib-agent/PRODUCTION.md and src/web/calib-contract.json).
+// (see tools/calib/PRODUCTION.md and src/web/calib-contract.json).
 //
 // Deliberately Arduino-free so it can be unit-tested on the host without
-// stubs. The JSON contract file duplicates these values for the AI agent —
-// keep the two in sync: test/calib_contract_test.cpp compares the charsets
-// and limits in src/web/calib-contract.json against SplitFlapModule's drum
-// tables and these constants on the host.
+// stubs. The JSON contract file duplicates these values for the
+// calibration tools — keep the two in sync: test/calib_contract_test.cpp
+// compares the charsets and limits in src/web/calib-contract.json against
+// SplitFlapModule's drum tables and these constants on the host.
 
 #define CALIB_HOLD_MODE 4
 #define CALIB_MAX_MODULES 8

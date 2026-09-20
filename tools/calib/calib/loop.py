@@ -1,4 +1,4 @@
-"""P0->P4 calibration state machine (see tools/calib-agent/PRODUCTION.md).
+"""P0->P4 calibration state machine (see PRODUCTION.md in this tool).
 
 Runs against duck-typed `display` (calib/display.py Display or a test
 fake) and `camera` (calib/camera.py Camera or a test fake). Group 1 uses

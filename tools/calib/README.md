@@ -6,7 +6,8 @@ display. No browser needed — everything goes through the display's HTTP
 APIs (`/api/calib/*`, `/settings`). Fleet-ready: the master fans show
 frames and offset pushes out to ESP-NOW remotes.
 
-Spec: `../calib-agent/PRODUCTION.md` (+ `PHASE1..4`).
+Spec: `PRODUCTION.md` (+ `PHASE1..4`), kept in this folder (originally
+authored for the `tools/calib-agent` harness).
 
 ## Setup (one time)
 
@@ -51,8 +52,9 @@ per-module verdict chips (click to inspect vs the expected frame), the
 template bank, and the final `report.json`. Abort and pre-run snapshot
 restore included. State lives in `./calib-ui-data` (`CALIB_DATA`
 overrides it); `CALIB_HOST`/`CALIB_PORT` override the listen address.
-The VLM harness in `../calib-agent/app` is the same idea with an LLM
-driver — the API shape here mirrors it where sensible.
+The web UI follows the API shape of the former VLM harness
+(`tools/calib-agent/app`, since removed) where sensible — minus
+everything LLM.
 
 Useful flags: `--camera-index 0`, `--phase {1,2,3,4}` (default `4`),
 `--dwell-ms 800`, `--contract PATH` (override bundled

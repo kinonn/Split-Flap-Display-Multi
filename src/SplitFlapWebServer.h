@@ -68,7 +68,7 @@ class SplitFlapWebServer {
     void setEspNow(SplitFlapEspNow *espNow) { this->espNow = espNow; }
 
     // Calibration API state (vision-guided auto-calibration, see
-    // tools/calib-agent/PRODUCTION.md). The web (AsyncTCP) task only stages
+    // tools/calib/PRODUCTION.md). The web (AsyncTCP) task only stages
     // show/preview work in PendingActions; the loop task drains it and owns
     // the display, then flips these flags. All cross-task members are
     // atomic or mutex-guarded.

@@ -117,15 +117,14 @@ int main() {
     CHECK(jsonInt("maxNudgesPerRemoteScope") == CALIB_MAX_NUDGES_PER_REMOTE);
 
     // Every shipped copy of the contract must stay in step with the served
-    // one: tools/calib and tools/calib-agent carry mirrors that the tools
-    // read offline (issue kinonn-bot#38's first draft shipped them stale).
+    // one: tools/calib carries a mirror that the tool reads offline
+    // (issue kinonn-bot#38's first draft shipped it stale).
     {
         std::ifstream served("src/web/calib-contract.json", std::ios::binary);
         std::ostringstream servedBuf;
         servedBuf << served.rdbuf();
         const char *mirrors[] = {
             "tools/calib/calib/contract.json",
-            "tools/calib-agent/contract.json",
         };
         for (const char *path : mirrors) {
             std::ifstream in(path, std::ios::binary);
