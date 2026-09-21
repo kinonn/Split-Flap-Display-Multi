@@ -732,9 +732,9 @@ def test_ladder_skips_reshow_when_nothing_moved(tmp_path):
 
 
 def test_majority_residual_routes_to_module_fix(tmp_path):
-    # A module whose reads are +1 on ~70% of the drum misses the 80%
-    # purity gate; a >=50% plurality single-char residual is fixed on the
-    # module cell instead of escalating as "unreliable".
+    # A module whose reads are +1 on ~70% of the drum gets a proportional
+    # band-2 module move (not a whole-character fix, not an escalation);
+    # the counter-faulted minority flows to P2 as residual work.
     d = FakeDisplay(total=4, charset=48)
     d.seed_module_error(0, d.spc)  # whole drum one character ahead
     minority = list(d.drum[1:15])
@@ -748,13 +748,19 @@ def test_majority_residual_routes_to_module_fix(tmp_path):
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
     calib._p1_coarse()
-    assert d.mod_off[0] == 0, d.mod_off
+    # 32/48 = 66.7% -> band 2 -> +38 steps with unit 43 ('%' reads blank
+    # and ':' reads the '?' unknown sentinel, so both are excluded).
+    assert d.mod_off[0] == -d.spc + 38, d.mod_off
     assert not any("unreliable reads" in e["text"] for e in events)
-    assert any("majority shift +1" in e["text"] for e in events)
+    assert any("P1 band 2" in e["text"] for e in events)
+    # Post-move the minority reads -1, except 'A' which lands on the blank
+    # flap and is excluded by the blank rule.
+    assert sorted(calib._p1_flagged) == sorted(set(minority) - {"A"})
 
 
-def test_scattered_residuals_still_escalate(tmp_path):
-    # Without a majority residual, below-purity reads remain reader noise.
+def test_conflicting_residuals_route_to_p2_not_escalated(tmp_path):
+    # Opposing ±1 faults (14 vs 9) are a conflict, not noise: no module
+    # move, no escalation — all 23 faulted characters become P2 work.
     d = FakeDisplay(total=4, charset=48)
     for ch in list(d.drum[1:15]):
         d.seed_char_error(0, d.drum.index(ch), d.spc)
@@ -768,9 +774,10 @@ def test_scattered_residuals_still_escalate(tmp_path):
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
     calib._p1_coarse()
-    assert any("unreliable reads" in e["text"] for e in events)
-    assert not any("majority shift" in e["text"] for e in events)
+    assert any("P1 band 3" in e["text"] for e in events)
+    assert not any("unreliable reads" in e["text"] for e in events)
     assert d.mod_off[0] == 0  # nothing applied
+    assert len(calib._p1_flagged) == 23
 
 
 def test_blank_read_against_nonblank_command_is_junk(tmp_path):
@@ -787,10 +794,10 @@ def test_blank_read_against_nonblank_command_is_junk(tmp_path):
     assert calib._shift(blank_against_blank, " ") == 0
 
 
-def test_single_flap_arc_is_routed_to_p2_not_escalated(tmp_path):
-    # A same-sign single-flap arc drags a module below the purity gate but
-    # is NOT reader noise: the module stays usable and the arc characters
-    # become ordinary per-character P2 work.
+def test_single_flap_arc_gets_proportional_move_and_p2_residual(tmp_path):
+    # A same-sign single-flap arc (13 chars = 27% of the drum) falls in
+    # band 2: the module moves proportionally and the arc characters flow
+    # to P2 as residual work. Nothing escalates.
     d = FakeDisplay(total=4, charset=48)
     arc = list(d.drum[1:14])  # 13 chars = 27% of the drum
     for ch in arc:
@@ -803,11 +810,11 @@ def test_single_flap_arc_is_routed_to_p2_not_escalated(tmp_path):
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
     calib._p1_coarse()
-    assert any("single-flap arc" in e["text"] for e in events)
+    # 13/48 = 27.1% -> band 2 -> +16 steps with unit 43.
+    assert d.mod_off[0] == 16, d.mod_off
+    assert any("P1 band 2" in e["text"] for e in events)
     assert not any("unreliable reads" in e["text"] for e in events)
-    assert d.mod_off[0] == 0        # no module-cell correction
-    assert not d.persists
-    assert set(arc) <= set(calib._p1_flagged)  # the arc is P2 work
+    assert sorted(calib._p1_flagged) == sorted(arc)  # the arc is P2 work
 
 
 def test_report_written_to_disk(tmp_path):
