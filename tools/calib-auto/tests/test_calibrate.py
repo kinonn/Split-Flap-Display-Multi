@@ -213,6 +213,26 @@ def test_batch_nudge_chunks_to_the_firmware_caps(tmp_path):
             for n in flat] == sorted(nudges), "nudges lost or reordered"
 
 
+def test_module_cell_large_delta_passes_through_unchunked(tmp_path):
+    # Module cells (charIndex -1) bypass _preview_chunks: a band-1
+    # multi-character move (e.g. -84 steps) goes out as ONE batch entry —
+    # the endpoint accepts |delta| <= stepsPerRot for module cells.
+    d = FakeDisplay(total=4, charset=48)
+    calib = Calibrator(d, FakeCamera(), SimReader(d),
+                       photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                       min_confidence=0.5, mode="full")
+    calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
+    calib.group_widths = d.widths()
+    calib.steps_per_char = d.spc
+    calib._load_remote_offsets(d.snapshot()["settings"])
+    calib._ensure_cell(1, 1, -1)
+    calib._batch_nudge([(1, 1, -1, -84)])
+    flat = [n for batch in d.batches for n in batch]
+    assert [(n["scope"], n["module"], n["charIndex"], n["delta"])
+            for n in flat] == [(1, 1, -1, -84)]
+    assert d.res_mod[1] == -84
+
+
 def test_dry_run_leaves_char_faults_untouched(tmp_path):
     # Dry-run is read-only: even a character fault the full mode would fix
     # must stay untouched (no previews, no persists, no batches).
