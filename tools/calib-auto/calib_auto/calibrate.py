@@ -12,8 +12,8 @@ Phases (independently selectable; P0 always runs as a read-only gate):
 - **P0** register: blank, all-H and index-strip frames must read back
   (camera framing/focus gate).
 - **P1** coarse: reverse uniform sweep over the whole drum; the
-  per-module shift histogram gives whole-character module offsets in
-  one shot.
+  per-module gap-share bands give proportional module step offsets
+  (whole-character multiples down to sub-character corrections).
 - **P2** fine: per-character offsets from the P1 residual map, tuned
   with a parallel coarse-to-fine ladder (one cell per module per wave).
 - **P4** verify: repeatability plus short forward boundary hops.
@@ -93,6 +93,20 @@ SWEEP_MAJORITY_SHARE = 0.50
 # noise: keep it usable (mode 0) so each arc character becomes ordinary
 # per-character P2 work instead of escalating the whole module.
 SWEEP_ARC_SHARE = 0.125
+# P1 proportional module offset: per-direction gap-share bands over the
+# full drum (48). UNIT is the floored whole-character step count; band 2
+# scales it linearly so bands 1 and 2 meet exactly at BAND_FULL.
+P1_STEPS_PER_CHAR = 42
+P1_BAND_FULL = 0.75      # >= this share -> whole-character multiples
+P1_BAND_MIN = 0.125      # >= this share -> proportional correction
+P1_CONFLICT_MIN = 0.125  # losing direction at/above this -> conflicted
+# Coherence floor: the top exact shift (zeros included) must hold at
+# least this share of decisive samples, or the reads disagree with each
+# other and the module is unjudgeable -> escalate (never band 3, so the
+# MAX_UNRELIABLE_READS bad-camera rail keeps firing). 0.25 brackets the
+# genuine-conflict case (19/48 = 40% must stay judged for P2) above
+# reader garbage (scattered shifts, top ~5%).
+P1_COHERENCE_MIN = 0.25
 # Glyphs that render identically on the drum: a difference between partners
 # is "no information", never evidence and never a correction.
 CONFUSABLES = {
@@ -158,6 +172,60 @@ def _preview_chunks(delta: int, limit: int = PREVIEW_DELTA_MAX) -> list[int]:
         out.append(step)
         delta -= step
     return out
+
+
+def _dominant_gap(gaps: list[int | None]) -> tuple[int, int, int] | None:
+    """(sign, n, count) of the dominant gap direction.
+
+    `n` is the minimum |gap| and `count` the same-sign sample count.
+    Returns None when there is no dominant direction: empty input, an
+    exact tie, or a conflicted module (losing side holds >=
+    P1_CONFLICT_MIN of the drum — P2 must fix each side independently).
+    Shares are over len(gaps) (one entry per swept drum character).
+    """
+    total = len(gaps)
+    pos = [g for g in gaps if g is not None and g > 0]
+    neg = [g for g in gaps if g is not None and g < 0]
+    if not pos and not neg:
+        return None
+    if pos and neg:
+        if len(pos) == len(neg):
+            return None
+        dom, sub = (pos, neg) if len(pos) > len(neg) else (neg, pos)
+        if total and len(sub) / total >= P1_CONFLICT_MIN:
+            return None
+    else:
+        dom = pos or neg
+    sign = 1 if dom is pos else -1
+    return (sign, min(abs(g) for g in dom), len(dom))
+
+
+def p1_module_steps(gaps: list[int | None],
+                    unit: int = P1_STEPS_PER_CHAR) -> tuple[int, int]:
+    """Proportional P1 module offset from per-character gap counts.
+
+    `gaps` is one signed shift per drum character (`None` = excluded
+    sample: untrusted read, confusable pair, blank-flap misfire). The
+    dominant share `x` is over the FULL drum (len(gaps)) — excluded
+    samples dilute, never concentrate. `unit` is the floored
+    whole-character step count for THIS drum (floor(steps_per_rot /
+    len(drum)): 42 on a 48-drum, 55 on a 37-drum). Returns (signed motor
+    steps, band 1|2|3); band 3 means "judged, move nothing" (residuals go
+    to P2).
+    """
+    if not gaps:
+        return (0, 3)
+    dom = _dominant_gap(gaps)
+    if dom is None:
+        return (0, 3)
+    sign, n, count = dom
+    x = count / len(gaps)
+    if x >= P1_BAND_FULL:
+        return (sign * n * unit, 1)
+    if x >= P1_BAND_MIN:
+        # Half-up rounding (not banker's round): floor(v + 0.5).
+        return (sign * int(unit * n * x / P1_BAND_FULL + 0.5), 2)
+    return (0, 3)
 
 
 def _parse_csv_matrix(raw, rows: int, cols: int) -> list[list[int]]:
@@ -1287,79 +1355,72 @@ class Calibrator:
         readings, chars = self._sweep()
         shifts = {m: {ch: self._shift(readings[m].get(ch), ch)
                       for ch in chars} for m in range(self.total)}
-        modes: dict[int, int] = {}
+        decided: dict[int, tuple[int, int]] = {}  # module -> (steps, band)
+        pre_total: dict[int, int] = {}  # module -> sum |shift| pre-move
         for m in range(self.total):
-            mode, purity, total = self._mode_purity(list(shifts[m].values()))
-            if total < SWEEP_MIN_SAMPLES or purity < SWEEP_TRUST_PURITY:
-                # Systematic majority fault: a single-character residual on
-                # at least half the trusted samples is fixable on the module
-                # cell even though it misses the purity gate. Escalating it
-                # dead-ends every affected char in P2 (the ±32 char-cell
-                # clamp can never hold a whole-character fix); routing it
-                # through the normal whole-character path lets the re-read
-                # pass and P2 sort out whatever remains.
-                if (total >= SWEEP_MIN_SAMPLES and mode is not None
-                        and abs(mode) == 1
-                        and purity >= SWEEP_MAJORITY_SHARE):
-                    modes[m] = mode
-                    self.event("read",
-                               f"m{m}: majority shift {mode:+d} "
-                               f"({purity:.0%} of {total}); module-cell fix")
-                    continue
-                # Single-flap arc: dominant state still CORRECT but a
-                # >= 12.5% same-sign ±1 arc. A whole-drum shift applied
-                # blind would trade the arc for a bigger fault on the
-                # correct majority; instead the module stays at mode 0 and
-                # the arc characters flow into the residual map as ordinary
-                # per-character P2 work (never an "unreliable reads"
-                # escalation, which would dead-end the whole module).
-                arc = [(ch, s) for ch, s in shifts[m].items()
-                       if s is not None and abs(s) == 1]
-                if (mode == 0 and total >= SWEEP_MIN_SAMPLES
-                        and len(arc) / max(1, len(self.drum))
-                        >= SWEEP_ARC_SHARE
-                        and len({s < 0 for _, s in arc}) == 1):
-                    modes[m] = 0
-                    self.event("read",
-                               f"m{m}: single-flap arc ({len(arc)} chars, "
-                               f"{len(arc) / len(self.drum):.0%} of drum, "
-                               f"{arc[0][1]:+d}); per-char work")
-                    continue
+            values = [shifts[m][ch] for ch in chars]
+            decisive = [v for v in values if v is not None]
+            if len(decisive) < SWEEP_MIN_SAMPLES:
                 self._escalate(m, "?",
-                               f"unreliable reads ({total} samples, "
-                               f"purity {purity:.0%})")
+                               f"unreliable reads ({len(decisive)} samples)")
                 continue
-            modes[m] = mode
-            self.event("read", f"m{m}: shift mode {mode:+d} "
-                               f"({purity:.0%} of {total})")
-        # One-shot whole-character offsets.
-        for m in modes:
+            top = Counter(decisive).most_common(1)[0][1]
+            if top / len(decisive) < P1_COHERENCE_MIN:
+                self._escalate(
+                    m, "?",
+                    f"unreliable reads (no agreement: top {top}/"
+                    f"{len(decisive)})")
+                continue
+            steps, band = p1_module_steps(values, self.steps_per_char)
+            decided[m] = (steps, band)
+            pre_total[m] = sum(abs(v) for v in decisive)
+            npos = sum(1 for v in values if v is not None and v > 0)
+            nneg = sum(1 for v in values if v is not None and v < 0)
+            self.event("read", f"m{m}: P1 band {band} ({steps:+d} steps; "
+                               f"+{npos}/-{nneg} of {len(chars)})")
+        # Proportional module offsets (bands 1-2); band 3 moves nothing.
+        for m in decided:
             self._ensure_cell(self._group_of(m), self._local_index(m), -1)
-        whole = {m: mode * self.steps_per_char
-                 for m, mode in modes.items() if mode}
+        whole = {m: steps for m, (steps, _band) in decided.items() if steps}
         if whole:
-            self.event("phase", f"P1 whole-character fixes on "
+            self.event("phase", f"P1 module fixes on "
                                 f"{len(whole)} modules")
             self._batch_nudge([(self._group_of(m), self._local_index(m), -1, d)
                                for m, d in sorted(whole.items())])
-        # Re-read every frame where a trusted module deviated from its mode.
-        deviant = sorted({ch for m in modes for ch in chars
-                          if shifts[m][ch] is not None
-                          and shifts[m][ch] != modes[m]}, key=self.drum.index)
+        # Re-read every gapped frame on a judged module — plus every frame
+        # on a MOVED module, whose previously-correct characters the move
+        # itself may have perturbed (stale zeros would otherwise hide the
+        # damage from the residual map).
+        deviant = sorted({ch for m in decided for ch in chars
+                          if shifts[m][ch] not in (None, 0)
+                          or decided[m][0] != 0},
+                         key=self.drum.index)
         if deviant:
             self._reread_chars(deviant, readings, "p1r")
+        # Sign guard: a correct move shrinks the module's total gap. If the
+        # total grew, the shift->nudge polarity is inverted (or the move
+        # overshot badly) — halt before persisting anything. Moved modules
+        # re-read every character, so all readings below are post-move.
+        for m, delta in whole.items():
+            post_total = sum(
+                abs(s) for ch in chars
+                if (s := self._shift(readings[m].get(ch), ch)) is not None)
+            if post_total > pre_total[m]:
+                raise CalibError(
+                    f"P1 sign guard m{m}: total gap went "
+                    f"{pre_total[m]} -> {post_total} "
+                    f"after {delta:+d} steps; refusing to persist")
         deviant_set = set(deviant)
         residual: dict[int, dict[str, int | None]] = {}
-        for m in modes:
+        for m in decided:
             out: dict[str, int | None] = {}
             for ch in chars:
                 if ch in deviant_set:
                     out[ch] = self._shift(readings[m].get(ch), ch)
                 else:
-                    out[ch] = 0 if shifts[m][ch] == modes[m] \
-                        else shifts[m][ch]
+                    out[ch] = shifts[m][ch]
             residual[m] = out
-        # Commit whole-character fixes: local previews sit in the residue,
+        # Commit module fixes: local previews sit in the residue,
         # remote previews are RAM-only on the group, so persist the absolute
         # value from the recorded base there.
         for m, delta in whole.items():
@@ -1383,7 +1444,7 @@ class Calibrator:
                                delta=delta)
         # Cells still wrong or unreadable are fine-phase / hardware work.
         self._p1_flagged = sorted(
-            {ch for m in modes for ch in chars
+            {ch for m in decided for ch in chars
              if residual[m].get(ch) not in (None, 0)},
             key=self.drum.index)
 
@@ -1702,7 +1763,7 @@ class Calibrator:
         except (TypeError, ValueError):
             steps_per_rot = 2048
         self.steps_per_char = max(
-            1, round(steps_per_rot / max(1, len(self.drum)))) if self.drum else 1
+            1, steps_per_rot // max(1, len(self.drum))) if self.drum else 1
         self._load_remote_offsets(settings)
         report: dict = {
             "contractVersion": SUPPORTED_CONTRACT,
