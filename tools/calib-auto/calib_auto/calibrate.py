@@ -93,6 +93,13 @@ SWEEP_MAJORITY_SHARE = 0.50
 # noise: keep it usable (mode 0) so each arc character becomes ordinary
 # per-character P2 work instead of escalating the whole module.
 SWEEP_ARC_SHARE = 0.125
+# P1 proportional module offset: per-direction gap-share bands over the
+# full drum (48). UNIT is the floored whole-character step count; band 2
+# scales it linearly so bands 1 and 2 meet exactly at BAND_FULL.
+P1_STEPS_PER_CHAR = 42
+P1_BAND_FULL = 0.75      # >= this share -> whole-character multiples
+P1_BAND_MIN = 0.125      # >= this share -> proportional correction
+P1_CONFLICT_MIN = 0.125  # losing direction at/above this -> conflicted
 # Glyphs that render identically on the drum: a difference between partners
 # is "no information", never evidence and never a correction.
 CONFUSABLES = {
@@ -158,6 +165,39 @@ def _preview_chunks(delta: int, limit: int = PREVIEW_DELTA_MAX) -> list[int]:
         out.append(step)
         delta -= step
     return out
+
+
+def p1_module_steps(gaps: list[int | None]) -> tuple[int, int]:
+    """Proportional P1 module offset from per-character gap counts.
+
+    `gaps` is one signed shift per drum character (`None` = excluded
+    sample: untrusted read, confusable pair, blank-flap misfire). Same-sign
+    gaps combine per direction; `n` is the minimum |gap| in the dominant
+    direction and `x` its share of the FULL drum (48) — excluded samples
+    dilute, never concentrate. Returns (signed motor steps, band 1|2|3);
+    band 3 means "judged, move nothing" (residuals go to P2).
+    """
+    pos = [g for g in gaps if g is not None and g > 0]
+    neg = [g for g in gaps if g is not None and g < 0]
+    if not pos and not neg:
+        return (0, 3)
+    if pos and neg:
+        if len(pos) == len(neg):
+            return (0, 3)  # tie: no dominant direction
+        dom, sub = (pos, neg) if len(pos) > len(neg) else (neg, pos)
+        if len(sub) / 48 >= P1_CONFLICT_MIN:
+            return (0, 3)  # conflict: P2 fixes each side independently
+    else:
+        dom = pos or neg
+    sign = 1 if dom is pos else -1
+    n = min(abs(g) for g in dom)
+    x = len(dom) / 48
+    if x >= P1_BAND_FULL:
+        return (sign * n * P1_STEPS_PER_CHAR, 1)
+    if x >= P1_BAND_MIN:
+        # Half-up rounding (not banker's round): floor(v + 0.5).
+        return (sign * int(P1_STEPS_PER_CHAR * n * x / P1_BAND_FULL + 0.5), 2)
+    return (0, 3)
 
 
 def _parse_csv_matrix(raw, rows: int, cols: int) -> list[list[int]]:
