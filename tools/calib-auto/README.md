@@ -60,11 +60,13 @@ Phases (independently selectable; P0 always runs as a read-only gate):
 
 - **P0 register** — blank, all-H and index-strip frames must read back
   (camera framing/focus gate; mirrored reads rejected).
-- **P1 coarse** — reverse uniform sweep over the whole drum; the
-  per-module shift histogram yields whole-character module offsets in
-  one shot. Majority single-char residuals route to a module fix;
-  single-flap arcs route to per-character work; scattered noise
-  escalates instead of being "fixed".
+- **P1 coarse** — reverse uniform sweep over the whole drum; each
+  module's shift histogram is aggregated per direction (dominant
+  direction wins, magnitude = smallest gap) and that direction's share
+  of the drum picks the module-cell correction: >= 75% earns full
+  pitch multiples, 12.5–75% a proportional correction, below that no
+  module move with the gaps left as per-character P2 work. Only a
+  starved histogram escalates instead of being "fixed".
 - **P2 fine** — per-character offsets from the P1 residual map, tuned
   with a parallel coarse-to-fine ladder (one cell per module per wave,
   firmware ±32 char-cell clamp respected, no-op candidates rejected).

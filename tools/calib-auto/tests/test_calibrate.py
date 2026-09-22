@@ -5,10 +5,12 @@ recognizer renamed; SimReader plays both reader backends.
 """
 
 import pytest
+from collections import Counter
 
 from calib_auto.calibrate import (BATCH_MAX_NUDGES, CHAR_OFFSET_LIMIT,
                                   MAX_UNRELIABLE_READS,
                                   REMOTE_BATCH_MAX_NUDGES, Calibrator,
+                                  _p1_direction, _p1_module_delta,
                                   _p2_ladder_steps)
 from calib_auto.display import CalibError
 from calib_auto.reader import ModuleReading, ReaderError
@@ -264,15 +266,18 @@ def test_ahead_by_one_char_converges_within_clamp(tmp_path):
 
 def test_module_cell_fault_applied_in_one_preview(tmp_path):
     # A whole-drum (module-cell) fault must be corrected with the sign the
-    # firmware actually uses and in a SINGLE preview.
+    # firmware actually uses and in a SINGLE preview. P1 scales the exact
+    # float pitch, so a 12-char fault on the 37-drum corrects by
+    # round(2048/37 * -12) = -664 rather than -12 * spc (-660); the
+    # 4-step remainder is sub-pitch and reads clean.
     d = FakeDisplay(total=4)
     d.seed_module_error(1, -d.spc * 12)  # every glyph 12 chars off
     calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
-    assert d.mod_off[1] == 0
+    assert d.mod_off[1] == -4
     mod_previews = [(ci, delta) for _, ci, delta in d.previews if ci < 0]
     assert len(mod_previews) == 1          # one re-home, not 30+
-    assert mod_previews[0][1] == -12 * d.spc
+    assert mod_previews[0][1] == -664
 
 
 def test_run_reverts_volatile_preview_residue(tmp_path):
@@ -294,21 +299,22 @@ def test_run_reverts_volatile_preview_residue(tmp_path):
     assert [delta for _, ci, delta in d.previews if ci < 0] == [d.spc]
 
 
-def test_unreliable_reads_escalate_without_corrections(tmp_path):
-    # A module whose reads disagree with the commanded character across
-    # the sweep has no trustworthy shift mode: flag it, never "fix" noise.
+def test_starved_histograms_escalate_without_corrections(tmp_path):
+    # A reader that reports no confident glyph leaves every histogram
+    # starved (< 24 trusted samples): flag each module, never "fix" noise.
     d = FakeDisplay(total=4)
     d.seed_module_error(2, -d.spc)
-    reader = SimReader(d)
-    reader.frozen[2] = "X"
+    reader = SimReader(d, confidence=0.0)
     calib = Calibrator(d, FakeCamera(), reader, photo_dir=str(tmp_path),
                        dwell_ms=0, timeout_s=5, min_confidence=0.5,
                        mode="full")
     report = calib.run()
     assert report["result"] == "needs-human"
     notes = [e["note"] for e in report["identity"]["persistent"]]
-    assert any("unreliable reads" in n or "purity" in n for n in notes)
-    assert calib.previews < calib.max_previews
+    assert any("unreliable reads" in n for n in notes)
+    assert calib.previews == 0
+    assert not d.persists
+    assert not d.batches
 
 
 def test_fleet_geometry_uses_declared_group_widths(tmp_path):
@@ -376,6 +382,42 @@ def test_fleet_geometry_falls_back_to_equal_width_heuristic(tmp_path):
         [2, 2, 4]
 
 
+def test_fleet_geometry_rejects_non_positive_legacy_width(tmp_path):
+    # The legacy equal-width heuristic must not silently invent a
+    # zero/negative group width. With fewer modules than groups the local
+    # width truncates to 0, which would map every module onto the last
+    # group instead of raising the documented "inconsistent geometry"
+    # error (`_parse_widths` already rejects a declared width <= 0).
+    d = FakeDisplay(total=4, groups=6, master_counts="")
+    calib = Calibrator(d, FakeCamera(), SimReader(d),
+                       photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                       min_confidence=0.5, mode="full")
+    assert "groupWidths" not in d.status()
+    assert d.status()["numModules"] == 0
+    with pytest.raises(CalibError, match="fleet geometry inconsistent"):
+        calib._widths(d.status(), d.snapshot()["settings"])
+
+
+def test_batch_nudge_charges_only_applied_nudges(tmp_path):
+    # A remote scope with no fleet preview endpoint is skipped; the preview
+    # budget must be charged for the nudges actually sent, not the whole
+    # requested list. The over-charge used to exhaust the budget early on
+    # old firmware ("preview budget exhausted" with work left to do).
+    d = FakeDisplay(total=6, groups=2)
+    d.preview_batch = None  # firmware without /api/calib/preview-batch
+    calib = Calibrator(d, FakeCamera(), SimReader(d),
+                       photo_dir=str(tmp_path), dwell_ms=0, timeout_s=5,
+                       min_confidence=0.5, mode="full")
+    calib._batch_nudge([(1, 0, -1, 8), (2, 0, -1, 8)])
+    # The local nudge went out serially; the remote one was skipped.
+    assert d.previews == [(0, -1, 8)]
+    assert calib.previews == 1
+    # The skipped cell's tracked belief is untouched too, so a later commit
+    # on it cannot build on a nudge that never happened.
+    assert calib.residue.get((2, 0, -1), 0) == 0
+    assert d.res_remote_mod[0][0] == 0
+
+
 def test_remote_group_char_converges(tmp_path):
     # A remote character cell is tuned with RAM-only previews, then its
     # verified absolute value is persisted to the master's mirror.
@@ -421,7 +463,7 @@ def test_dry_run_sweeps_without_touching(tmp_path):
     sweep_reads = [e for e in events
                    if e["text"].startswith("sw_")]
     assert len(sweep_reads) == len(d.drum)
-    assert any("shift mode" in e["text"] for e in events)
+    assert any("full shift -1" in e["text"] for e in events)
 
 
 def test_sweep_covers_every_character_once_in_reverse(tmp_path):
@@ -731,10 +773,12 @@ def test_ladder_skips_reshow_when_nothing_moved(tmp_path):
     assert calib.frames_used == before + 2
 
 
-def test_majority_residual_routes_to_module_fix(tmp_path):
-    # A module whose reads are +1 on ~70% of the drum misses the 80%
-    # purity gate; a >=50% plurality single-char residual is fixed on the
-    # module cell instead of escalating as "unreliable".
+def test_proportional_residual_applies_fractional_module_fix(tmp_path):
+    # +1 on 32 of 48 characters (66.7%) falls in the proportional band:
+    # round(2048/48 * 32/48 / 0.75) = +38 steps, not a whole character. (14 read correct via cancelling char errors; two sweep
+    # samples are systematically excluded: a '?' read trips the
+    # unknown-sentinel trust rule and '%' wraps to blank.) The 5-step
+    # remainder is sub-pitch and reads clean.
     d = FakeDisplay(total=4, charset=48)
     d.seed_module_error(0, d.spc)  # whole drum one character ahead
     minority = list(d.drum[1:15])
@@ -748,13 +792,15 @@ def test_majority_residual_routes_to_module_fix(tmp_path):
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
     calib._p1_coarse()
-    assert d.mod_off[0] == 0, d.mod_off
+    assert d.mod_off[0] == -5, d.mod_off
     assert not any("unreliable reads" in e["text"] for e in events)
-    assert any("majority shift +1" in e["text"] for e in events)
+    assert any("proportional shift +1" in e["text"] for e in events)
 
 
-def test_scattered_residuals_still_escalate(tmp_path):
-    # Without a majority residual, below-purity reads remain reader noise.
+def test_two_sided_residuals_apply_dominant_proportion(tmp_path):
+    # Gaps in both directions: the dominant one (+1 on 14/48 = 29.2%)
+    # earns round(2048/48 * 14/48 / 0.75) = +17 steps while the minority
+    # direction becomes P2 work. Neither direction escalates.
     d = FakeDisplay(total=4, charset=48)
     for ch in list(d.drum[1:15]):
         d.seed_char_error(0, d.drum.index(ch), d.spc)
@@ -768,9 +814,9 @@ def test_scattered_residuals_still_escalate(tmp_path):
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
     calib._p1_coarse()
-    assert any("unreliable reads" in e["text"] for e in events)
-    assert not any("majority shift" in e["text"] for e in events)
-    assert d.mod_off[0] == 0  # nothing applied
+    assert d.mod_off[0] == 17, d.mod_off
+    assert not any("unreliable reads" in e["text"] for e in events)
+    assert any("proportional shift +1" in e["text"] for e in events)
 
 
 def test_blank_read_against_nonblank_command_is_junk(tmp_path):
@@ -787,10 +833,11 @@ def test_blank_read_against_nonblank_command_is_junk(tmp_path):
     assert calib._shift(blank_against_blank, " ") == 0
 
 
-def test_single_flap_arc_is_routed_to_p2_not_escalated(tmp_path):
-    # A same-sign single-flap arc drags a module below the purity gate but
-    # is NOT reader noise: the module stays usable and the arc characters
-    # become ordinary per-character P2 work.
+def test_single_flap_arc_gets_proportional_module_fix(tmp_path):
+    # A same-sign single-flap arc (13/48 = 27%) earns a proportional
+    # module correction — round(2048/48 * 13/48 / 0.75) = +15 steps —
+    # and is NOT escalated as reader noise. Whatever still reads wrong
+    # after the move is ordinary per-character P2 work.
     d = FakeDisplay(total=4, charset=48)
     arc = list(d.drum[1:14])  # 13 chars = 27% of the drum
     for ch in arc:
@@ -803,11 +850,62 @@ def test_single_flap_arc_is_routed_to_p2_not_escalated(tmp_path):
     calib.steps_per_char = d.spc
     calib.group_widths = [4]
     calib._p1_coarse()
-    assert any("single-flap arc" in e["text"] for e in events)
+    assert d.mod_off[0] == 15, d.mod_off
+    assert d.persists
     assert not any("unreliable reads" in e["text"] for e in events)
-    assert d.mod_off[0] == 0        # no module-cell correction
-    assert not d.persists
-    assert set(arc) <= set(calib._p1_flagged)  # the arc is P2 work
+    assert any("proportional shift +1" in e["text"] for e in events)
+    assert set(arc) <= set(calib._p1_flagged)  # leftovers are P2 work
+
+
+def test_p1_direction_prefers_larger_share_and_minimum_gap():
+    # Same-direction magnitudes combine; the minimum gap is the module's
+    # magnitude; ties go positive; a clean histogram has no direction.
+    assert _p1_direction(Counter({1: 20, 2: 2})) == (1, 22, 1)
+    assert _p1_direction(Counter({-1: 10, 1: 15})) == (1, 15, 1)
+    assert _p1_direction(Counter({-2: 3, -1: 4})) == (-1, 7, 1)
+    assert _p1_direction(Counter({1: 5, -1: 5})) == (1, 5, 1)
+    assert _p1_direction(Counter({0: 48})) == (0, 0, 0)
+    assert _p1_direction(Counter()) == (0, 0, 0)
+
+
+def test_p1_module_delta_bands():
+    pitch = 2048 / 48
+    assert _p1_module_delta(1.0, 1, pitch) == 43      # full band
+    assert _p1_module_delta(0.75, 1, pitch) == 43     # boundary inclusive
+    assert _p1_module_delta(22 / 48, 1, pitch) == 26  # 20x+1 + 2x+2 example
+    assert _p1_module_delta(0.5, 1, pitch) == 28
+    assert _p1_module_delta(0.125, 1, pitch) == 7     # boundary inclusive
+    assert _p1_module_delta(0.124, 1, pitch) == 0     # below -> P2 work
+    assert _p1_module_delta(0.0, 1, pitch) == 0
+    assert _p1_module_delta(1.0, 0, pitch) == 0
+    assert _p1_module_delta(1.0, 2, pitch) == 85      # n=2 full multiples
+    assert _p1_module_delta(1.0, -1, pitch) == -43    # sign preserved
+    assert _p1_module_delta(0.5, -1, pitch) == -28
+
+
+def test_p1_combines_same_direction_magnitudes_using_minimum_gap(tmp_path):
+    # 20x +1 plus 2x +2 count together (22/48 = 45.8%) with n = 1:
+    # round(2048/48 * 22/48 / 0.75) = +26 steps on the module cell.
+    d = FakeDisplay(total=4, charset=48)
+    plus_one = list(d.drum[1:21])
+    plus_two = list(d.drum[21:23])
+    for ch in plus_one:
+        d.seed_char_error(0, d.drum.index(ch), d.spc)
+    for ch in plus_two:
+        d.seed_char_error(0, d.drum.index(ch), 2 * d.spc)
+    calib = Calibrator(d, FakeCamera(), SimReader(d), str(tmp_path),
+                       dwell_ms=0, timeout_s=5, min_confidence=0.5,
+                       mode="full")
+    calib.total, calib.drum = d.total, d.drum
+    calib.steps_per_char = d.spc
+    calib.group_widths = [4]
+    calib._p1_coarse()
+    mod_previews = [(ci, delta) for _, ci, delta in d.previews if ci < 0]
+    assert mod_previews == [(-1, 26)]
+    assert d.mod_off[0] == 26
+    # The +1 bulk reads clean after the move; the +2 tail is P2 work.
+    assert set(plus_two) <= set(calib._p1_flagged)
+    assert not (set(plus_one) & set(calib._p1_flagged))
 
 
 def test_report_written_to_disk(tmp_path):

@@ -480,21 +480,34 @@ class TrainJob:
                     "events": self.events[offset:offset + max(1, limit)]}
 
     def start(self, body: dict) -> dict:
+        # Parse the request BEFORE announcing a run: a bad epochs/seed
+        # value must not leave the job wedged at "running" with no thread
+        # behind it (every later start would 409 until a restart).
+        sets = body.get("sets") or None
+        try:
+            epochs = max(1, min(200, int(body.get("epochs") or 30)))
+            seed = int(body.get("seed") or 1)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                400, "epochs and seed must be integers") from exc
+        device_req = body.get("device") or None
         with self.lock:
             if self.status == "running":
                 raise HTTPException(409, "training already in progress")
+            # Allocate while holding the lock but BEFORE flipping the
+            # status: an OSError (full disk, unwritable CALIB_AUTO_DATA)
+            # must not leave the job stuck "running" with no thread.
+            try:
+                run_dir = paths.alloc_run_dir("train")
+            except OSError as exc:
+                raise HTTPException(
+                    500, f"cannot allocate a run directory: {exc}") from exc
             self.status = "running"
             self.events = []
             self.result = None
             self.history = []
             self.run_seq += 1
-        run_dir = paths.alloc_run_dir("train")
-        with self.lock:
             self.run_dir = run_dir
-        sets = body.get("sets") or None
-        epochs = max(1, min(200, int(body.get("epochs") or 30)))
-        seed = int(body.get("seed") or 1)
-        device_req = body.get("device") or None
 
         def _run():
             try:
@@ -744,6 +757,15 @@ class BenchHarness:
         with self.lock:
             if self.status in ("running", "aborting"):
                 raise HTTPException(409, "run already in progress")
+            # Allocate while holding the lock but BEFORE flipping the
+            # status: an OSError (full disk, unwritable CALIB_AUTO_DATA)
+            # must not leave the harness stuck "running" with no thread
+            # (every later start would 409 until a restart).
+            try:
+                run_dir = paths.alloc_run_dir("bench")
+            except OSError as exc:
+                raise HTTPException(
+                    500, f"cannot allocate a run directory: {exc}") from exc
             self.status = "running"
             self.events = []
             self.rows = []
@@ -753,8 +775,6 @@ class BenchHarness:
             self.run_seq += 1
             self.abort_event = threading.Event()
             self.t0 = time.monotonic()
-        run_dir = paths.alloc_run_dir("bench")
-        with self.lock:
             self.run_dir = run_dir
         self.thread = threading.Thread(target=self._run, args=(cfg, limit),
                                        daemon=True)
@@ -1384,6 +1404,15 @@ class CnnTestHarness:
         with self.lock:
             if self.status in ("running", "aborting"):
                 raise HTTPException(409, "run already in progress")
+            # Allocate while holding the lock but BEFORE flipping the
+            # status: an OSError (full disk, unwritable CALIB_AUTO_DATA)
+            # must not leave the harness stuck "running" with no thread
+            # (every later start would 409 until a restart).
+            try:
+                run_dir = paths.alloc_run_dir("cnn")
+            except OSError as exc:
+                raise HTTPException(
+                    500, f"cannot allocate a run directory: {exc}") from exc
             self.status = "running"
             self.events = []
             self.rows = []
@@ -1393,8 +1422,6 @@ class CnnTestHarness:
             self.run_seq += 1
             self.abort_event = threading.Event()
             self.t0 = time.monotonic()
-        run_dir = paths.alloc_run_dir("cnn")
-        with self.lock:
             self.run_dir = run_dir
         self.thread = threading.Thread(target=self._run,
                            args=(cfg, body, set_name, limit),
@@ -1820,6 +1847,16 @@ class CalHarness:
         with self.lock:
             if self.status in ("running", "aborting"):
                 raise HTTPException(409, "run already in progress")
+            # Allocate while holding the lock but BEFORE flipping the
+            # status: an OSError (full disk, unwritable CALIB_AUTO_DATA)
+            # must not leave the harness stuck "running" with no thread
+            # (every later start would 409 until a restart, and abort()
+            # would only move it to "aborting", which is also guarded).
+            try:
+                run_dir = paths.alloc_run_dir("cal")
+            except OSError as exc:
+                raise HTTPException(
+                    500, f"cannot allocate a run directory: {exc}") from exc
             self.status = "running"
             self.pending_abort = False
             self.mode = mode
@@ -1829,8 +1866,6 @@ class CalHarness:
             self.photos = []
             self.run_seq += 1
             self.report = None
-        run_dir = paths.alloc_run_dir("cal")
-        with self.lock:
             self.run_dir = run_dir
 
         def _run():
@@ -2112,9 +2147,18 @@ def cal_run_photo(run: str, name: str):
 @app.post("/api/cal/restore-snapshot")
 def cal_restore():
     """Roll the display's offsets back to the run-start snapshot."""
-    if not cal.run_dir:
+    with cal.lock:
+        # Refuse while a run holds the display: a mid-run rollback reverts
+        # committed offsets while the calibrator still tracks its own
+        # overlay/residue belief, so the next preview commit would persist
+        # from a stale base and write a wrong absolute offset to NVS.
+        if cal.status in ("running", "aborting"):
+            raise HTTPException(
+                409, "run in progress; restore once it has finished")
+        run_dir = cal.run_dir
+    if not run_dir:
         raise HTTPException(404, "no run yet")
-    snapshot_path = os.path.join(cal.run_dir, "snapshot.json")
+    snapshot_path = os.path.join(run_dir, "snapshot.json")
     try:
         with open(snapshot_path, encoding="utf-8") as fh:
             snapshot = json.load(fh)

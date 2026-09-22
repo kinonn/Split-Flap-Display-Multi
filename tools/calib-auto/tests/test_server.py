@@ -485,6 +485,119 @@ def test_cal_photo_guard(client):
     assert client.get("/api/cal/photo/..%5Cx.png").status_code == 400
 
 
+def test_restore_snapshot_rejected_while_run_is_active(client, tmp_path,
+                                                       monkeypatch):
+    """A mid-run rollback must be refused (it would desync the calibrator).
+
+    Restoring while the calibrator is live reverts committed offsets
+    underneath it, and the calibrator keeps tracking its own
+    overlay/residue belief: the next preview commit would then persist from
+    a stale base and write a wrong absolute offset to NVS.
+    """
+    calls: list[str] = []
+
+    class RecordingDisplay:
+        def __init__(self, host):
+            calls.append(host)
+
+        def restore(self, snapshot):
+            raise AssertionError("restore must not run while a run is active")
+
+        def reload(self):
+            raise AssertionError("reload must not run while a run is active")
+
+    monkeypatch.setattr(server, "Display", RecordingDisplay)
+    with server.cal.lock:
+        server.cal.run_dir = str(tmp_path)
+    for status in ("running", "aborting"):
+        with server.cal.lock:
+            server.cal.status = status
+        r = client.post("/api/cal/restore-snapshot")
+        assert r.status_code == 409, r.text
+    assert calls == []  # the display was never contacted
+
+
+def test_restore_snapshot_works_when_idle(client, tmp_path, monkeypatch):
+    snapshot = {"settings": {"moduleOffsets": [1, 2]}}
+    run_dir = tmp_path / "cal-002"
+    run_dir.mkdir()
+    (run_dir / "snapshot.json").write_text(json.dumps(snapshot),
+                                           encoding="utf-8")
+    restored: list = []
+
+    class RecordingDisplay:
+        def __init__(self, host):
+            pass
+
+        def restore(self, snap):
+            restored.append(snap)
+            return {"type": "success"}
+
+        def reload(self):
+            return {"type": "success"}
+
+    monkeypatch.setattr(server, "Display", RecordingDisplay)
+    with server.cal.lock:
+        server.cal.run_dir = str(run_dir)
+        server.cal.status = "done"
+    r = client.post("/api/cal/restore-snapshot")
+    assert r.status_code == 200, r.text
+    assert restored == [snapshot]
+
+
+def test_start_does_not_wedge_status_when_run_dir_allocation_fails(
+        client, monkeypatch):
+    """A failing run-dir allocation must not leave a harness "running".
+
+    ``alloc_run_dir`` touches the disk, so it can fail (full disk,
+    unwritable ``CALIB_AUTO_DATA``). It used to run AFTER the status flip
+    and outside any handler, so the exception escaped ``start()`` with the
+    status stuck at "running" and no thread behind it: every later start
+    409'd until a server restart, and ``abort()`` only moves the status to
+    "aborting", which is guarded too.
+    """
+    real_alloc = server.paths.alloc_run_dir
+
+    def boom(_prefix="run"):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server.paths, "alloc_run_dir", boom)
+    cfg = server.config_mod.load_config()
+    cfg["llm_api_key"] = "sk-test"  # satisfy the VLM recognizer guard
+
+    harnesses = (
+        (server.cal, lambda: server.cal.start(cfg, {"approach": "vlm"})),
+        (server.bench, lambda: server.bench.start(cfg)),
+        (server.train_job, lambda: server.train_job.start({})),
+    )
+    for harness, call in harnesses:
+        with harness.lock:
+            harness.status = "idle"
+        with pytest.raises(server.HTTPException) as excinfo:
+            call()
+        assert excinfo.value.status_code == 500
+        assert "cannot allocate a run directory" in str(excinfo.value.detail)
+        with harness.lock:
+            assert harness.status == "idle", harness.status
+            assert harness.run_dir in ("", None), harness.run_dir
+
+    # Not wedged: with a working allocator the same harness starts again.
+    monkeypatch.setattr(server.paths, "alloc_run_dir", real_alloc)
+    server.bench.start(cfg)
+    assert server.bench.state()["run_dir"]
+
+
+def test_train_job_bad_epochs_does_not_wedge_status(client):
+    """A malformed epochs value must 400, not leave the job stuck running."""
+    with server.train_job.lock:
+        server.train_job.status = "idle"
+    with pytest.raises(server.HTTPException) as excinfo:
+        server.train_job.start({"epochs": "not-a-number"})
+    assert excinfo.value.status_code == 400
+    with server.train_job.lock:
+        assert server.train_job.status == "idle"
+
+
 # -- training job ----------------------------------------------------------------
 
 def test_train_job_runs_with_stubbed_trainer(client, tmp_path, monkeypatch):
