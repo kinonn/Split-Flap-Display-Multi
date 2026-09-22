@@ -11,9 +11,12 @@ Phases (independently selectable; P0 always runs as a read-only gate):
 
 - **P0** register: blank, all-H and index-strip frames must read back
   (camera framing/focus gate).
-- **P1** coarse: reverse uniform sweep over the whole drum; the
-  per-module shift histogram gives whole-character module offsets in
-  one shot.
+- **P1** coarse: reverse uniform sweep over the whole drum; each
+  module's shift histogram is aggregated per direction (dominant
+  direction wins, magnitude = smallest gap) and that direction's share
+  of the drum picks the module-cell correction: >= 75% earns full
+  pitch multiples, 12.5-75% a proportional correction, below that no
+  module move with the gaps left as per-character P2 work.
 - **P2** fine: per-character offsets from the P1 residual map, tuned
   with a parallel coarse-to-fine ladder (one cell per module per wave).
 - **P4** verify: repeatability plus short forward boundary hops.
@@ -76,23 +79,19 @@ BATCH_MAX_NUDGES = 48
 REMOTE_BATCH_MAX_NUDGES = 8
 # Shift-mode sweep (P1): command every character uniformly on every
 # module, walking the drum in REVERSE so each step is ~a full revolution and
-# every frame passes the magnet (independently homed). The per-module
-# histogram of (seen - commanded) then gives the module offset in one shot.
+# every frame passes the magnet (independently homed). Each module's shift
+# histogram is aggregated per direction (dominant direction wins, magnitude
+# = smallest gap); that direction's share of the DRUM picks the module-cell
+# correction below.
 SWEEP_MIN_SAMPLES = 24       # trusted samples needed to judge a module
-SWEEP_TRUST_PURITY = 0.80    # dominant-shift share needed to trust it
-# Below the purity gate but still fixable: a single-character residual
-# covering at least this share of trusted samples is a systematic fault
-# fixable on the module cell, not reader noise. Escalating it would
-# dead-end every affected character in P2 — the firmware's ±32 char-cell
-# clamp can never hold a whole-character fix (run-005: +1 on ~68% of the
-# drum, 28 "does not fit a char cell" escalations, needs-human).
-SWEEP_MAJORITY_SHARE = 0.50
-# Single-flap arc: at least this share of the DRUM showing the same ±1
-# residual (run-005 m0: 13 of 48 characters one flap ahead while the rest
-# read correct). The module is below the purity gate but is NOT reader
-# noise: keep it usable (mode 0) so each arc character becomes ordinary
-# per-character P2 work instead of escalating the whole module.
-SWEEP_ARC_SHARE = 0.125
+# At least this share of the drum gapped in one direction earns a full
+# correction (exact-pitch multiples); a share between P1_MIN_SHARE and here
+# earns a proportional one scaled by share / P1_FULL_SHARE.
+P1_FULL_SHARE = 0.75
+# Below this share in both directions the module cell stays put and every
+# gap becomes per-character P2 work. Only a starved histogram (fewer than
+# SWEEP_MIN_SAMPLES trusted samples) escalates as unreliable reads.
+P1_MIN_SHARE = 0.125
 # Glyphs that render identically on the drum: a difference between partners
 # is "no information", never evidence and never a correction.
 CONFUSABLES = {
@@ -143,6 +142,37 @@ def _p2_ladder_steps(steps_per_char: int,
             fine.append(mag)
     return ([sign * mag for mag in mags for sign in (1, -1)]
             + [sign * mag for mag in fine for sign in (1, -1)])
+
+
+def _p1_direction(counts: Counter) -> tuple[int, int, int]:
+    """Dominant gap direction of a shift histogram.
+
+    Returns (sign, count, min_magnitude): the sign (+1/-1) with the most
+    samples, its sample count, and the smallest gap magnitude found in
+    that direction. Ties go positive. (0, 0, 0) when nothing is gapped.
+    """
+    pos = sum(c for s, c in counts.items() if s > 0)
+    neg = sum(c for s, c in counts.items() if s < 0)
+    if pos == 0 and neg == 0:
+        return 0, 0, 0
+    if pos >= neg:
+        return 1, pos, min(s for s in counts if s > 0)
+    return -1, neg, min(-s for s in counts if s < 0)
+
+
+def _p1_module_delta(share: float, signed_n: int, pitch: float) -> int:
+    """Motor-step module correction for one direction's drum share.
+
+    `pitch` is the exact float character pitch (stepsPerRot / drum
+    length); only the returned delta is rounded to whole motor steps.
+    Full pitch multiples at/above P1_FULL_SHARE, proportional below it
+    down to P1_MIN_SHARE, zero below that (per-character P2 work).
+    """
+    if not signed_n or share < P1_MIN_SHARE:
+        return 0
+    if share >= P1_FULL_SHARE:
+        return int(round(pitch * signed_n))
+    return int(round(pitch * signed_n * share / P1_FULL_SHARE))
 
 
 def _preview_chunks(delta: int, limit: int = PREVIEW_DELTA_MAX) -> list[int]:
@@ -328,6 +358,10 @@ class Calibrator:
         # length), read from /settings. Identity fixes move a whole
         # character (delta * steps_per_char).
         self.steps_per_char = 1
+        # Full-revolution steps, read from /settings alongside the pitch
+        # above. P1 scales the exact float pitch (steps_per_rot / drum
+        # length) and rounds only the final delta.
+        self.steps_per_rot = 2048
         self.group_widths = [0]
         # Remote offsets from the master's /settings snapshot (rModOffs,
         # rChrOff0..4): the only way to know the absolute base for a
@@ -685,6 +719,11 @@ class Calibrator:
             return [local]
         widths = [local] * groups
         widths[-1] = total - local * (groups - 1)
+        if any(w <= 0 for w in widths):
+            raise CalibError(
+                f"fleet geometry inconsistent: totalModules {total} over "
+                f"{groups} group(s) with {local} local module(s) leaves "
+                f"{widths[-1]} module(s) for the last group")
         return widths
 
     def _group_of(self, module: int) -> int:
@@ -914,6 +953,11 @@ class Calibrator:
         by_scope: dict[int, list[tuple[int, int, int]]] = {}
         for group, local, char_index, delta in nudges:
             by_scope.setdefault(group, []).append((local, char_index, delta))
+        # Charge only the nudges actually sent: a remote scope with no
+        # fleet preview endpoint is skipped below, and counting it would
+        # burn preview budget that was never spent (this used to charge
+        # the whole list regardless of what was applied).
+        applied_count = 0
         for group, items in sorted(by_scope.items()):
             applied = False
             if batch is not None:
@@ -935,6 +979,7 @@ class Calibrator:
                            f"skipping {len(items)} nudge(s) on group {group}")
                 continue  # remote preview needs the fleet endpoint
             if applied:
+                applied_count += len(items)
                 for local, char_index, delta in items:
                     key = (group, local, char_index)
                     if key not in self.overlay:
@@ -948,7 +993,7 @@ class Calibrator:
                                        min(CHAR_OFFSET_LIMIT, absolute))
                                    - self.overlay.get(key, 0))
                     self.residue[key] = residue
-        self.previews += len(nudges)
+        self.previews += applied_count
         self._wait_settled(self.timeout_s)
 
     def _cell_ladder(self, plans: list[dict]) -> set[int]:
@@ -1272,97 +1317,95 @@ class Calibrator:
             return None
         return -self._drum_delta(entry.char, ch)
 
-    @staticmethod
-    def _mode_purity(values) -> tuple[int | None, float, int]:
-        counts = Counter(v for v in values if v is not None)
-        if not counts:
-            return None, 0.0, 0
-        mode, count = counts.most_common(1)[0]
-        return mode, count / sum(counts.values()), sum(counts.values())
+    def _p1_classify(self, shifts) -> tuple[set[int], dict[int, int]]:
+        """One directional-share verdict per module from sweep shifts.
 
-    def _p1_coarse(self):
-        """Reverse uniform sweep -> one-shot module offsets."""
-        self.event("phase", f"P1 coarse: reverse uniform sweep "
-                            f"({len(self.drum)} characters)")
-        readings, chars = self._sweep()
-        shifts = {m: {ch: self._shift(readings[m].get(ch), ch)
-                      for ch in chars} for m in range(self.total)}
-        modes: dict[int, int] = {}
+        Returns (usable, deltas): modules with enough evidence, and the
+        motor-step module-cell correction for each module that earned
+        one. The dominant direction wins per module (magnitude = smallest
+        gap there); its share of the DRUM picks the band: >= P1_FULL_SHARE
+        full pitch multiples, P1_MIN_SHARE..P1_FULL_SHARE proportional,
+        below that no correction. Starved modules (< SWEEP_MIN_SAMPLES
+        trusted samples) escalate as unreliable reads here, so P1 and the
+        read-only P2 input share the identical evidence gate.
+        """
+        pitch = self.steps_per_rot / max(1, len(self.drum))
+        usable: set[int] = set()
+        deltas: dict[int, int] = {}
         for m in range(self.total):
-            mode, purity, total = self._mode_purity(list(shifts[m].values()))
-            if total < SWEEP_MIN_SAMPLES or purity < SWEEP_TRUST_PURITY:
-                # Systematic majority fault: a single-character residual on
-                # at least half the trusted samples is fixable on the module
-                # cell even though it misses the purity gate. Escalating it
-                # dead-ends every affected char in P2 (the ±32 char-cell
-                # clamp can never hold a whole-character fix); routing it
-                # through the normal whole-character path lets the re-read
-                # pass and P2 sort out whatever remains.
-                if (total >= SWEEP_MIN_SAMPLES and mode is not None
-                        and abs(mode) == 1
-                        and purity >= SWEEP_MAJORITY_SHARE):
-                    modes[m] = mode
-                    self.event("read",
-                               f"m{m}: majority shift {mode:+d} "
-                               f"({purity:.0%} of {total}); module-cell fix")
-                    continue
-                # Single-flap arc: dominant state still CORRECT but a
-                # >= 12.5% same-sign ±1 arc. A whole-drum shift applied
-                # blind would trade the arc for a bigger fault on the
-                # correct majority; instead the module stays at mode 0 and
-                # the arc characters flow into the residual map as ordinary
-                # per-character P2 work (never an "unreliable reads"
-                # escalation, which would dead-end the whole module).
-                arc = [(ch, s) for ch, s in shifts[m].items()
-                       if s is not None and abs(s) == 1]
-                if (mode == 0 and total >= SWEEP_MIN_SAMPLES
-                        and len(arc) / max(1, len(self.drum))
-                        >= SWEEP_ARC_SHARE
-                        and len({s < 0 for _, s in arc}) == 1):
-                    modes[m] = 0
-                    self.event("read",
-                               f"m{m}: single-flap arc ({len(arc)} chars, "
-                               f"{len(arc) / len(self.drum):.0%} of drum, "
-                               f"{arc[0][1]:+d}); per-char work")
-                    continue
+            counts = Counter(v for v in shifts[m].values() if v is not None)
+            total = sum(counts.values())
+            if total < SWEEP_MIN_SAMPLES:
                 self._escalate(m, "?",
-                               f"unreliable reads ({total} samples, "
-                               f"purity {purity:.0%})")
+                               f"unreliable reads ({total} samples)")
                 continue
-            modes[m] = mode
-            self.event("read", f"m{m}: shift mode {mode:+d} "
-                               f"({purity:.0%} of {total})")
-        # One-shot whole-character offsets.
-        for m in modes:
-            self._ensure_cell(self._group_of(m), self._local_index(m), -1)
-        whole = {m: mode * self.steps_per_char
-                 for m, mode in modes.items() if mode}
-        if whole:
-            self.event("phase", f"P1 whole-character fixes on "
-                                f"{len(whole)} modules")
-            self._batch_nudge([(self._group_of(m), self._local_index(m), -1, d)
-                               for m, d in sorted(whole.items())])
-        # Re-read every frame where a trusted module deviated from its mode.
-        deviant = sorted({ch for m in modes for ch in chars
+            usable.add(m)
+            sign, count_dir, mag = _p1_direction(counts)
+            if not sign:
+                self.event("read", f"m{m}: clean ({total} samples)")
+                continue
+            share = count_dir / max(1, len(self.drum))
+            delta = _p1_module_delta(share, sign * mag, pitch)
+            if not delta:
+                self.event("read",
+                           f"m{m}: scattered {sign:+d} gaps "
+                           f"({count_dir}/{len(self.drum)}, {share:.1%}); "
+                           f"per-char work")
+                continue
+            deltas[m] = delta
+            band = "full" if share >= P1_FULL_SHARE else "proportional"
+            self.event("read",
+                       f"m{m}: {band} shift {sign * mag:+d} "
+                       f"({count_dir}/{len(self.drum)}, {share:.1%}) "
+                       f"-> {delta:+d} steps")
+        return usable, deltas
+
+    def _p1_reread_residual(self, shifts, readings, chars,
+                            usable: set[int]) -> dict:
+        """Re-read every observed gap; residual from the fresh readings.
+
+        The module move is open-loop (even a proportional correction only
+        biases each landing inside its flap window), so whatever still
+        reads wrong is re-measured here — never model-predicted.
+        """
+        deviant = sorted({ch for m in usable for ch in chars
                           if shifts[m][ch] is not None
-                          and shifts[m][ch] != modes[m]}, key=self.drum.index)
+                          and shifts[m][ch] != 0}, key=self.drum.index)
         if deviant:
             self._reread_chars(deviant, readings, "p1r")
         deviant_set = set(deviant)
         residual: dict[int, dict[str, int | None]] = {}
-        for m in modes:
+        for m in usable:
             out: dict[str, int | None] = {}
             for ch in chars:
                 if ch in deviant_set:
                     out[ch] = self._shift(readings[m].get(ch), ch)
                 else:
-                    out[ch] = 0 if shifts[m][ch] == modes[m] \
-                        else shifts[m][ch]
+                    out[ch] = 0 if shifts[m][ch] == 0 else shifts[m][ch]
             residual[m] = out
-        # Commit whole-character fixes: local previews sit in the residue,
+        return residual
+
+    def _p1_coarse(self):
+        """Reverse uniform sweep -> proportional module offsets."""
+        self.event("phase", f"P1 coarse: reverse uniform sweep "
+                            f"({len(self.drum)} characters)")
+        readings, chars = self._sweep()
+        shifts = {m: {ch: self._shift(readings[m].get(ch), ch)
+                      for ch in chars} for m in range(self.total)}
+        usable, deltas = self._p1_classify(shifts)
+        # One-shot module offsets (full or proportional).
+        for m in usable:
+            self._ensure_cell(self._group_of(m), self._local_index(m), -1)
+        if deltas:
+            self.event("phase", f"P1 module fixes on "
+                                f"{len(deltas)} modules")
+            self._batch_nudge([(self._group_of(m), self._local_index(m), -1, d)
+                               for m, d in sorted(deltas.items())])
+        residual = self._p1_reread_residual(shifts, readings, chars, usable)
+        # Commit module fixes: local previews sit in the residue,
         # remote previews are RAM-only on the group, so persist the absolute
         # value from the recorded base there.
-        for m, delta in whole.items():
+        for m, delta in deltas.items():
             if not delta:
                 continue
             group, local = self._group_of(m), self._local_index(m)
@@ -1383,7 +1426,7 @@ class Calibrator:
                                delta=delta)
         # Cells still wrong or unreadable are fine-phase / hardware work.
         self._p1_flagged = sorted(
-            {ch for m in modes for ch in chars
+            {ch for m in usable for ch in chars
              if residual[m].get(ch) not in (None, 0)},
             key=self.drum.index)
 
@@ -1391,42 +1434,19 @@ class Calibrator:
         """Derive the P2 flagged-char list without touching offsets.
 
         Used when P2 is requested without P1: a read-only reverse sweep
-        plus one deviant re-read pass, mirroring the residual computation
-        in `_p1_coarse` but skipping every nudge/commit. Unreliable
-        modules escalate exactly as in P1.
+        plus one gap re-read pass, mirroring the classify/remeasure steps
+        in `_p1_coarse` but skipping every nudge/commit. Starved modules
+        escalate exactly as in P1.
         """
         self.event("phase", "P2 input: read-only sweep "
                             f"({len(self.drum)} characters)")
         readings, chars = self._sweep()
         shifts = {m: {ch: self._shift(readings[m].get(ch), ch)
                       for ch in chars} for m in range(self.total)}
-        modes: dict[int, int] = {}
-        for m in range(self.total):
-            mode, purity, total = self._mode_purity(list(shifts[m].values()))
-            if total < SWEEP_MIN_SAMPLES or purity < SWEEP_TRUST_PURITY:
-                self._escalate(m, "?",
-                               f"unreliable reads ({total} samples, "
-                               f"purity {purity:.0%})")
-                continue
-            modes[m] = mode
-        deviant = sorted({ch for m in modes for ch in chars
-                          if shifts[m][ch] is not None
-                          and shifts[m][ch] != modes[m]}, key=self.drum.index)
-        if deviant:
-            self._reread_chars(deviant, readings, "p1r")
-        deviant_set = set(deviant)
-        residual: dict[int, dict[str, int | None]] = {}
-        for m in modes:
-            out: dict[str, int | None] = {}
-            for ch in chars:
-                if ch in deviant_set:
-                    out[ch] = self._shift(readings[m].get(ch), ch)
-                else:
-                    out[ch] = 0 if shifts[m][ch] == modes[m] \
-                        else shifts[m][ch]
-            residual[m] = out
+        usable, _ = self._p1_classify(shifts)
+        residual = self._p1_reread_residual(shifts, readings, chars, usable)
         self._p1_flagged = sorted(
-            {ch for m in modes for ch in chars
+            {ch for m in usable for ch in chars
              if residual[m].get(ch) not in (None, 0)},
             key=self.drum.index)
         self.event("read", f"P2 input: {len(self._p1_flagged)} flagged "
@@ -1703,6 +1723,7 @@ class Calibrator:
             steps_per_rot = 2048
         self.steps_per_char = max(
             1, round(steps_per_rot / max(1, len(self.drum)))) if self.drum else 1
+        self.steps_per_rot = steps_per_rot
         self._load_remote_offsets(settings)
         report: dict = {
             "contractVersion": SUPPORTED_CONTRACT,
@@ -1740,13 +1761,35 @@ class Calibrator:
             self._p0_register()
             if self.mode == "dry-run":
                 readings, chars = self._sweep()
+                pitch = self.steps_per_rot / max(1, len(self.drum))
                 for m in range(self.total):
-                    mode, purity, total = self._mode_purity(
-                        [self._shift(readings[m].get(ch), ch)
-                         for ch in chars])
-                    self.event("read", f"m{m}: shift mode "
-                                       f"{mode if mode is not None else '?'}"
-                                       f" ({purity:.0%} of {total})")
+                    counts = Counter(
+                        v for v in (self._shift(readings[m].get(ch), ch)
+                                    for ch in chars) if v is not None)
+                    total = sum(counts.values())
+                    if total < SWEEP_MIN_SAMPLES:
+                        self.event("read", f"m{m}: unreliable reads "
+                                           f"({total} samples)")
+                        continue
+                    sign, count_dir, mag = _p1_direction(counts)
+                    if not sign:
+                        self.event("read",
+                                   f"m{m}: clean ({total} samples)")
+                        continue
+                    share = count_dir / max(1, len(self.drum))
+                    delta = _p1_module_delta(share, sign * mag, pitch)
+                    if not delta:
+                        self.event("read",
+                                   f"m{m}: scattered {sign:+d} gaps "
+                                   f"({count_dir}/{len(self.drum)}, "
+                                   f"{share:.1%}); per-char work")
+                        continue
+                    band = ("full" if share >= P1_FULL_SHARE
+                            else "proportional")
+                    self.event("read", f"m{m}: {band} shift {sign * mag:+d} "
+                                       f"({count_dir}/{len(self.drum)}, "
+                                       f"{share:.1%}) -> {delta:+d} steps "
+                                       f"(dry-run, not applied)")
                 ok, reason = False, ("dry-run: shift table only, "
                                      "nothing applied")
             else:

@@ -6,7 +6,7 @@
   "camera_index": 0,
   "brightness": 43.0,
   "crop_percent": 32.0,
-  "dwell_ms": 1000,
+  "dwell_ms": 1500,
   "min_confidence": 0.7,
   "classifier_min_conf": 0.5,
   "classifier_min_margin": 0.1,
