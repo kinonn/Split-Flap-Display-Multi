@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calib Auto — Test VLMs</title>
+<style>
+  :root { --bg:#14161a; --card:#1d2026; --card2:#23272e; --line:#2e333b;
+          --fg:#d8dce2; --dim:#8a919c; --accent:#4ea1ff; --good:#4ec98a;
+          --warn:#e0b04c; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1280px; margin:0 auto; padding:20px 18px 60px; }
+  h1 { font-size:19px; margin:0 0 2px; } h1 a { color:var(--dim); text-decoration:none; font-size:13px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
+  .cols { display:grid; grid-template-columns: 400px 1fr; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  input, select { width:100%; background:var(--card2); color:var(--fg); border:1px solid var(--line);
+                  border-radius:6px; padding:6px 8px; font:inherit; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  button { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f4e7a; border-color:#2f6ea8; }
+  button.danger { background:#5a2626; border-color:#7a3333; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .msg { font-size:13px; color:var(--warn); margin-top:8px; min-height:18px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:4px 8px 4px 0; position:sticky; top:0; background:var(--card); }
+  td { padding:3px 8px 3px 0; border-top:1px solid var(--line); font-family:ui-monospace,Consolas,monospace; }
+  td.soft { font-family:inherit; }
+  .bad { color:var(--bad); } .good { color:var(--good); }
+  #log { height:150px; overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace;
+         background:var(--card2); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .ev { white-space:pre-wrap; } .ev .t { color:var(--dim); margin-right:6px; }
+  .k-error { color:var(--bad); } .k-done { color:var(--good); }
+  #rows { max-height:520px; overflow:auto; }
+  .flag { display:inline-block; font-size:10px; padding:0 5px; border-radius:99px; margin-right:3px;
+          background:var(--card2); border:1px solid var(--line); color:var(--warn); }
+  .meta { font-size:12px; color:var(--dim); } .meta b { color:var(--fg); }
+  .summary { display:flex; gap:22px; flex-wrap:wrap; }
+  .summary div b { font-size:18px; display:block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Test VLMs <a href="/">← back</a></h1>
+  <div class="meta">Benchmark any OpenAI-compatible vision model against the golden set
+    (verified entries only). Pick the winner, then use it on the
+    <a style="color:var(--accent)" href="/vlm">VLM calibration page</a>.</div>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Dataset</h2>
+        <label>Golden set</label><select id="set" onchange="pickSet()"></select>
+        <div class="meta" id="setinfo" style="margin-top:6px"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Model</h2>
+        <label>Preset</label>
+        <select id="preset" onchange="presetChanged()">
+          <option value="https://opencode.ai/zen/go/v1">OpenCode Go</option>
+          <option value="https://api.openai.com/v1">OpenAI</option>
+          <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+          <option value="http://localhost:11434/v1">Ollama (local)</option>
+          <option value="custom">Custom URL…</option>
+        </select>
+        <label>Base URL</label><input id="llm_base_url">
+        <label>Model</label><input id="llm_model" placeholder="deepseek-v4-flash-vision-exp">
+        <label>API key (unchanged unless typed)</label>
+        <input id="llm_api_key" type="password" placeholder="(unchanged)" autocomplete="off">
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Read options</h2>
+        <div class="row">
+          <div><label>Read mode</label>
+            <select id="read_mode">
+              <option value="auto">auto — tool, falls back to text</option>
+              <option value="tool">tool call only</option>
+              <option value="text">OCR text only</option>
+            </select></div>
+          <div><label>Segmentation</label>
+            <select id="image_mode">
+              <option value="strip">strip</option><option value="cells">cells</option>
+              <option value="montage">montage</option>
+              <option value="cells-detect">cells-detect</option>
+              <option value="strip-detect">strip-detect</option>
+            </select></div>
+        </div>
+        <div class="row">
+          <div><label>Preprocess</label>
+            <select id="preprocess">
+              <option value="none">none</option><option value="contrast">contrast</option>
+              <option value="invert">invert</option><option value="binary">binary</option>
+            </select></div>
+          <div><label>Concurrency</label><input id="concurrency" type="number" min="1" max="8"></div>
+        </div>
+        <div class="row">
+          <div><label>Image max width</label><input id="image_max_width" type="number"></div>
+          <div><label>JPEG quality</label><input id="image_quality" type="number" min="1" max="100"></div>
+        </div>
+        <div class="row">
+          <div><label>OCR prompt</label><input id="ocr_prompt" placeholder="OCR:"></div>
+          <div><label>Max output tokens</label><input id="ocr_max_tokens" type="number" min="0"></div>
+        </div>
+        <label style="display:flex;gap:6px;align-items:center;color:var(--fg)">
+          <input type="checkbox" id="debug_images" style="width:auto"> save composed images per row</label>
+        <div class="btns">
+          <button onclick="saveAll()">Save options</button>
+        </div>
+        <div class="msg" id="savemsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Run</h2>
+        <div class="row">
+          <div><label>Limit rows (blank = all)</label><input id="limit" placeholder="e.g. 20"></div>
+        </div>
+        <div class="btns">
+          <button class="primary" id="startBtn" onclick="startRun()">Start benchmark</button>
+          <button class="danger" id="abortBtn" onclick="abortRun()" disabled>Abort</button>
+        </div>
+        <div class="msg" id="runmsg"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Summary <span class="meta" id="runstate"></span></h2>
+        <div class="summary" id="summary"><div class="meta">no run yet</div></div>
+        <div class="meta" id="pipeline" style="margin-top:8px"></div>
+        <div id="log" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Rows <span class="meta" id="rowcount"></span></h2>
+        <div id="rows"><table><thead><tr>
+          <th>#</th><th>photo</th><th>golden</th><th>read</th><th>mm</th><th>base</th><th>flags</th>
+        </tr></thead><tbody id="rowbody"></tbody></table></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Past runs</h2>
+        <table><thead><tr><th>run</th><th>model</th><th>rows</th><th>model avg</th><th>baseline avg</th><th>errors</th><th></th></tr></thead>
+          <tbody id="past"></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function showStr(s) { return s == null ? "" : String(s).replace(/ /g, "␣"); }
+let lastEvent = 0, lastRunSeq = -1, rowsData = [];
+
+async function loadConfig() {
+  const c = await api("/api/config");
+  const known = ["https://opencode.ai/zen/go/v1","https://api.openai.com/v1",
+                 "https://openrouter.ai/api/v1","http://localhost:11434/v1"];
+  $("preset").value = known.includes(c.llm_base_url) ? c.llm_base_url : "custom";
+  $("llm_base_url").value = c.llm_base_url || "";
+  $("llm_model").value = c.llm_model || "";
+  for (const k of ["read_mode","image_mode","preprocess","concurrency","image_max_width",
+                   "image_quality","ocr_prompt","ocr_max_tokens"]) {
+    if ($(k)) $(k).value = c[k];
+  }
+  $("debug_images").checked = !!c.debug_images;
+  await loadSets();
+  await loadPast();
+}
+function presetChanged() { const v = $("preset").value; if (v !== "custom") $("llm_base_url").value = v; }
+
+async function loadSets() {
+  try {
+    const g = await api("/api/golden");
+    const sets = g.sets || [];
+    const cfg = await api("/api/config");
+    $("set").innerHTML = sets.map(s =>
+      `<option value="${s.name}" ${cfg.dataset_dir && cfg.dataset_dir.includes(s.name) ? "selected" : ""}>` +
+      `${esc(s.name)} — verified ${s.stats.verified}/${s.stats.total}</option>`).join("");
+    await pickSet();
+  } catch (e) {}
+}
+async function pickSet() {
+  const name = $("set").value;
+  if (!name) { $("setinfo").textContent = "no golden sets yet — curate one first"; return; }
+  try {
+    const info = await api("/api/golden/" + encodeURIComponent(name));
+    $("setinfo").innerHTML = `${info.stats.verified} verified, ${info.stats.pending} pending · ` +
+      `${esc(info.meta.created || "")}`;
+  } catch (e) {}
+}
+async function saveAll() {
+  const patch = {};
+  for (const k of ["read_mode","image_mode","preprocess","concurrency","image_max_width",
+                   "image_quality","ocr_prompt","ocr_max_tokens"]) {
+    if (!$(k)) continue;
+    let v = $(k).value;
+    if (["concurrency","image_max_width","image_quality","ocr_max_tokens"].includes(k)) v = Number(v);
+    patch[k] = v;
+  }
+  patch.debug_images = $("debug_images").checked;
+  patch.llm_base_url = $("llm_base_url").value.trim();
+  patch.llm_model = $("llm_model").value.trim();
+  if ($("llm_api_key").value) patch.llm_api_key = $("llm_api_key").value;
+  const name = $("set").value;
+  try {
+    const g = await api("/api/golden");
+    const s = (g.sets || []).find(x => x.name === name);
+    if (s) { patch.dataset_dir = s.path; patch.dataset_file = "labels.jsonl"; }
+    await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+    $("llm_api_key").value = ""; $("savemsg").textContent = "saved";
+  } catch (e) { $("savemsg").textContent = "save failed: " + e.message; }
+}
+
+async function startRun() {
+  await saveAll();
+  try {
+    const limit = $("limit").value.trim();
+    await api("/api/bench/start", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({limit: limit ? Number(limit) : null})});
+    lastEvent = 0; rowsData = []; $("log").innerHTML = ""; $("rowbody").innerHTML = "";
+    $("runmsg").textContent = "running…";
+  } catch (e) { $("runmsg").textContent = "start failed: " + e.message; }
+}
+async function abortRun() { await api("/api/bench/abort", {method:"POST"}); }
+
+function renderSummary(rep) {
+  if (!rep || !rep.summary) return;
+  const s = rep.summary, vlm = s.vlm || {}, saw = s.saw || {};
+  $("summary").innerHTML =
+    `<div><span class="meta">model avg mismatches</span><b class="${vlm.mean < saw.mean ? "good" : ""}">${vlm.mean == null ? "—" : vlm.mean}</b></div>` +
+    `<div><span class="meta">baseline avg</span><b>${saw.mean == null ? "—" : saw.mean}</b></div>` +
+    `<div><span class="meta">rows exact</span><b>${vlm.exact == null ? "—" : vlm.exact + "/" + vlm.n}</b></div>` +
+    `<div><span class="meta">errors</span><b>${s.errors}</b></div>` +
+    `<div><span class="meta">elapsed</span><b>${rep.elapsed_s}s</b></div>`;
+  const p = rep.pipeline; const text = p && p.text ? p.text : p;
+  $("pipeline").innerHTML = text ? "pipeline: <code>" + esc(text) + "</code>" : "";
+}
+function renderRows() {
+  $("rowcount").textContent = `(${rowsData.length})`;
+  $("rowbody").innerHTML = rowsData.map(r => {
+    const flags = (r.flags || []).map(f => `<span class="flag">${esc(f)}</span>`).join("");
+    const read = r.error ? `<span class="bad">${esc(r.error)}</span>` : showStr(r.read);
+    const mm = r.mm_vlm == null ? "" : (r.mm_vlm === 0 ? `<span class="good">0</span>` : `<span class="bad">${r.mm_vlm}</span>`);
+    return `<tr><td>${r.index + 1}</td><td class="soft">${esc(r.photo)}</td>` +
+      `<td>${showStr(r.want)}</td><td>${read}</td><td>${mm}</td><td>${r.mm_saw == null ? "" : r.mm_saw}</td>` +
+      `<td>${flags}</td></tr>`;
+  }).join("");
+}
+async function loadPast() {
+  try {
+    const r = await api("/api/bench/runs");
+    $("past").innerHTML = (r.runs || []).map(x =>
+      `<tr><td>${esc(x.run)}</td><td class="soft">${esc((x.llm_model || "?").split("/").pop())}</td>` +
+      `<td>${x.scored_vlm == null ? "—" : x.scored_vlm}</td>` +
+      `<td>${x.vlm_avg == null ? "—" : x.vlm_avg}</td><td>${x.saw_avg == null ? "—" : x.saw_avg}</td>` +
+      `<td>${x.errors == null ? "" : x.errors}</td>` +
+      `<td class="soft" title="${esc(x.pipeline || "")}">${esc((x.pipeline || "").slice(0, 60))}</td></tr>`).join("")
+      || `<tr><td colspan="7" style="color:var(--dim)">no runs yet</td></tr>`;
+  } catch (e) {}
+}
+
+async function poll() {
+  try {
+    const st = await api("/api/bench/state");
+    $("runstate").textContent = `${st.status} ${st.done || 0}/${st.total || 0}`;
+    $("startBtn").disabled = ["running","aborting"].includes(st.status);
+    $("abortBtn").disabled = !["running","aborting"].includes(st.status);
+    if (st.run_seq !== lastRunSeq) { lastRunSeq = st.run_seq; lastEvent = 0; $("log").innerHTML = ""; }
+    const ev = await api(`/api/bench/events?offset=${lastEvent}`);
+    for (const e of ev.events) {
+      const div = document.createElement("div");
+      div.className = "ev k-" + (e.kind || "log");
+      div.innerHTML = `<span class="t">${e.t || ""}</span>` + esc(e.text || "");
+      $("log").appendChild(div);
+    }
+    lastEvent = ev.offset + ev.events.length;
+    $("log").scrollTop = $("log").scrollHeight;
+    const rows = await api("/api/bench/rows");
+    if (rows.rows.length !== rowsData.length) { rowsData = rows.rows; renderRows(); }
+    if (st.report && ["done","aborted","failed"].includes(st.status)) {
+      renderSummary(st.report); loadPast();
+    }
+  } catch (e) {}
+  setTimeout(poll, 1500);
+}
+loadConfig(); poll();
+</script>
+</body>
+</html>

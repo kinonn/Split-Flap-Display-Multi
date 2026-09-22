@@ -162,12 +162,12 @@ Point the display at an MQTT broker (e.g. [Mosquitto](https://mosquitto.org/)) f
 
 Topics use the device's mDNS name (`{mdns}`):
 
-| Topic                         | Direction      | Retained | Description                                                        |
-| ----------------------------- | -------------- | -------- | ------------------------------------------------------------------ |
-| `splitflap/{mdns}/set`        | to display     | no       | Send a message to show                                             |
-| `splitflap/{mdns}/state`      | from display   | yes      | Last message shown                                                 |
-| `splitflap/{mdns}/availability` | from display | yes      | `online` / `offline` (see below)                                   |
-| `splitflap/{mdns}/status`     | from display   | yes      | JSON status: `{"message","num_modules"}`                           |
+| Topic                           | Direction    | Retained | Description                              |
+| ------------------------------- | ------------ | -------- | ---------------------------------------- |
+| `splitflap/{mdns}/set`          | to display   | no       | Send a message to show                   |
+| `splitflap/{mdns}/state`        | from display | yes      | Last message shown                       |
+| `splitflap/{mdns}/availability` | from display | yes      | `online` / `offline` (see below)         |
+| `splitflap/{mdns}/status`       | from display | yes      | JSON status: `{"message","num_modules"}` |
 
 Availability is retained: the display publishes `online` on connect and registers a retained `offline` Last Will, so a crash or power loss shows the device as offline instead of stuck online.
 

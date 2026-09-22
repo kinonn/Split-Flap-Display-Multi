@@ -1,0 +1,393 @@
+{
+  "created": "2026-09-20T12:55:38+00:00",
+  "backend": "cnn",
+  "size": 64,
+  "classes": [
+    " ",
+    "!",
+    "#",
+    "$",
+    "%",
+    "'",
+    "-",
+    ".",
+    "/",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    ":",
+    "?",
+    "@",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z"
+  ],
+  "cells": 5292,
+  "train_cells": 5292,
+  "sets": [
+    "cal-007",
+    "run-001",
+    "run-005",
+    "run-006",
+    "run-011"
+  ],
+  "excluded_labels": {},
+  "charset": " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789':?!.-/$@#%",
+  "device": "cuda",
+  "class_counts": {
+    " ": 126,
+    "!": 83,
+    "#": 86,
+    "$": 134,
+    "%": 130,
+    "'": 39,
+    "-": 71,
+    ".": 44,
+    "/": 129,
+    "0": 118,
+    "1": 111,
+    "2": 108,
+    "3": 123,
+    "4": 104,
+    "5": 110,
+    "6": 83,
+    "7": 109,
+    "8": 111,
+    "9": 87,
+    ":": 97,
+    "?": 112,
+    "@": 124,
+    "A": 93,
+    "B": 116,
+    "C": 99,
+    "D": 166,
+    "E": 145,
+    "F": 110,
+    "G": 128,
+    "H": 136,
+    "I": 126,
+    "J": 105,
+    "K": 166,
+    "L": 97,
+    "M": 184,
+    "N": 166,
+    "O": 107,
+    "P": 112,
+    "Q": 96,
+    "R": 107,
+    "S": 100,
+    "T": 154,
+    "U": 100,
+    "V": 75,
+    "W": 107,
+    "X": 79,
+    "Y": 89,
+    "Z": 90
+  },
+  "metrics": {
+    "split": "photo",
+    "size": 64,
+    "test_cells": 972,
+    "test_photos": 81,
+    "cnn_acc": 0.9969,
+    "rows": 81,
+    "row_exact": 78,
+    "row_exact_rate": 0.963,
+    "row_mismatch_avg": 0.037,
+    "low_conf_cells": 8,
+    "low_conf_frac": 0.0082,
+    "per_class": {
+      " ": {
+        "total": 27,
+        "correct": 27,
+        "recall": 1.0
+      },
+      "!": {
+        "total": 9,
+        "correct": 9,
+        "recall": 1.0
+      },
+      "#": {
+        "total": 17,
+        "correct": 17,
+        "recall": 1.0
+      },
+      "$": {
+        "total": 10,
+        "correct": 10,
+        "recall": 1.0
+      },
+      "%": {
+        "total": 14,
+        "correct": 14,
+        "recall": 1.0
+      },
+      "'": {
+        "total": 1,
+        "correct": 1,
+        "recall": 1.0
+      },
+      "-": {
+        "total": 19,
+        "correct": 18,
+        "recall": 0.9474
+      },
+      ".": {
+        "total": 8,
+        "correct": 8,
+        "recall": 1.0
+      },
+      "/": {
+        "total": 19,
+        "correct": 19,
+        "recall": 1.0
+      },
+      "0": {
+        "total": 6,
+        "correct": 6,
+        "recall": 1.0
+      },
+      "1": {
+        "total": 39,
+        "correct": 39,
+        "recall": 1.0
+      },
+      "2": {
+        "total": 6,
+        "correct": 6,
+        "recall": 1.0
+      },
+      "3": {
+        "total": 3,
+        "correct": 3,
+        "recall": 1.0
+      },
+      "4": {
+        "total": 17,
+        "correct": 17,
+        "recall": 1.0
+      },
+      "5": {
+        "total": 8,
+        "correct": 8,
+        "recall": 1.0
+      },
+      "6": {
+        "total": 18,
+        "correct": 18,
+        "recall": 1.0
+      },
+      "7": {
+        "total": 29,
+        "correct": 29,
+        "recall": 1.0
+      },
+      "8": {
+        "total": 17,
+        "correct": 17,
+        "recall": 1.0
+      },
+      "9": {
+        "total": 13,
+        "correct": 13,
+        "recall": 1.0
+      },
+      ":": {
+        "total": 9,
+        "correct": 9,
+        "recall": 1.0
+      },
+      "?": {
+        "total": 21,
+        "correct": 21,
+        "recall": 1.0
+      },
+      "@": {
+        "total": 2,
+        "correct": 2,
+        "recall": 1.0
+      },
+      "A": {
+        "total": 5,
+        "correct": 5,
+        "recall": 1.0
+      },
+      "B": {
+        "total": 25,
+        "correct": 25,
+        "recall": 1.0
+      },
+      "C": {
+        "total": 21,
+        "correct": 21,
+        "recall": 1.0
+      },
+      "D": {
+        "total": 56,
+        "correct": 56,
+        "recall": 1.0
+      },
+      "E": {
+        "total": 31,
+        "correct": 31,
+        "recall": 1.0
+      },
+      "F": {
+        "total": 23,
+        "correct": 23,
+        "recall": 1.0
+      },
+      "G": {
+        "total": 35,
+        "correct": 35,
+        "recall": 1.0
+      },
+      "H": {
+        "total": 32,
+        "correct": 32,
+        "recall": 1.0
+      },
+      "I": {
+        "total": 31,
+        "correct": 30,
+        "recall": 0.9677
+      },
+      "J": {
+        "total": 31,
+        "correct": 31,
+        "recall": 1.0
+      },
+      "K": {
+        "total": 44,
+        "correct": 44,
+        "recall": 1.0
+      },
+      "L": {
+        "total": 16,
+        "correct": 16,
+        "recall": 1.0
+      },
+      "M": {
+        "total": 63,
+        "correct": 63,
+        "recall": 1.0
+      },
+      "N": {
+        "total": 15,
+        "correct": 15,
+        "recall": 1.0
+      },
+      "O": {
+        "total": 7,
+        "correct": 7,
+        "recall": 1.0
+      },
+      "P": {
+        "total": 31,
+        "correct": 31,
+        "recall": 1.0
+      },
+      "Q": {
+        "total": 25,
+        "correct": 24,
+        "recall": 0.96
+      },
+      "R": {
+        "total": 10,
+        "correct": 10,
+        "recall": 1.0
+      },
+      "S": {
+        "total": 27,
+        "correct": 27,
+        "recall": 1.0
+      },
+      "T": {
+        "total": 25,
+        "correct": 25,
+        "recall": 1.0
+      },
+      "U": {
+        "total": 28,
+        "correct": 28,
+        "recall": 1.0
+      },
+      "V": {
+        "total": 22,
+        "correct": 22,
+        "recall": 1.0
+      },
+      "W": {
+        "total": 17,
+        "correct": 17,
+        "recall": 1.0
+      },
+      "X": {
+        "total": 3,
+        "correct": 3,
+        "recall": 1.0
+      },
+      "Y": {
+        "total": 33,
+        "correct": 33,
+        "recall": 1.0
+      },
+      "Z": {
+        "total": 4,
+        "correct": 4,
+        "recall": 1.0
+      }
+    },
+    "confusions": [
+      {
+        "label": "I",
+        "pred": "!",
+        "count": 1
+      },
+      {
+        "label": "-",
+        "pred": " ",
+        "count": 1
+      },
+      {
+        "label": "Q",
+        "pred": "S",
+        "count": 1
+      }
+    ],
+    "photo_frac": 0.2,
+    "seed": 1,
+    "device": "cuda"
+  },
+  "trained": "all-data"
+}

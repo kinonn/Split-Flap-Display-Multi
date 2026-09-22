@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calib Auto — CNN approach</title>
+<style>
+  :root { --bg:#14161a; --card:#1d2026; --card2:#23272e; --line:#2e333b;
+          --fg:#d8dce2; --dim:#8a919c; --accent:#4ea1ff; --good:#4ec98a;
+          --warn:#e0b04c; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1200px; margin:0 auto; padding:20px 18px 60px; }
+  h1 { font-size:19px; margin:0 0 2px; } h1 a { color:var(--dim); text-decoration:none; font-size:13px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
+  .cols { display:grid; grid-template-columns: 420px 1fr; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  input, select { width:100%; background:var(--card2); color:var(--fg); border:1px solid var(--line);
+                  border-radius:6px; padding:6px 8px; font:inherit; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  button { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f4e7a; border-color:#2f6ea8; }
+  button.danger { background:#5a2626; border-color:#7a3333; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .msg { font-size:13px; color:var(--warn); margin-top:8px; min-height:18px; }
+  #live { width:100%; border-radius:8px; border:1px solid var(--line); display:block; background:#000; }
+  #log { height:340px; overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace;
+         background:var(--card2); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .ev { white-space:pre-wrap; word-break:break-word; }
+  .ev .t { color:var(--dim); margin-right:6px; }
+  .k-error { color:var(--bad); } .k-done { color:var(--good); }
+  .k-tune { color:var(--accent); } .k-api { color:var(--dim); }
+  .photos { display:flex; gap:8px; overflow-x:auto; margin-top:8px; }
+  .photos img { height:64px; border-radius:6px; border:1px solid var(--line); }
+  .meta { font-size:12px; color:var(--dim); } .meta b { color:var(--fg); }
+  .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px;
+           background:var(--card2); border:1px solid var(--line); margin-right:6px; }
+  .phases label { display:inline-flex; gap:5px; align-items:center; margin-right:12px; color:var(--fg); }
+  .phases input { width:auto; }
+  .chips { display:flex; flex-wrap:wrap; gap:3px; margin-top:6px; }
+  .chip { width:26px; height:30px; display:flex; align-items:center; justify-content:center;
+          background:var(--card2); border:1px solid var(--line); border-radius:4px;
+          font:15px ui-monospace,Consolas,monospace; }
+  .chip.ok { border-color:#2f6e4a; } .chip.warn { border-color:#7a5a2f; } .chip.bad { border-color:#7a3333; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CNN approach <a href="/">← back</a></h1>
+  <div class="meta">Local trained model reads every frame — no provider, no network.</div>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Setup</h2>
+        <label>Display host</label><input id="display_host">
+        <div class="row">
+          <div><label>Camera index</label><input id="camera_index" type="number" min="0" max="16"></div>
+          <div><label>Brightness (0–100)</label><input id="brightness" type="number" min="0" max="100"></div>
+        </div>
+        <div class="row">
+          <div><label>Crop % (top+bottom)</label><input id="crop_percent" type="number" min="0" max="40"></div>
+          <div><label>Start wait s (blank)</label><input id="warmup_s" type="number" min="0" max="30" placeholder="auto"></div>
+        </div>
+        <div class="row">
+          <div><label>Module count</label><input id="module_count" type="number" min="1" max="64"></div>
+          <div><label>Dwell ms</label><input id="dwell_ms" type="number" min="0" max="60000"></div>
+        </div>
+        <label>Sensor exposure (<span id="exposure_val">auto</span>)</label>
+        <input id="camera_exposure" type="range" min="-13" max="0" step="1" value="-7"
+               oninput="$('exposure_val').textContent = exposureOn() ? this.value : 'auto'">
+        <label style="display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:6px">
+          <input type="checkbox" id="exposure_auto" style="width:auto" checked
+                 onchange="$('exposure_val').textContent = exposureOn() ? $('camera_exposure').value : 'auto'">
+          Auto exposure (driver AE; uncheck to fix a manual value)</label>
+        <label>Run mode</label>
+        <select id="mode"><option value="dry-run">dry-run — shift table only</option>
+          <option value="full">full — apply and persist fixes</option></select>
+        <label>Phases</label>
+        <div class="phases">
+          <label><input type="checkbox" class="phase" value="p1" checked> P1 coarse</label>
+          <label><input type="checkbox" class="phase" value="p2" checked> P2 fine</label>
+          <label><input type="checkbox" class="phase" value="p4" checked> P4 verify</label>
+          <label><input type="checkbox" class="phase" value="acceptance" checked> acceptance</label>
+        </div>
+        <div class="row">
+          <div><label>Min confidence</label><input id="min_confidence" type="number" step="0.05" min="0" max="1"></div>
+        </div>
+        <div class="btns">
+          <button onclick="saveConfig()">Save</button>
+          <button onclick="checkCamera()">Check camera</button>
+        </div>
+        <div class="msg" id="setupmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Model</h2>
+        <div class="meta" id="modelinfo">loading…</div>
+        <div class="row" style="margin-top:8px">
+          <div><label>Backend</label>
+            <select id="classifier_backend">
+              <option value="auto">auto — CNN if trained</option>
+              <option value="cnn">cnn</option>
+              <option value="bank">bank — template fallback</option>
+            </select></div>
+        </div>
+        <div class="row">
+          <div><label>Low-conf floor</label><input id="classifier_min_conf" type="number" step="0.05" min="0" max="1"></div>
+          <div><label>Margin floor</label><input id="classifier_min_margin" type="number" step="0.05" min="0" max="1"></div>
+        </div>
+        <label style="display:flex;gap:8px;align-items:center;color:var(--fg);margin-top:6px">
+          <input type="checkbox" id="blank_gate" style="width:auto">
+          OpenCV blank gate (skip model on empty cells)</label>
+        <div class="btns">
+          <button onclick="saveConfig()">Save</button>
+          <button onclick="location.href='/train'">Train →</button>
+          <button onclick="location.href='/cnn-test'">Test model →</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Run</h2>
+        <div class="btns">
+          <button class="primary" id="startBtn" onclick="startRun()">Start calibration</button>
+          <button class="danger" id="abortBtn" onclick="abortRun()" disabled>Abort</button>
+          <button onclick="restoreSnapshot()">Restore snapshot</button>
+        </div>
+        <div class="msg" id="runmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Live view</h2>
+        <label style="display:flex;gap:8px;align-items:center;color:var(--fg);margin:0 0 8px">
+          <input type="checkbox" id="live_toggle" style="width:auto"
+                 onchange="setLive(this.checked)">
+          Live camera view <span class="meta" id="livemsg" style="margin-left:4px"></span></label>
+        <img id="live" alt="live camera view" style="display:none">
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Run log <span class="meta" id="runstate"></span></h2>
+        <div id="log"></div>
+        <div class="photos" id="photos"></div>
+      </div>
+      <div class="card" id="reportCard" style="display:none">
+        <h2 style="margin-top:0">Report</h2>
+        <div id="report"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+let lastEvent = 0, lastRunSeq = -1, logAtBottom = true;
+$("log").addEventListener("scroll", () => {
+  const el = $("log");
+  logAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+});
+
+const CFG_KEYS = ["display_host","camera_index","brightness","crop_percent","warmup_s",
+  "module_count","dwell_ms","mode","min_confidence","classifier_backend",
+  "classifier_min_conf","classifier_min_margin","blank_gate"];
+
+async function loadConfig() {
+  const c = await api("/api/config");
+  for (const k of CFG_KEYS) {
+    const el = $(k); if (!el) continue;
+    if (el.type === "checkbox") { el.checked = !!c[k]; continue; }
+    el.value = c[k] === null || c[k] === undefined ? "" : (Array.isArray(c[k]) ? c[k].join(",") : c[k]);
+  }
+  // exposure is a checkbox + slider pair, not a plain input
+  if (c.exposure === null || c.exposure === undefined || c.exposure === "") {
+    $("exposure_auto").checked = true;
+  } else {
+    $("exposure_auto").checked = false;
+    $("camera_exposure").value = c.exposure;
+  }
+  $("exposure_val").textContent = exposureOn() ? $("camera_exposure").value : "auto";
+  await loadModels();
+  let livePref = "0";
+  try { livePref = localStorage.getItem("calibAutoLiveView") || "0"; } catch (e) {}
+  setLive(livePref !== "0");
+}
+async function loadModels() {
+  try {
+    const m = await api("/api/models");
+    const allSets = (m.caches || []).map(c => c.set);
+    const parts = [];
+    if (m.cnn) {
+      const meta = m.cnn.meta || {};
+      const trainedSets = meta.sets || [];
+      const subset = trainedSets.length && allSets.length && trainedSets.length < allSets.length;
+      parts.push(`<span class="badge">CNN</span> ${meta.cells || "?"} cells, ${(meta.classes||[]).length} classes` +
+        (meta.metrics ? `, val ${(meta.metrics.cnn_acc*100).toFixed(1)}%` : "") +
+        ` <span class="meta">(sha ${m.cnn.sha256})</span>` +
+        `<div class="meta">trained on: <b>${esc(trainedSets.join(", ") || "?")}</b>` +
+        (subset ? ` <span style="color:var(--warn)">(subset of ${allSets.length} sets)</span>` : "") + `</div>`);
+    } else parts.push(`<span class="badge">CNN</span> not trained — <a style="color:var(--accent)" href="/train">train it</a>`);
+    if (m.bank) {
+      const bmeta = m.bank.meta || {};
+      parts.push(`<span class="badge">bank</span> ${bmeta.cells || "?"} cells` +
+        (bmeta.sets ? `<div class="meta">trained on: <b>${esc(bmeta.sets.join(", "))}</b></div>` : ""));
+    }
+    const caches = (m.caches || []).map(c => `${c.set} (${c.cells || 0})`).join(", ");
+    parts.push(`<span class="badge">caches</span> ${caches || "none"}`);
+    $("modelinfo").innerHTML = parts.join("<br>");
+  } catch (e) { $("modelinfo").textContent = "models: " + e.message; }
+}
+async function saveConfig() {
+  const patch = {};
+  for (const k of CFG_KEYS) {
+    const el = $(k); if (!el) continue;
+    if (el.type === "checkbox") { patch[k] = el.checked; continue; }
+    let v = el.value;
+    if (["camera_index","module_count","dwell_ms"].includes(k)) v = v === "" ? 0 : Number(v);
+    if (["brightness","crop_percent","min_confidence","classifier_min_conf","classifier_min_margin"].includes(k))
+      v = v === "" ? 0 : Number(v);
+    if (k === "warmup_s") v = v === "" ? null : Number(v);
+    patch[k] = v;
+  }
+  patch.exposure = exposure();
+  try { await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+        $("setupmsg").textContent = "saved"; }
+  catch (e) { $("setupmsg").textContent = "save failed: " + e.message; }
+}
+function phases() { return [...document.querySelectorAll(".phase:checked")].map(x => x.value); }
+function exposureOn() { return !$("exposure_auto").checked; }
+function exposure() {
+  if (!exposureOn()) return null;   // null = driver auto-exposure
+  const v = Number($("camera_exposure").value);
+  return Number.isFinite(v) ? v : null;
+}
+
+async function checkCamera() {
+  $("setupmsg").textContent = "checking camera…";
+  try {
+    const r = await api("/api/check-camera", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({camera_index: Number($("camera_index").value), brightness: Number($("brightness").value),
+                            crop_percent: Number($("crop_percent").value),
+                            exposure: exposure(), warmup_s: $("warmup_s").value === "" ? null : Number($("warmup_s").value)})});
+    const d = r.diagnostics || {};
+    $("setupmsg").textContent = `ok: ${d.resolution.join("x")}, mean ${d.mean_brightness}, drift ${d.drift}, ` +
+      `backend ${d.backend}` +
+      (d.auto_exposure ? `, exposure ${d.auto_exposure.mode}${d.auto_exposure.locked ? " (locked)" : ""}` : "") +
+      (d.warnings && d.warnings.length ? " — " + d.warnings.join("; ") : "");
+  } catch (e) { $("setupmsg").textContent = "camera: " + e.message; }
+}
+
+let liveOn = false, liveTimer = null, liveWanted = false;
+function setLive(on) {
+  liveOn = on;
+  liveWanted = on;
+  $("live_toggle").checked = on;
+  try { localStorage.setItem("calibAutoLiveView", on ? "1" : "0"); } catch (e) {}
+  $("live").style.display = on ? "block" : "none";
+  if (on) { $("livemsg").textContent = ""; liveTick(); }
+  else if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+}
+function pauseLive(msg) {          // stop without clearing the user's preference
+  if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+  liveOn = false;
+  $("livemsg").textContent = msg || "";
+}
+async function liveTick() {
+  if (!liveOn) return;
+  try {
+    const exp = exposure();
+    const r = await fetch("/api/camera/frame?camera_index=" + Number($("camera_index").value || 0) +
+                          "&brightness=" + Number($("brightness").value || 50) +
+                          "&crop_percent=" + Number($("crop_percent").value || 0) +
+                          "&warmup_s=" + ($("warmup_s").value === "" ? "" : Number($("warmup_s").value)) +
+                          "&exposure=" + (exp === null ? "auto" : exp));
+    if (r.status === 409) {
+      pauseLive("Camera busy — run in progress.");
+      return;
+    }
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || r.statusText);
+    }
+    const blob = await r.blob();
+    const img = $("live");
+    const old = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+  } catch (e) {
+    pauseLive("Live view off: " + e.message);
+    return;
+  }
+  liveTimer = setTimeout(liveTick, 800);
+}
+
+async function startRun() {
+  await saveConfig();
+  try {
+    await api("/api/cal/start", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({approach: "cnn", mode: $("mode").value, phases: phases()})});
+    lastEvent = 0; $("log").innerHTML = ""; $("runmsg").textContent = "running…";
+  } catch (e) { $("runmsg").textContent = "start failed: " + e.message; }
+}
+async function abortRun() { await api("/api/cal/abort", {method:"POST"}); }
+async function restoreSnapshot() {
+  try { await api("/api/cal/restore-snapshot", {method:"POST"});
+        $("runmsg").textContent = "snapshot restored"; }
+  catch (e) { $("runmsg").textContent = "restore: " + e.message; }
+}
+
+function renderEvent(e) {
+  const div = document.createElement("div");
+  div.className = "ev k-" + (e.kind || "log");
+  div.innerHTML = `<span class="t">${e.t || ""}</span>` + esc(e.text || "");
+  $("log").appendChild(div);
+}
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function renderReport(rep) {
+  if (!rep || !rep.result) return;
+  $("reportCard").style.display = "block";
+  const timing = rep.timing || {};
+  const budgets = rep.budgets || {};
+  const modules = (rep.summary && rep.summary.modules) || [];
+  const rows = modules.map(m =>
+    `<tr><td>${m.module}</td><td>${m.offset_delta >= 0 ? "+" : ""}${m.offset_delta}</td>` +
+    `<td>${m.persistent_wrong_glyph ? "⚠" : ""}</td></tr>`).join("");
+  $("report").innerHTML =
+    `<div class="meta">result: <b style="color:${rep.result === "converged" ? "var(--good)" : "var(--warn)"}">${rep.result}</b> — ${esc(rep.reason || "")}</div>` +
+    `<div class="meta" style="margin-top:6px">frames ${budgets.frames || 0} · reads ${budgets.vlmCalls || 0} · ` +
+    `previews ${budgets.previews || 0} · persists ${budgets.persists || 0} · ` +
+    `${timing.wallSeconds || "?"}s wall</div>` +
+    (rows ? `<table style="margin-top:8px;border-collapse:collapse;font-size:12px">
+      <tr style="color:var(--dim)"><th style="text-align:left;padding-right:12px">module</th>
+      <th style="text-align:left;padding-right:12px">Δoffset</th><th></th></tr>${rows}</table>` : "");
+}
+
+async function poll() {
+  try {
+    const st = await api("/api/cal/state");
+    $("runstate").textContent = `${st.status} · ${st.frames} frames`;
+    const busy = ["running","aborting"].includes(st.status);
+    $("startBtn").disabled = busy;
+    $("abortBtn").disabled = !busy;
+    // A run holds the camera: stop polling for frames so the run's own
+    // captures never contend for the device, and resume when it ends.
+    if (busy && liveOn) pauseLive("Camera busy — run in progress.");
+    if (!busy && !liveOn && liveWanted) setLive(true);
+    if (st.run_seq !== lastRunSeq) {
+      lastRunSeq = st.run_seq; lastEvent = 0; $("log").innerHTML = "";
+      $("reportCard").style.display = "none";
+    }
+    const ev = await api(`/api/cal/events?offset=${lastEvent}`);
+    for (const e of ev.events) renderEvent(e);
+    lastEvent = ev.offset + ev.events.length;
+    if (logAtBottom) $("log").scrollTop = $("log").scrollHeight;
+    const ph = $("photos"); const want = (st.photos || []).slice(-6).join(",");
+    if (ph.dataset.key !== want) {
+      ph.dataset.key = want;
+      ph.innerHTML = (st.photos || []).slice(-6).map(p =>
+        `<img src="/api/cal/photo/${encodeURIComponent(p)}?t=${Date.now()}" title="${esc(p)}">`).join("");
+    }
+    if (st.report && st.status === "done") renderReport(st.report);
+  } catch (e) {}
+  setTimeout(poll, 1500);
+}
+loadConfig(); poll();
+</script>
+</body>
+</html>

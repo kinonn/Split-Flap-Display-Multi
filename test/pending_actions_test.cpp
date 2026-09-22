@@ -58,6 +58,26 @@ static void test_flags_are_independent() {
     CHECK(a.takeReloadOffsets() == true);
 }
 
+// Busy-signal peekers: a queued reload/push must be visible BEFORE the
+// loop task drains the mailbox (the queue-to-pickup gap), and gone after.
+static void test_busy_peekers_cover_queued_work() {
+    PendingActions a;
+    CHECK(! a.hasReloadOffsets());
+    CHECK(! a.hasPushOffsets());
+
+    a.requestReloadOffsets();
+    a.requestPushOffsets();
+    CHECK(a.hasReloadOffsets());
+    CHECK(a.hasPushOffsets());
+
+    CHECK(a.takeReloadOffsets() == true);
+    CHECK(! a.hasReloadOffsets()); // drained: gap closed
+    CHECK(a.hasPushOffsets());     // independent flag untouched
+
+    CHECK(a.takePushOffsets() == true);
+    CHECK(! a.hasPushOffsets());
+}
+
 // Hammer: one thread spamming requests while the consumer drains. The
 // consumer must observe at least one request and every take must win its
 // flag exactly once (atomic exchange — no lost updates, no double takes).
@@ -108,6 +128,7 @@ int main() {
     test_initially_empty();
     test_request_then_take_once();
     test_flags_are_independent();
+    test_busy_peekers_cover_queued_work();
     test_threaded_hammer();
 
     std::printf("%d checks, %d failures\n", checks, failures);
