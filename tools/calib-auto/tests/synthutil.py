@@ -46,17 +46,17 @@ def synth_display(path, labels, *, w: int = 900, h: int = 220,
     total = len(labels)
     pitch = (x1 - x0) / total
     if wash_modules > 0:
-        wash_x = int(round(x0 + min(total, wash_modules) * pitch))
+        wash_x = round(x0 + min(total, wash_modules) * pitch)
         img[y0j:y1j, x0:wash_x] = wash_value
     for i in range(1, total):
-        xi = int(round(x0 + i * pitch))
+        xi = round(x0 + i * pitch)
         img[y0j:y1j, xi - 2:xi + 3] = 8
     cy = (y0j + y1j) // 2
     for i, glyph in enumerate(labels):
         if glyph == " ":
             continue
         jx = int(rng.integers(-jitter, jitter + 1)) if jitter else 0
-        cx = int(round(x0 + (i + 0.5) * pitch)) + jx
+        cx = round(x0 + (i + 0.5) * pitch) + jx
         (tw, th), _ = cv2.getTextSize(glyph, cv2.FONT_HERSHEY_SIMPLEX,
                                       1.0, 3)
         cv2.putText(img, glyph, (cx - tw // 2, cy + th // 2),

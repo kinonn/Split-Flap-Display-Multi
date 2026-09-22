@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from synthutil import CHUNKY, cache_payload, synth_display
 
 from calib_auto import cnn_reader, glyphs, segment
 from calib_auto.classifier import GlyphBank
-
-from synthutil import CHUNKY, cache_payload, synth_display
 
 TOTAL = 12
 LABELS = CHUNKY  # 12 chunky glyphs, one per module

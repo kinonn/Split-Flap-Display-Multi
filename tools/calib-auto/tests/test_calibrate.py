@@ -4,18 +4,24 @@ Ported from the calib-vlm suite (the loop is the same code) with the
 recognizer renamed; SimReader plays both reader backends.
 """
 
-import pytest
 from collections import Counter
+from itertools import pairwise
 
-from calib_auto.calibrate import (BATCH_MAX_NUDGES, CHAR_OFFSET_LIMIT,
-                                  MAX_UNRELIABLE_READS,
-                                  REMOTE_BATCH_MAX_NUDGES, Calibrator,
-                                  _p1_direction, _p1_module_delta,
-                                  _p2_ladder_steps)
+import pytest
+from fakes import FakeCamera, FakeDisplay, SimReader
+
+from calib_auto.calibrate import (
+    BATCH_MAX_NUDGES,
+    CHAR_OFFSET_LIMIT,
+    MAX_UNRELIABLE_READS,
+    REMOTE_BATCH_MAX_NUDGES,
+    Calibrator,
+    _p1_direction,
+    _p1_module_delta,
+    _p2_ladder_steps,
+)
 from calib_auto.display import CalibError
 from calib_auto.reader import ModuleReading, ReaderError
-
-from fakes import FakeCamera, FakeDisplay, SimReader
 
 
 def run_calib(display, tmp_path, mode="full", exhaustive=False, phases=None):
@@ -32,7 +38,7 @@ def run_calib(display, tmp_path, mode="full", exhaustive=False, phases=None):
 def test_coarse_identity_converges(tmp_path):
     d = FakeDisplay(total=4)
     d.seed_module_error(1, -d.spc)  # module 1 shows the previous char
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert report["summary"]["ok"]
     assert d.mod_off[1] == 0
@@ -52,7 +58,7 @@ def test_per_char_identity_converges(tmp_path):
     # Only 'O' is one char behind on m2, with the cell at the clamp edge:
     # the incremental ladder must walk it back inside ±32 in one step.
     d.seed_char_error(2, ci, -32)
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.displayed_char(2, "O") == "O"
     assert -32 <= d.char_off[2].get(ci, 0) <= 32
@@ -116,7 +122,7 @@ def test_sub_pitch_offset_is_invisible_and_left_alone(tmp_path):
     d = FakeDisplay(total=4)
     ci = d.drum.index("A")
     d.seed_char_error(3, ci, 1)
-    calib, report = run_calib(d, tmp_path, exhaustive=True)
+    _calib, report = run_calib(d, tmp_path, exhaustive=True)
     assert report["result"] == "converged"
     assert d.char_off[3].get(ci, 0) == 1  # untouched
 
@@ -130,7 +136,7 @@ def test_per_char_offsets_may_differ_within_a_module(tmp_path):
     behind = d.drum.index("D")
     d.seed_char_error(1, ahead, 32)    # 'H' shows the next flap
     d.seed_char_error(1, behind, -32)  # 'D' shows the previous flap
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.displayed_char(1, "H") == "H"
     assert d.displayed_char(1, "D") == "D"
@@ -156,7 +162,7 @@ def test_sweep_is_reverse_drum_order(tmp_path):
                        dwell_ms=0, timeout_s=5, min_confidence=0.5,
                        mode="full")
     calib.total, calib.charset, calib.drum = d.total, d.charset, d.drum
-    readings, chars = calib._sweep()
+    _readings, chars = calib._sweep()
     assert chars == list(reversed(d.drum))
     assert seen == [ch * d.total for ch in reversed(d.drum)]
 
@@ -168,7 +174,7 @@ def test_char_fixes_apply_in_parallel_batches(tmp_path):
     ci = d.drum.index("H")
     d.seed_char_error(1, ci, 32)
     d.seed_char_error(3, ci, 32)
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     multi = [b for b in d.batches if len(b) >= 2]
     assert multi, "expected a batch carrying both cells' candidates"
@@ -221,7 +227,7 @@ def test_dry_run_leaves_char_faults_untouched(tmp_path):
     d = FakeDisplay(total=4, charset=48)
     ci = d.drum.index("H")
     d.seed_char_error(1, ci, 32)
-    calib, report = run_calib(d, tmp_path, mode="dry-run")
+    _calib, _report = run_calib(d, tmp_path, mode="dry-run")
     assert not d.previews
     assert not d.persists
     assert not d.batches
@@ -243,7 +249,7 @@ def test_module_fix_clears_char_suspects_without_char_tunes(tmp_path):
 def test_remote_group_converges(tmp_path):
     d = FakeDisplay(total=6, groups=2)
     d.seed_module_error(4, -d.spc)  # group 2, local module 1
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.remote_mod[0][1] == 0
 
@@ -255,7 +261,7 @@ def test_ahead_by_one_char_converges_within_clamp(tmp_path):
     d = FakeDisplay(total=4)
     ci = d.drum.index("E")
     d.seed_char_error(1, ci, 32)  # 'E' shows the NEXT char on m1
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.displayed_char(1, "E") == "E"
     assert d.char_off[1].get(ci, 0) == 24  # one -8 step settles it
@@ -272,7 +278,7 @@ def test_module_cell_fault_applied_in_one_preview(tmp_path):
     # 4-step remainder is sub-pitch and reads clean.
     d = FakeDisplay(total=4)
     d.seed_module_error(1, -d.spc * 12)  # every glyph 12 chars off
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.mod_off[1] == -4
     mod_previews = [(ci, delta) for _, ci, delta in d.previews if ci < 0]
@@ -290,7 +296,7 @@ def test_run_reverts_volatile_preview_residue(tmp_path):
     d.preview(1, -1, -500)          # ghost residue from a prior run
     assert d.res_mod[1] == -500
     d.previews = []                 # only count nudges the run itself makes
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.reloads >= 1           # baseline cleaned before P0
     assert d.res_mod[1] == 0
@@ -342,7 +348,7 @@ def test_fleet_run_tunes_the_declared_mapping(tmp_path):
     # report carries the geometry the run actually used.
     d = FakeDisplay(group_widths=[8, 6, 4])
     d.seed_module_error(14, -d.spc)  # group 3, local module 0
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["fleet"]["groupWidths"] == [8, 6, 4]
     assert report["result"] == "converged"
     assert d.remote_mod[2][0] == 0
@@ -424,7 +430,7 @@ def test_remote_group_char_converges(tmp_path):
     d = FakeDisplay(total=6, groups=2)
     ci = d.drum.index("H")
     d.seed_char_error(5, ci, 32)  # group 2, local 2: H shows next char
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert d.displayed_char(5, "H") == "H"
     assert d.remote_char[0][2][ci] == 24
@@ -533,14 +539,14 @@ def test_ladder_background_fillers_rotate(tmp_path):
     for frame in shown:
         # Module 3 is background in every ladder frame.
         assert frame[3] in d.drum
-    assert any(a[3] != b[3] for a, b in zip(shown, shown[1:]))
+    assert any(a[3] != b[3] for a, b in pairwise(shown))
 
 
 def test_summary_records_offset_delta(tmp_path):
     d = FakeDisplay(total=4)
     d.seed_module_error(1, -d.spc)
     _, report = run_calib(d, tmp_path)
-    m1 = [m for m in report["summary"]["modules"] if m["module"] == 1][0]
+    m1 = next(m for m in report["summary"]["modules"] if m["module"] == 1)
     assert m1["offset_delta"] == -d.spc
     assert not m1["persistent_wrong_glyph"]
 
@@ -567,7 +573,7 @@ def test_fine_identity_that_does_not_fit_escalates(tmp_path):
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
     d.seed_char_error(2, ci, 30 * d.spc)
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "needs-human"
     notes = [e["note"] for e in report["identity"]["persistent"]]
     assert any("incremental ladder" in n and "char cell" in n for n in notes)
@@ -744,7 +750,7 @@ def test_ladder_filler_rotates_background_slots(tmp_path):
     shown = [e["frame"] for e in calib.frames
              if e["tag"].startswith("ladder_")]
     assert len(shown) >= 2
-    for prev, cur in zip(shown, shown[1:]):
+    for prev, cur in pairwise(shown):
         # Module 3 is background in every frame: must always move.
         assert prev[3] != cur[3], f"background stalled: {prev!r} -> {cur!r}"
 
@@ -1008,7 +1014,7 @@ def test_report_has_timing_context_and_traceback(tmp_path):
     # firmware identity, wall seconds, per-phase costs.
     d = FakeDisplay(total=4)
     d.seed_module_error(1, -d.spc)
-    calib, report = run_calib(d, tmp_path)
+    _calib, report = run_calib(d, tmp_path)
     assert report["result"] == "converged"
     assert report["config"]["dwell_ms"] == 0
     assert report["config"]["stepsPerRot"] == 2048
@@ -1069,7 +1075,7 @@ def test_p1_only_skips_later_phases(tmp_path):
     # report marks them skipped with a subset verdict.
     d = FakeDisplay(total=4)
     d.seed_module_error(1, -d.spc)
-    calib, report = run_calib(d, tmp_path, phases=["p1"])
+    _calib, report = run_calib(d, tmp_path, phases=["p1"])
     assert report["phases"] == ["p1"]
     assert report["skipped"] == ["p2", "p4", "acceptance"]
     assert d.mod_off[1] == 0
@@ -1084,7 +1090,7 @@ def test_p2_without_p1_derives_flagged_readonly(tmp_path):
     d = FakeDisplay(total=4)
     ci = d.drum.index("O")
     d.seed_char_error(2, ci, -d.spc)  # only 'O' is one char behind on m2
-    calib, report = run_calib(d, tmp_path, phases=["p2"])
+    _calib, report = run_calib(d, tmp_path, phases=["p2"])
     assert report["phases"] == ["p2"]
     assert report["skipped"] == ["p1", "p4", "acceptance"]
     assert d.displayed_char(2, "O") == "O"
@@ -1097,7 +1103,7 @@ def test_p2_without_p1_derives_flagged_readonly(tmp_path):
 def test_p4_only_is_readonly(tmp_path):
     # P4/acceptance-only: no previews or persists, verdict escalates.
     d = FakeDisplay(total=4)
-    calib, report = run_calib(d, tmp_path, phases=["p4"])
+    _calib, report = run_calib(d, tmp_path, phases=["p4"])
     assert report["phases"] == ["p4"]
     assert report["skipped"] == ["p1", "p2", "acceptance"]
     assert d.previews == []

@@ -42,8 +42,15 @@ import re
 
 import cv2
 
-from .reader import (ModuleReading, ReaderError, Reading, VlmReader,
-                     _normalize_char, annotate_modules, jpeg_bytes)
+from .reader import (
+    ModuleReading,
+    ReaderError,
+    Reading,
+    VlmReader,
+    _normalize_char,
+    annotate_modules,
+    jpeg_bytes,
+)
 from .vlm import VLMError, text_part
 
 DEFAULT_OCR_PROMPT = "OCR:"
@@ -148,9 +155,9 @@ def cell_crops(image, total: int, inset: float = CELL_INSET):
     """
     width = image.shape[1]
     for i in range(max(1, total)):
-        x0 = int(round(width * i / total))
-        x1 = int(round(width * (i + 1) / total))
-        margin = int(round((x1 - x0) * max(0.0, min(0.2, inset))))
+        x0 = round(width * i / total)
+        x1 = round(width * (i + 1) / total)
+        margin = round((x1 - x0) * max(0.0, min(0.2, inset)))
         if x1 - margin > x0 + margin:
             x0, x1 = x0 + margin, x1 - margin
         yield image[:, x0:x1]
@@ -212,7 +219,7 @@ class TextReader:
 
         mode = str(image_mode).lower()
         self.image_mode = mode if mode in (
-            "strip", "cells") + segment.DETECTED_MODES else "strip"
+            "strip", "cells", *segment.DETECTED_MODES) else "strip"
         self.preprocess = (str(preprocess).lower()
                            if str(preprocess).lower()
                            in segment.PREPROCESS_STYLES else "none")

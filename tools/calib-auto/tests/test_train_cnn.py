@@ -10,9 +10,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from calib_auto import classifier, glyphs, train_cnn  # noqa: E402
-
 from synthutil import make_baseline_set  # noqa: E402
+
+from calib_auto import classifier, glyphs, train_cnn  # noqa: E402
 
 
 @pytest.fixture

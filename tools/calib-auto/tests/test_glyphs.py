@@ -7,10 +7,9 @@ import os
 
 import numpy as np
 import pytest
-
-from calib_auto import golden, glyphs
-
 from synthutil import CHUNKY, make_baseline_set, synth_display
+
+from calib_auto import glyphs, golden
 
 
 @pytest.fixture
@@ -78,7 +77,8 @@ def test_cache_save_load_roundtrip(env):
     assert np.array_equal(loaded["crops"], payload["crops"])
     assert loaded["positions"].tolist() == payload["positions"].tolist()
     assert loaded["style"] == "none"
-    summary = json.loads(open(json_path, encoding="utf-8").read())
+    with open(json_path, encoding="utf-8") as fh:
+        summary = json.loads(fh.read())
     assert summary["cells"] == 12
     assert summary["set"] == "s4"
 

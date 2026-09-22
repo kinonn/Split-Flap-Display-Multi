@@ -58,8 +58,8 @@ def _charset_block(charset: str, drum: str) -> str:
     letters = "".join(c for c in charset if c.isalpha())
     digits = "".join(c for c in charset if c.isdigit())
     punct = "".join(c for c in charset if not c.isalnum() and c != " ")
-    lines = [f"Allowed characters ({len(charset)}): {shown!r} "
-             f"(\u2423 = space/blank)."]
+    lines = [(f"Allowed characters ({len(charset)}): {shown!r} "
+              f"(\u2423 = space/blank).")]
     if letters:
         lines.append(f"Letters: {' '.join(letters)}")
     if digits:
