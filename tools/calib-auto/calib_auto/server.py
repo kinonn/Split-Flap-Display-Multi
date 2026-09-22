@@ -23,7 +23,6 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
-import math
 import os
 import threading
 import time
@@ -37,9 +36,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
 from . import calibrate as cal_mod
-from . import classifier, cnn_reader, dataset, golden, glyphs, paths, score
+from . import classifier, cnn_reader, dataset, glyphs, golden, paths, score, train_cnn
 from . import config as config_mod
-from . import train_cnn
 from .camera import Camera, CameraError
 from .config import ConfigError
 from .display import CalibError, Display
@@ -1245,7 +1243,7 @@ def _make_cnn_test_reader(cfg: dict, body: dict):
             min_margin=float(raw_margin if raw_margin not in (None, "")
                              else cfg.get("classifier_min_margin", 0.1)),
             blank_gate=blank_gate)
-        reader.model  # fail now when the artifact is missing/corrupt
+        _ = reader.model  # fail now when the artifact is missing/corrupt
     except classifier.BankError as exc:
         raise HTTPException(400, (
             f"local classifier not usable: {exc} — train one on the "
@@ -1752,7 +1750,7 @@ def _make_cal_reader(approach: str, cfg: dict):
                 min_conf=float(cfg.get("classifier_min_conf", 0.5)),
                 min_margin=float(cfg.get("classifier_min_margin", 0.1)),
                 blank_gate=bool(cfg.get("blank_gate", False)))
-            reader.model  # fail now when the artifact is missing/corrupt
+            _ = reader.model  # fail now when the artifact is missing/corrupt
         except classifier.BankError as exc:
             raise HTTPException(400, (
                 f"local classifier not usable: {exc} — train one on the "

@@ -6,12 +6,10 @@ import os
 
 import numpy as np
 import pytest
+from synthutil import CHUNKY, cache_payload, glyph_raster, make_baseline_set
 
 from calib_auto import classifier, glyphs, segment
-from calib_auto.classifier import (GlyphBank, classify_cell, classify_raster)
-
-from synthutil import (CHUNKY, cache_payload, glyph_raster,
-                       make_baseline_set)
+from calib_auto.classifier import GlyphBank, classify_cell, classify_raster
 
 
 @pytest.fixture
@@ -49,7 +47,7 @@ def test_predict_live_crop_canonicalizes():
 
 
 def test_fit_excludes_labels_outside_charset():
-    payload = cache_payload(_samples("AM") + [("v", glyph_raster("v"))])
+    payload = cache_payload([*_samples("AM"), ("v", glyph_raster("v"))])
     bank = GlyphBank(48).fit([payload])
     assert "v" not in bank.classes
     assert bank.skipped_labels == {"v": 1}
@@ -98,13 +96,13 @@ def test_classify_raster_gating_policy():
     # test called the cell blank (this is the period/apostrophe rescue)
     dot = np.full((64, 64), 20, np.uint8)
     dot[26:38, 26:38] = 255
-    char, conf, margin, source = classify_raster(
+    char, _conf, _margin, source = classify_raster(
         bank, dot, blank=True, blank_gate=True)
     assert source == "classifier"
     # dim texture stays blank when the ink test also says blank
     dim = np.full((64, 64), 30, np.uint8)
     dim[30:34, 20:50] = 100
-    char, conf, margin, source = classify_raster(
+    char, _conf, _margin, source = classify_raster(
         bank, dim, blank=True, blank_gate=True)
     assert (char, source) == (" ", "cv")
     # a zero raster is always a blank, whatever the ink test said
@@ -113,7 +111,7 @@ def test_classify_raster_gating_policy():
     assert classify_raster(
         bank, zeros, blank=False, blank_gate=True)[0] == " "
     # and a bright glyph that the ink test also flagged is classified
-    char, conf, margin, source = classify_raster(
+    char, _conf, _margin, source = classify_raster(
         bank, _canon("M"), blank=False)
     assert (char, source) == ("M", "classifier")
 

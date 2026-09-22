@@ -200,7 +200,7 @@ def _snap_seams(profile: np.ndarray, offsets: np.ndarray,
     position.
     """
     n = len(profile)
-    half = max(2, int(round(SEAM_SEARCH_FRAC * pitch)))
+    half = max(2, round(SEAM_SEARCH_FRAC * pitch))
     lo = np.clip(np.round(offsets).astype(np.int64) - half, 0, n - 1)
     win = np.clip(lo[..., None] + np.arange(2 * half + 1), 0, n - 1)
     return np.clip(lo + profile[win].argmin(axis=-1), 0, n - 1)
@@ -231,7 +231,7 @@ def _lattice_score(profile: np.ndarray, lefts: np.ndarray, pitch: float,
     lefts = np.asarray(lefts, dtype=np.float64)
     if total < 2 or n < 4 or lefts.size == 0:
         return np.zeros(lefts.size, dtype=np.float64)
-    win = max(1, int(round(SEAM_CELL_WIN_FRAC * pitch)))
+    win = max(1, round(SEAM_CELL_WIN_FRAC * pitch))
     centers = np.clip(np.round(
         lefts[:, None] + pitch * (np.arange(total)[None, :] + 0.5)),
         0, n - 1).astype(np.int64)
@@ -384,9 +384,9 @@ class DisplayBox:
         return self.y1 - self.y0 + 1
 
     def as_dict(self) -> dict:
-        return {"x0": int(round(self.x0)), "y0": self.y0,
-                "x1": int(round(self.x1)), "y1": self.y1,
-                "width": int(round(self.width)), "height": self.height,
+        return {"x0": round(self.x0), "y0": self.y0,
+                "x1": round(self.x1), "y1": self.y1,
+                "width": round(self.width), "height": self.height,
                 "confidence": self.confidence}
 
 
@@ -513,14 +513,14 @@ def _snap_boundaries(gray: np.ndarray, bounds: list[float], y0: int,
     snapped = list(bounds)
     for i in range(1, len(bounds) - 1):
         nominal = bounds[i]
-        lo = max(0, int(round(nominal - search)))
-        hi = min(len(smooth), int(round(nominal + search)) + 1)
+        lo = max(0, round(nominal - search))
+        hi = min(len(smooth), round(nominal + search) + 1)
         if hi - lo < 3:
             continue
         window = smooth[lo:hi]
         pos = lo + int(np.argmin(window))
-        strip_lo = max(0, int(round(nominal - pitch)))
-        strip_hi = min(len(smooth), int(round(nominal + pitch)))
+        strip_lo = max(0, round(nominal - pitch))
+        strip_hi = min(len(smooth), round(nominal + pitch))
         if strip_hi <= strip_lo:
             continue
         strip_avg = float(np.mean(smooth[strip_lo:strip_hi]))
@@ -557,8 +557,8 @@ def module_boxes(image: np.ndarray, display: DisplayBox, total: int, *,
     x0, x1 = float(display.x0), float(display.x1)
     top = display.y0 + y_inset * display.height
     bottom = display.y1 + 1 - y_inset * display.height
-    y0 = max(0, int(round(top)))
-    y1 = min(h, int(round(bottom)))
+    y0 = max(0, round(top))
+    y1 = min(h, round(bottom))
     if y1 <= y0:
         y0, y1 = max(0, display.y0), min(h, display.y1 + 1)
     pitch = (x1 - x0) / total
@@ -571,9 +571,9 @@ def module_boxes(image: np.ndarray, display: DisplayBox, total: int, *,
     for i in range(total):
         a, b = bounds[i], bounds[i + 1]
         margin = (b - a) * max(0.0, min(0.2, inset))
-        xa, xb = int(round(a + margin)), int(round(b - margin))
+        xa, xb = round(a + margin), round(b - margin)
         if xb - xa < 2:
-            xa, xb = int(round(a)), int(round(b))
+            xa, xb = round(a), round(b)
         boxes.append((max(0, xa), y0, min(w, xb), y1))
     return boxes
 
@@ -673,8 +673,8 @@ def canonical_glyph(crop, size: int, *, style: str = "none",
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
     side = max(x1 - x0 + 1, y1 - y0 + 1) * (1.0 + 2.0 * max(0.0, pad))
     half = side / 2.0
-    left, top = int(round(cx - half)), int(round(cy - half))
-    right, bottom = left + int(round(side)), top + int(round(side))
+    left, top = round(cx - half), round(cy - half)
+    right, bottom = left + round(side), top + round(side)
     gx0, gy0 = max(0, left), max(0, top)
     gx1, gy1 = min(w, right), min(h, bottom)
     if gx1 - gx0 < 2 or gy1 - gy0 < 2:

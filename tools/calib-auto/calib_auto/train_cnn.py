@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 import cv2
 import numpy as np
 
-from . import classifier, glyphs, paths, segment
+from . import classifier, glyphs, paths
 
 MODEL_FILE = "cnn.pt"
 MODEL_META = "cnn.json"
@@ -154,15 +154,15 @@ class GlyphData:
                                 dtype=np.int64)
 
     def test_mask(self, frac: float) -> np.ndarray:
-        cutoff = int(round(max(0.0, min(0.9, frac)) * 100))
+        cutoff = round(max(0.0, min(0.9, frac)) * 100)
         return np.array([zlib.crc32(k.encode()) % 100 < cutoff
                          for k in self.keys], dtype=bool)
 
 
 # -- model ---------------------------------------------------------------------
 
-def _conv_block(cin: int, cout: int) -> "object":
-    import torch.nn as nn
+def _conv_block(cin: int, cout: int) -> object:
+    from torch import nn
 
     return nn.Sequential(
         nn.Conv2d(cin, cout, 3, padding=1, bias=False),
@@ -175,7 +175,7 @@ def _conv_block(cin: int, cout: int) -> "object":
 
 def build_model(n_classes: int, ch: tuple[int, int, int] = (16, 32, 64),
                 input_size: int = DEFAULT_SIZE):
-    import torch.nn as nn
+    from torch import nn
 
     # three 2x pools: spatial side = input_size // 8
     spatial = max(1, int(input_size) // 8)
@@ -271,7 +271,7 @@ def train(*, sets: list[str] | None = None,
     ``CALIB_AUTO_DEVICE`` env var plays the same role as ``device``.
     """
     import torch
-    import torch.nn as nn
+    from torch import nn
 
     device_obj = resolve_device(device)
     torch.manual_seed(seed)
@@ -454,7 +454,7 @@ def evaluate_model(model, gd: GlyphData, test_idx: np.ndarray, size: int,
     return {
         "split": "photo",
         "size": size,
-        "test_cells": int(len(test_idx)),
+        "test_cells": len(test_idx),
         "test_photos": len(rows),
         "cnn_acc": round(acc, 4),
         "rows": len(rows),

@@ -328,7 +328,7 @@ def _test_mask(keys: list[str], split: str, holdout: str | None,
             raise BankError(f"no cells from set {holdout!r} in the caches")
         return mask
     if split == "photo":
-        cutoff = int(round(max(0.0, min(0.9, photo_frac)) * 100))
+        cutoff = round(max(0.0, min(0.9, photo_frac)) * 100)
         mask = np.array([zlib.crc32(k.encode()) % 100 < cutoff
                          for k in keys], dtype=bool)
         if not mask.any() or mask.all():
@@ -536,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  sets: {', '.join(bank.meta.get('sets', []))}")
             excluded = getattr(bank, "skipped_labels", {})
             if excluded:
-                print(f"  excluded labels (not in charset): "
+                print("  excluded labels (not in charset): "
                       + ", ".join(f"{c!r} x{n}"
                                   for c, n in excluded.items()))
             for char, count in bank.counts.items():

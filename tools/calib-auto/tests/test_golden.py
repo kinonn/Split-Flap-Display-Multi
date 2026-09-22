@@ -6,10 +6,9 @@ import json
 import os
 
 import pytest
+from synthutil import synth_display
 
 from calib_auto import golden
-
-from synthutil import synth_display
 
 
 @pytest.fixture
@@ -161,5 +160,5 @@ def test_valid_set_name_and_photo_file_guards(env):
 def test_import_unrecognized_source_raises(env):
     empty = env / "empty"
     empty.mkdir()
-    with pytest.raises(golden.GoldenError, match="no labels.jsonl"):
+    with pytest.raises(golden.GoldenError, match=r"no labels\.jsonl"):
         golden.create_set(str(empty), name="x")

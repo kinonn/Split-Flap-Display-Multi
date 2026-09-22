@@ -194,11 +194,11 @@ def load_dataset(directory: str, filename: str = GOLDEN_FILE,
                 f"{ISSUE_DUPLICATE} (first at line {seen[rec.photo]})")
         else:
             seen[rec.photo] = lineno
-        if rec.runnable and rec.photo:
-            if photo_path(directory, rec.photo) is None:
-                rec.issues.append(ISSUE_PHOTO)
-                if rec.photo not in ds.missing_photos:
-                    ds.missing_photos.append(rec.photo)
+        if (rec.runnable and rec.photo
+                and photo_path(directory, rec.photo) is None):
+            rec.issues.append(ISSUE_PHOTO)
+            if rec.photo not in ds.missing_photos:
+                ds.missing_photos.append(rec.photo)
         ds.records.append(rec)
     return ds
 

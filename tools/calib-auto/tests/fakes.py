@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from calib_auto.calibrate import (BATCH_MAX_NUDGES, CHAR_OFFSET_LIMIT,
-                                  PREVIEW_DELTA_MAX, REMOTE_BATCH_MAX_NUDGES)
+from calib_auto.calibrate import (
+    BATCH_MAX_NUDGES,
+    CHAR_OFFSET_LIMIT,
+    PREVIEW_DELTA_MAX,
+    REMOTE_BATCH_MAX_NUDGES,
+)
 from calib_auto.display import CalibError
 from calib_auto.reader import ModuleReading, Reading
 
@@ -66,14 +70,14 @@ class FakeDisplay:
         self.spc = max(1, round(steps_per_rot / len(self.drum)))
         # Persisted (NVS) offsets.
         self.mod_off = [0] * self.local
-        self.char_off: list[dict[int, int]] = [dict() for _ in range(self.local)]
+        self.char_off: list[dict[int, int]] = [{} for _ in range(self.local)]
         self.remote_mod = [[0] * 8 for _ in range(5)]
         self.remote_char = [[[0] * 48 for _ in range(8)] for _ in range(5)]
         # RAM-only preview residue layered on top of the persisted offsets.
         # `reload()` (firmware /api/calib/reload) drops it; `persist()` keeps
         # the value and drops the residue for that cell.
         self.res_mod = [0] * self.local
-        self.res_char: list[dict[int, int]] = [dict() for _ in range(self.local)]
+        self.res_char: list[dict[int, int]] = [{} for _ in range(self.local)]
         # Remote volatile preview residue (fleet preview forwarded by the
         # master over ESP-NOW; RAM-only on the remote group).
         self.res_remote_mod = [[0] * 8 for _ in range(5)]
@@ -233,7 +237,7 @@ class FakeDisplay:
         """Firmware /api/calib/reload: drop all RAM-only preview residue."""
         self.reloads += 1
         self.res_mod = [0] * self.local
-        self.res_char = [dict() for _ in range(self.local)]
+        self.res_char = [{} for _ in range(self.local)]
         self.res_remote_mod = [[0] * 8 for _ in range(5)]
         self.res_remote_char = [[[0] * 48 for _ in range(8)]
                                 for _ in range(5)]

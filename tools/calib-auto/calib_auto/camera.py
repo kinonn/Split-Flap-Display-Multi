@@ -361,7 +361,7 @@ class Camera:
                         "light, or raise the camera start-wait slider)")
                 return
 
-    def _open_backend(self) -> "cv2.VideoCapture | None":
+    def _open_backend(self) -> cv2.VideoCapture | None:
         """One open attempt through the backend preference order.
 
         Returns an opened capture or None; constructors are guarded
@@ -388,7 +388,7 @@ class Camera:
             return None
         return cap
 
-    def open(self, quick: bool = False) -> "Camera":
+    def open(self, quick: bool = False) -> Camera:
         """Open the camera and prepare it for capture.
 
         With quick=False (runs, checks) this locks exposure, disables
@@ -542,8 +542,9 @@ class Camera:
             self.cap.release()
             self.cap = None
 
-    def __enter__(self) -> "Camera":
-        return self.open()
+    def __enter__(self) -> Camera:
+        self.open()
+        return self
 
     def __exit__(self, *args):
         self.close()

@@ -43,8 +43,7 @@ from collections import Counter
 import cv2
 
 from .display import CalibError
-from .reader import (ModuleReading, ReaderError, Reading, annotate_modules,
-                     jpeg_bytes)
+from .reader import ModuleReading, ReaderError, Reading, annotate_modules, jpeg_bytes
 
 SUPPORTED_CONTRACT = 1
 # Wear/time budgets.
@@ -171,8 +170,8 @@ def _p1_module_delta(share: float, signed_n: int, pitch: float) -> int:
     if not signed_n or share < P1_MIN_SHARE:
         return 0
     if share >= P1_FULL_SHARE:
-        return int(round(pitch * signed_n))
-    return int(round(pitch * signed_n * share / P1_FULL_SHARE))
+        return round(pitch * signed_n)
+    return round(pitch * signed_n * share / P1_FULL_SHARE)
 
 
 def _preview_chunks(delta: int, limit: int = PREVIEW_DELTA_MAX) -> list[int]:
@@ -201,8 +200,7 @@ def _parse_csv_matrix(raw, rows: int, cols: int) -> list[list[int]]:
                 except (TypeError, ValueError):
                     pass
         return out
-    r = 0
-    for part in str(raw or "").split(";"):
+    for r, part in enumerate(str(raw or "").split(";")):
         if r >= rows:
             break
         values = [v.strip() for v in part.split(",") if v.strip() != ""]
@@ -211,7 +209,6 @@ def _parse_csv_matrix(raw, rows: int, cols: int) -> list[list[int]]:
                 out[r][c] = int(value)
             except ValueError:
                 pass
-        r += 1
     return out
 
 

@@ -13,12 +13,11 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from synthutil import synth_display
 
-from calib_auto import classifier, cnn_reader, golden, glyphs, server, train_cnn
+from calib_auto import classifier, cnn_reader, glyphs, golden, server, train_cnn
 from calib_auto.reader import ModuleReading, Reading
 from calib_auto.segment import DisplayBox
-
-from synthutil import synth_display
 
 
 @pytest.fixture

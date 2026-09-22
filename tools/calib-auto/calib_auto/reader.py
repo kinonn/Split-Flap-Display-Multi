@@ -22,8 +22,12 @@ from dataclasses import dataclass, field
 
 import cv2
 
-from .prompts import (REPORT_READING_TOOL, correction_text,
-                      reader_system_text, reader_user_text)
+from .prompts import (
+    REPORT_READING_TOOL,
+    correction_text,
+    reader_system_text,
+    reader_user_text,
+)
 from .vlm import VLMError, image_part, text_part
 
 CONDITIONS = ("clean", "blank", "unreadable")
@@ -114,14 +118,14 @@ def annotate_modules(img, total: int):
     canvas = cv2.copyMakeBorder(img, top, 0, 0, 0, cv2.BORDER_CONSTANT,
                                 value=(28, 28, 28))
     for i in range(1, total):
-        x = int(round(w * i / total))
+        x = round(w * i / total)
         cv2.line(canvas, (x, top), (x, top + h), (0, 150, 90), 1)
     scale = 0.42 if total <= 24 else 0.3
     for i in range(total):
-        x0, x1 = int(round(w * i / total)), int(round(w * (i + 1) / total))
+        x0, x1 = round(w * i / total), round(w * (i + 1) / total)
         cx = (x0 + x1) // 2
         label = str(i)
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+        (tw, _th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
         cv2.putText(canvas, label, (max(0, cx - tw // 2), top - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, scale, (220, 220, 220), 1,
                     cv2.LINE_AA)
@@ -314,7 +318,7 @@ class VlmReader:
         """
         m = len(entries)
         best = (0, 0, 0)  # (on_nonblank, matches, -offset)
-        for offset in range(0, max(0, total - m) + 1):
+        for offset in range(max(0, total - m) + 1):
             on_nonblank = 0
             matches = 0
             for j, (ch, _cond, _conf) in enumerate(entries):
@@ -325,8 +329,7 @@ class VlmReader:
                 if ch == exp:
                     matches += 1
             score = (on_nonblank, matches, -offset)
-            if score > best:
-                best = score
+            best = max(best, score)
         return -best[2]
 
     def _reconcile(self, entries: list[tuple[str, str, float]], total: int,
