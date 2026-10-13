@@ -375,17 +375,17 @@ void SplitFlapWired::distributeFrame(const String &frame) {
     display.writeString(localText, MAX_RPM, false, DEFAULT_SCROLL_DELAY_MS, DEFAULT_SCROLL_REPEAT_COUNT, false);
 }
 
-bool SplitFlapWired::sendFrame(uint8_t addr, uint8_t type, const void *payload, size_t payloadLen) {
-    uint8_t frame[11 + 2 * LINK_MAX_PAYLOAD];
-    size_t n = linkEncode(addr, type, (const uint8_t *) payload, payloadLen, frame, sizeof(frame));
+bool SplitFlapWired::sendFrame(uint8_t dst, uint8_t type, const void *payload, size_t payloadLen) {
+    uint8_t frame[13 + 2 * LINK_MAX_PAYLOAD];
+    size_t n = linkEncode(dst, (uint8_t) myAddress, type, (const uint8_t *) payload, payloadLen, frame, sizeof(frame));
     if (n == 0) {
         Serial.println("[wired] frame encode failed");
         return false;
     }
-    if (type == LINK_TYPE_TEXT && addr > 0 && addr < LINK_MAX_GROUPS) {
-        peers[addr].ackPending = true;
-        peers[addr].ackLogged = false;
-        peers[addr].ackSentMs = millis();
+    if (type == LINK_TYPE_TEXT && dst > 0 && dst < LINK_MAX_GROUPS) {
+        peers[dst].ackPending = true;
+        peers[dst].ackLogged = false;
+        peers[dst].ackSentMs = millis();
     }
     return Serial1.write(frame, n) == n;
 }
@@ -407,34 +407,31 @@ bool SplitFlapWired::sendToPeer(int groupIndex, const String &text, int moduleCo
 }
 
 void SplitFlapWired::handleFrame() {
-    uint8_t fromAddr = decoder.addr();
+    uint8_t dst = decoder.dst();
+    uint8_t src = decoder.src();
     uint8_t type = decoder.type();
     const uint8_t *payload = decoder.payload();
     size_t len = decoder.payloadLen();
 
-    // Local echo (possible on half-duplex RS-485 with auto-direction) and
-    // anything not addressed to this unit is ignored. Remotes only accept
-    // unicasts to their own address; the master only accepts traffic from
-    // remote addresses.
+    // Direction filter on the explicit header addresses. The master only
+    // accepts traffic addressed to it (DST=0) from remote addresses; a
+    // remote only accepts traffic addressed to its own address. Anything
+    // else is RS-485 local echo or another pair's multidrop traffic.
     if (myAddress == 0) {
-        if (fromAddr == 0 || fromAddr >= LINK_MAX_GROUPS) {
+        if (dst != LINK_ADDR_MASTER || src == 0 || src >= LINK_MAX_GROUPS) {
             return;
         }
     } else {
-        if (fromAddr != (uint8_t) myAddress) {
-            // Master polls (addr 0) are the exception: a remote answers
-            // them but never acts on them as content.
-            if (! (fromAddr == LINK_ADDR_MASTER && type == LINK_TYPE_ANNOUNCE)) {
-                return;
-            }
+        if (dst != (uint8_t) myAddress) {
+            return;
         }
     }
 
     switch (type) {
         case LINK_TYPE_ANNOUNCE:
             if (myAddress == 0) {
-                processAnnouncement(fromAddr, payload, len);
-            } else if (fromAddr == LINK_ADDR_MASTER) {
+                processAnnouncement(src, payload, len);
+            } else if (src == LINK_ADDR_MASTER) {
                 SplitFlapAnnounceMessage reply = {};
                 reply.version = ESP_NOW_ANNOUNCE_VERSION;
                 reply.moduleCount = (uint8_t) constrain(display.getNumModules(), 1, MAX_MODULES);
@@ -473,20 +470,20 @@ void SplitFlapWired::handleFrame() {
             break;
         case LINK_TYPE_OFFSETS_REPORT:
             if (myAddress == 0) {
-                processOffsetsReport(fromAddr, payload, len);
+                processOffsetsReport(src, payload, len);
             }
             break;
         case LINK_TYPE_CHAR_OFFSETS_REPORT:
             if (myAddress == 0) {
-                processCharOffsetsReport(fromAddr, payload, len);
+                processCharOffsetsReport(src, payload, len);
             }
             break;
         case LINK_TYPE_ACK:
-            if (myAddress == 0 && fromAddr > 0 && fromAddr < LINK_MAX_GROUPS) {
-                peers[fromAddr].ackPending = false;
+            if (myAddress == 0) {
+                peers[src].ackPending = false;
             }
             break;
-        default: Serial.printf("[wired] unknown frame type %d from addr %d\n", type, fromAddr); break;
+        default: Serial.printf("[wired] unknown frame type %d dst %d src %d\n", type, dst, src); break;
     }
 }
 

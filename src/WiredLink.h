@@ -83,7 +83,7 @@ class SplitFlapWired {
     String buildFrame(const String &message, int width, bool centering);
     void distributeFrame(const String &frame);
     void splitIntoChunks(const String &input, int width, String chunks[], int maxChunks, int &outCount);
-    bool sendFrame(uint8_t addr, uint8_t type, const void *payload, size_t payloadLen);
+    bool sendFrame(uint8_t dst, uint8_t type, const void *payload, size_t payloadLen);
     bool sendToPeer(int groupIndex, const String &text, int moduleCount);
     void handleFrame();
     void processAnnouncement(uint8_t fromAddr, const uint8_t *payload, size_t len);

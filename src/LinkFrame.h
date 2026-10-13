@@ -3,12 +3,17 @@
 // HDLC-lite framing shared by both wired inter-display transports (RS-485
 // and direct UART). Wire format, one frame:
 //
-//   [0x7E ADDR TYPE LEN PAYLOAD CRC16-CCITT]
+//   [0x7E DST SRC TYPE LEN PAYLOAD CRC16-CCITT]
 //
-// ADDR/TYPE/LEN/CRC bytes equal to 0x7E or 0x7D are escaped as
-// 0x7D + (byte ^ 0x20). CRC covers ADDR+TYPE+LEN+PAYLOAD (poly 0x1021,
-// init 0xFFFF). Unicast only: ADDR 0 = master, 1..5 = remote group index
-// (= groupIndex); 0xFF is reserved and never sent.
+// DST/SRC/TYPE/LEN/CRC bytes equal to 0x7E or 0x7D are escaped as
+// 0x7D + (byte ^ 0x20). CRC covers DST+SRC+TYPE+LEN+PAYLOAD (poly 0x1021,
+// init 0xFFFF). Every frame carries destination AND source: the master
+// sends DST=group slot with SRC=0, remotes reply DST=0 with SRC=their slot.
+// Unicast only: address 0 = master, 1..5 = remote group index (=
+// groupIndex); 0xFF is reserved and never sent. The explicit SRC exists
+// because RS-485 local echo and multidrop overhearing make source inference
+// from a destination-only header impossible (a reply addressed to 0 is
+// otherwise indistinguishable from any other frame).
 //
 // TYPE identifies which SplitFlapEspNow payload struct the PAYLOAD bytes
 // carry — the structs are reused verbatim, so there is no v2 wire format
@@ -48,32 +53,34 @@ inline uint16_t linkCrc16(const uint8_t *data, size_t len) {
 }
 
 // Encodes one frame into out. Worst case is every byte escaped:
-// outSize must be >= 11 + 2 * payloadLen. Returns the encoded length,
+// outSize must be >= 13 + 2 * payloadLen. Returns the encoded length,
 // or 0 when the payload is oversized or out is too small.
-inline size_t
-linkEncode(uint8_t addr, uint8_t type, const uint8_t *payload, size_t payloadLen, uint8_t *out, size_t outSize) {
+inline size_t linkEncode(
+    uint8_t dst, uint8_t src, uint8_t type, const uint8_t *payload, size_t payloadLen, uint8_t *out, size_t outSize
+) {
     if (payloadLen > LINK_MAX_PAYLOAD) {
         return 0;
     }
-    if (outSize < 11 + 2 * payloadLen) {
+    if (outSize < 13 + 2 * payloadLen) {
         return 0;
     }
     if (payloadLen > 0 && payload == nullptr) {
         return 0;
     }
 
-    uint8_t raw[3 + LINK_MAX_PAYLOAD + 2];
-    raw[0] = addr;
-    raw[1] = type;
-    raw[2] = (uint8_t) payloadLen;
+    uint8_t raw[4 + LINK_MAX_PAYLOAD + 2];
+    raw[0] = dst;
+    raw[1] = src;
+    raw[2] = type;
+    raw[3] = (uint8_t) payloadLen;
     for (size_t i = 0; i < payloadLen; i++) {
-        raw[3 + i] = payload[i];
+        raw[4 + i] = payload[i];
     }
-    uint16_t crc = linkCrc16(raw, 3 + payloadLen);
-    raw[3 + payloadLen] = (uint8_t) (crc >> 8);
-    raw[3 + payloadLen + 1] = (uint8_t) (crc & 0xFF);
+    uint16_t crc = linkCrc16(raw, 4 + payloadLen);
+    raw[4 + payloadLen] = (uint8_t) (crc >> 8);
+    raw[4 + payloadLen + 1] = (uint8_t) (crc & 0xFF);
 
-    size_t rawLen = 3 + payloadLen + 2;
+    size_t rawLen = 4 + payloadLen + 2;
     size_t pos = 0;
     out[pos++] = LINK_SYNC;
     for (size_t i = 0; i < rawLen; i++) {
@@ -132,13 +139,13 @@ class LinkDecoder {
             return false;
         }
         buf[pos++] = b;
-        if (pos == 3) {
-            if (buf[2] > LINK_MAX_PAYLOAD) {
+        if (pos == 4) {
+            if (buf[3] > LINK_MAX_PAYLOAD) {
                 reset();
                 return false;
             }
         }
-        if (pos >= 3 && pos == (size_t) (3 + buf[2] + 2)) {
+        if (pos >= 4 && pos == (size_t) (4 + buf[3] + 2)) {
             uint16_t got = (uint16_t) ((buf[pos - 2] << 8) | buf[pos - 1]);
             if (linkCrc16(buf, pos - 2) == got) {
                 frameReady = true;
@@ -152,10 +159,11 @@ class LinkDecoder {
     }
 
     bool ready() const { return frameReady; }
-    uint8_t addr() const { return buf[0]; }
-    uint8_t type() const { return buf[1]; }
-    const uint8_t *payload() const { return buf + 3; }
-    size_t payloadLen() const { return buf[2]; }
+    uint8_t dst() const { return buf[0]; }
+    uint8_t src() const { return buf[1]; }
+    uint8_t type() const { return buf[2]; }
+    const uint8_t *payload() const { return buf + 4; }
+    size_t payloadLen() const { return buf[3]; }
 
   private:
     enum State {
@@ -165,7 +173,7 @@ class LinkDecoder {
     State state;
     bool escaped;
     bool frameReady;
-    // ADDR + TYPE + LEN + max payload + CRC16.
-    uint8_t buf[3 + LINK_MAX_PAYLOAD + 2];
+    // DST + SRC + TYPE + LEN + max payload + CRC16.
+    uint8_t buf[4 + LINK_MAX_PAYLOAD + 2];
     size_t pos;
 };
