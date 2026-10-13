@@ -108,7 +108,7 @@ Limits:
 - Up to 6 groups total
 - Up to 48 modules total when all 6 groups have 8 modules
 - Group 1 is always the local group connected to the master controller
-- Groups 2-6 are remote groups controlled over ESP-NOW
+- Groups 2-6 are remote groups controlled over the configured link transport (ESP-NOW by default)
 
 All controllers run the same firmware. The master is simply the controller where `Number of Groups` is set above `1`.
 
@@ -124,7 +124,7 @@ For example, with these group sizes:
 | 2     | 6       | Characters 9-14   |
 | 3     | 8       | Characters 15-22  |
 
-Group 1 displays its segment locally on the master controller. The master sends each remaining segment to the configured remote group MAC address over ESP-NOW. Short segments are padded with spaces. Characters beyond the total configured module count are not sent.
+Group 1 displays its segment locally on the master controller. The master sends each remaining segment to the configured remote group address (MAC address for ESP-NOW, bus address for wired transports). Short segments are padded with spaces. Characters beyond the total configured module count are not sent.
 
 ### Setup
 
@@ -155,6 +155,35 @@ Remote groups automatically switch into ESP-NOW remote display mode when they re
 - The master filters out its own MAC address to avoid self-discovery.
 - Discovery works over ESP-NOW regardless of Wi-Fi connectivity — it only requires that controllers share the same radio channel.
 - If a remote controller is not discovered (e.g. different Wi-Fi channel), its MAC address can still be entered manually. The module count must then be set manually as well.
+
+### Link Transports (ESP-NOW / RS-485 / Direct UART)
+
+`Link Transport` in `Multi-Display Master` selects how the master coordinates remote groups. `0 = ESP-NOW` (default, behavior unchanged), `1 = RS-485`, `2 = Direct UART`. The setting is explicit on every unit — master and remotes must use the same transport. Wi-Fi stays up on all units in every mode: each web UI remains directly reachable, and a misconfigured unit is fixed from its own page, not via USB.
+
+- ESP-NOW: up to 6 groups, wireless, MAC-addressed as described above.
+- RS-485: up to 6 groups over a half-duplex multi-drop bus (auto-direction transceiver, e.g. MAX13487 class — no direction GPIO needed). Daisy-chain A/B/GND across all controllers, 120 Ω termination at both physical ends. Addressing is positional: group slot N is bus address N.
+- Direct UART: exactly 2 groups (master + one remote) over a 3-wire crossover. This is the simplest option for a 2-display installation.
+
+Wired addressing replaces MAC assignment: a remote's `Wired Address` is its group slot (`0 = master`, `1-5 = remote`). The master's group list still defines module counts and order; the per-group address shown in the UI (`wired:N`) is positional and needs no manual assignment. Discovered wired peers appear in `Discovered Devices` by address.
+
+`Wired Address`, `TX Pin` (default 4), `RX Pin` (default 5), and `Baud Rate` (default 115200) apply at boot — reboot after changing them. Group counts apply immediately. On the ESP32-C3, avoid strapping pins (GPIO 2/8/9 — 8/9 are already the module I2C bus), USB-JTAG pins (GPIO 18/19, needed for flashing and the serial monitor), and flash pins (GPIO 12-17).
+
+Provisioning shortcut: the firmware default can be seeded at flash time without `platformio.ini` variants, so remotes come up in the right mode with no setup dance (a stored setting always wins over the flag afterwards):
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-D LINK_TRANSPORT_DEFAULT=2 -D LINK_ADDRESS_DEFAULT=1" pio run -e esp32_c3 -t upload
+```
+
+RS-485 addressing is general (up to 6 groups) but only 2-node operation has been hardware-verified so far.
+
+### Wired setup (2 units, Direct UART)
+
+1. With power off, wire master TX → remote RX, master RX ← remote TX, GND ↔ GND. Keep the run under 1 m, away from motor leads, wires twisted together.
+2. Flash both boards (see provisioning shortcut above for the remote).
+3. Configure Wi-Fi on each unit first — via its own web UI or access-point fallback — and give each a unique mDNS name (both default to `splitflap`, which collides).
+4. On the master: `Link Transport = Direct UART`, `Number of Groups = 2`, group module counts set. On the remote: `Link Transport = Direct UART`, `Wired Address = 1`, `Number of Modules` = its physical modules. Save, then reboot both.
+5. Send text from the master page: the master shows the left slice, the remote the right slice.
+6. Rollback: set both back to ESP-NOW — behavior is identical to before.
 
 ## MQTT
 
