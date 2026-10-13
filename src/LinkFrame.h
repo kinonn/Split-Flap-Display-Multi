@@ -119,11 +119,13 @@ class LinkDecoder {
             }
             return false;
         }
-        // IN_FRAME
-        if (! escaped && byte == LINK_SYNC) {
-            // Raw flag mid-frame: previous frame (if any) was cut; the new
-            // frame starts here.
+        // IN_FRAME: a raw flag is always a frame boundary. The encoder escapes
+        // every 0x7E data byte, so 7D 7E never occurs in valid output — a raw
+        // flag after a corrupt lone ESC restarts framing and clears the
+        // escape latch instead of storing a phantom 0x5E data byte.
+        if (byte == LINK_SYNC) {
             pos = 0;
+            escaped = false;
             return false;
         }
         if (! escaped && byte == LINK_ESC) {

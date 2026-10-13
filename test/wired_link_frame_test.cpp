@@ -225,6 +225,27 @@ static void test_src_dst_round_trip() {
     CHECK(toMaster.type() == LINK_TYPE_ACK);
 }
 
+// A corrupt lone ESC followed by a raw flag must resync cleanly: the flag
+// restarts framing (7D 7E never occurs in valid output), so a frame body
+// arriving right after still decodes. Without the escape-latch reset the
+// decoder stores a phantom 0x5E byte, the body misaligns, and the CRC fails.
+static void test_esc_sync_resync() {
+    uint8_t out[32];
+    size_t n = linkEncode(2, 0, LINK_TYPE_TEXT, (const uint8_t *) "AB", 2, out, sizeof(out));
+
+    LinkDecoder dec;
+    CHECK(! dec.feed(LINK_SYNC));
+    CHECK(! dec.feed(LINK_ESC));  // corrupt lone ESC
+    CHECK(! dec.feed(LINK_SYNC));  // raw flag: abort, restart, clear latch
+    bool got = false;
+    for (size_t i = 1; i < n; i++) {  // frame body after a SYNC
+        got = dec.feed(out[i]);
+    }
+    CHECK(got);
+    CHECK(dec.dst() == 2);
+    CHECK(dec.src() == 0);
+}
+
 int main() {
     test_empty_payload_round_trip();
     test_text_payload_round_trip();
@@ -234,6 +255,7 @@ int main() {
     test_oversize_rejected();
     test_resync();
     test_src_dst_round_trip();
+    test_esc_sync_resync();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
