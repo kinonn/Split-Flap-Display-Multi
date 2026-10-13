@@ -19,8 +19,7 @@
 // this plan freezes.
 inline const char *validateWiredSettings(int transport, int groupCount) {
     switch (transport) {
-        case LINK_TRANSPORT_ESP_NOW:
-            return nullptr;
+        case LINK_TRANSPORT_ESP_NOW: return nullptr;
         case LINK_TRANSPORT_RS485:
             if (groupCount < 1 || groupCount > LINK_MAX_GROUPS) {
                 return "RS-485 supports 1..6 groups";
@@ -31,7 +30,6 @@ inline const char *validateWiredSettings(int transport, int groupCount) {
                 return "Direct UART supports at most 2 groups";
             }
             return nullptr;
-        default:
-            return "Unknown linkTransport";
+        default: return "Unknown linkTransport";
     }
 }

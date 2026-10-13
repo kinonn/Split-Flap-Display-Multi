@@ -73,9 +73,7 @@ void SplitFlapMqtt::processPendingMessage() {
                 message, false, settings.getInt("scrollDelayMs"), settings.getInt("scrollRepeatCount")
             );
         } else {
-            Serial.printf(
-                "[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount
-            );
+            Serial.printf("[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount);
             espNow->distributeMessage(
                 message, false, settings.getInt("scrollDelayMs"), settings.getInt("scrollRepeatCount")
             );
@@ -193,7 +191,8 @@ void SplitFlapMqtt::publishStatus() {
     // count in single-group mode, so one call is correct in both modes.
     bool useWired = settings.getInt("linkTransport") != 0 && wired != nullptr;
     int moduleCount = useWired ? wired->getTotalModuleCount()
-                               : (espNow != nullptr) ? espNow->getTotalModuleCount() : display->getNumModules();
+        : (espNow != nullptr)  ? espNow->getTotalModuleCount()
+                               : display->getNumModules();
     std::string payload = buildStatusPayload(lastPublishedState.c_str(), moduleCount);
     mqttClient.publish(topic_status.c_str(), payload.c_str(), true);
 }

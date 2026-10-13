@@ -50,9 +50,8 @@ inline uint16_t linkCrc16(const uint8_t *data, size_t len) {
 // Encodes one frame into out. Worst case is every byte escaped:
 // outSize must be >= 11 + 2 * payloadLen. Returns the encoded length,
 // or 0 when the payload is oversized or out is too small.
-inline size_t linkEncode(
-    uint8_t addr, uint8_t type, const uint8_t *payload, size_t payloadLen, uint8_t *out, size_t outSize
-) {
+inline size_t
+linkEncode(uint8_t addr, uint8_t type, const uint8_t *payload, size_t payloadLen, uint8_t *out, size_t outSize) {
     if (payloadLen > LINK_MAX_PAYLOAD) {
         return 0;
     }
@@ -159,7 +158,10 @@ class LinkDecoder {
     size_t payloadLen() const { return buf[2]; }
 
   private:
-    enum State { WAIT_SYNC, IN_FRAME };
+    enum State {
+        WAIT_SYNC,
+        IN_FRAME
+    };
     State state;
     bool escaped;
     bool frameReady;

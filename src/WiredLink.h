@@ -60,7 +60,8 @@ class SplitFlapWired {
     String lastRemoteText;
 
     // Master-side discovery: last poll per remote address + ack tracking.
-    struct PeerState {
+    struct PeerState
+    {
         uint8_t moduleCount;
         unsigned long lastSeenMs;
         bool seen;

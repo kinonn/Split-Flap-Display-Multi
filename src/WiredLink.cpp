@@ -16,8 +16,8 @@
 
 SplitFlapWired::SplitFlapWired(JsonSettings &settings, SplitFlapDisplay &display)
     : settings(settings), display(display), initialized(false), transport(LINK_TRANSPORT_ESP_NOW), myAddress(0),
-      txPin(4), rxPin(5), baud(115200), lastRemoteText(""), lastPollMs(0), lastExpiryCheckMs(0),
-      offsetDataDirty(false), lastOffsetRxMs(0) {
+      txPin(4), rxPin(5), baud(115200), lastRemoteText(""), lastPollMs(0), lastExpiryCheckMs(0), offsetDataDirty(false),
+      lastOffsetRxMs(0) {
     memset(peers, 0, sizeof(peers));
 }
 
@@ -229,9 +229,7 @@ String SplitFlapWired::buildFrame(const String &message, int width, bool centeri
     return frame;
 }
 
-void SplitFlapWired::splitIntoChunks(
-    const String &input, int width, String chunks[], int maxChunks, int &outCount
-) {
+void SplitFlapWired::splitIntoChunks(const String &input, int width, String chunks[], int maxChunks, int &outCount) {
     // Same word-boundary chunking semantics as the ESP-NOW distributor (kept
     // as a local copy: the ESP-NOW class is frozen and may not exist in
     // wired builds of the call graph).
@@ -379,9 +377,7 @@ void SplitFlapWired::distributeFrame(const String &frame) {
 
 bool SplitFlapWired::sendFrame(uint8_t addr, uint8_t type, const void *payload, size_t payloadLen) {
     uint8_t frame[11 + 2 * LINK_MAX_PAYLOAD];
-    size_t n = linkEncode(
-        addr, type, (const uint8_t *) payload, payloadLen, frame, sizeof(frame)
-    );
+    size_t n = linkEncode(addr, type, (const uint8_t *) payload, payloadLen, frame, sizeof(frame));
     if (n == 0) {
         Serial.println("[wired] frame encode failed");
         return false;
@@ -490,9 +486,7 @@ void SplitFlapWired::handleFrame() {
                 peers[fromAddr].ackPending = false;
             }
             break;
-        default:
-            Serial.printf("[wired] unknown frame type %d from addr %d\n", type, fromAddr);
-            break;
+        default: Serial.printf("[wired] unknown frame type %d from addr %d\n", type, fromAddr); break;
     }
 }
 

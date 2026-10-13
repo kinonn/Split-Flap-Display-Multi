@@ -8,9 +8,9 @@
 #include "JsonSettings.h"
 #include "SplitFlapDisplay.h"
 #include "SplitFlapEspNow.h"
-#include "WiredLink.h"
 #include "SplitFlapMqtt.h"
 #include "SplitFlapWebServer.h"
+#include "WiredLink.h"
 
 #include <Arduino.h>
 #include <WiFiClient.h>
@@ -20,10 +20,10 @@
 // LINK_TRANSPORT_DEFAULT=2"). These seed the NVS default only: once a value
 // is stored, the stored value wins and the flag has no further effect.
 #ifndef LINK_TRANSPORT_DEFAULT
-#define LINK_TRANSPORT_DEFAULT 0  // 0 = ESP-NOW, 1 = RS-485, 2 = Direct UART
+#define LINK_TRANSPORT_DEFAULT 0 // 0 = ESP-NOW, 1 = RS-485, 2 = Direct UART
 #endif
 #ifndef LINK_ADDRESS_DEFAULT
-#define LINK_ADDRESS_DEFAULT 0  // 0 = master, 1..5 = remote group index
+#define LINK_ADDRESS_DEFAULT 0   // 0 = master, 1..5 = remote group index
 #endif
 
 // clang-format off
