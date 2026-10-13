@@ -16,6 +16,7 @@
 #include "JsonSettings.h"
 #include "PubSubClient.h"
 #include "SplitFlapMqtt.h"
+#include "WiredLink.h"
 
 // Stub globals (same pattern as jsonsettings_test.cpp)
 std::vector<std::string> g_serialLines;
@@ -29,6 +30,8 @@ extern int g_publishCalls;
 extern PubSubClient *g_lastClient;
 extern int g_distributeCalls;
 extern std::string g_lastDistributed;
+extern int g_wiredDistributeCalls;
+extern std::string g_lastWiredDistributed;
 extern int g_writeStringCalls;
 extern std::string g_lastWritten;
 extern float g_lastWriteSpeed;
@@ -56,6 +59,7 @@ static std::map<String, JsonSetting> testSchema() {
         {"scrollDelayMs", JsonSetting(1500)},
         {"scrollRepeatCount", JsonSetting(2)},
         {"masterGroupCount", JsonSetting(1)},
+        {"linkTransport", JsonSetting(0)},
         {"maxVel", JsonSetting(15.0f)},
         {"moduleCount", JsonSetting(8)},
     };
@@ -134,6 +138,24 @@ int main() {
         CHECK(g_lastDistributed == "fleet message");
         CHECK(g_writeStringCalls == 0); // multi-group: no local writeString
         CHECK(g_publishCalls >= 1);     // state topic still published
+
+        // Wired branch: linkTransport != 0 routes the fleet message via the
+        // wired object — never via ESP-NOW, never via a local writeString.
+        g_distributeCalls = 0;
+        g_wiredDistributeCalls = 0;
+        g_lastWiredDistributed = "";
+        g_writeStringCalls = 0;
+        settings.putInt("linkTransport", 2);
+        settings.putInt("masterGroupCount", 2);
+        SplitFlapWired wired(settings, display);
+        mqtt.setWired(&wired);
+        byte payload3[] = "wired fleet";
+        g_lastClient->deliver(topic, payload3, 11);
+        mqtt.loop();
+        CHECK(g_wiredDistributeCalls == 1);
+        CHECK(g_lastWiredDistributed == "wired fleet");
+        CHECK(g_distributeCalls == 0);
+        CHECK(g_writeStringCalls == 0);
     }
 
     // RED for issue #21 (audit): connect() must register a retained

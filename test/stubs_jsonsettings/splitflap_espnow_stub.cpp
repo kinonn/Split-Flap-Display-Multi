@@ -1,9 +1,11 @@
 // Link-time stubs for symbols SplitFlapMqtt.cpp references but never executes
-// on the host (espNow is nullptr in these tests; the display is not driven).
-// SplitFlapEspNow.cpp / SplitFlapDisplay.cpp need the ESP-IDF WiFi stack and
-// real I2C, and are not host-compilable.
+// on the host (espNow/wired are nullptr in these tests; the display is not
+// driven).
+// SplitFlapEspNow.cpp / SplitFlapDisplay.cpp / WiredLink.cpp need the ESP-IDF
+// WiFi stack, real UART/I2C, and are not host-compilable.
 #include "SplitFlapDisplay.h"
 #include "SplitFlapEspNow.h"
+#include "WiredLink.h"
 
 #include <cstring>
 #include <string>
@@ -11,6 +13,8 @@
 // Test counters: which dispatch branch ran, with what message.
 int g_distributeCalls = 0;
 std::string g_lastDistributed;
+int g_wiredDistributeCalls = 0;
+std::string g_lastWiredDistributed;
 int g_writeStringCalls = 0;
 std::string g_lastWritten;
 float g_lastWriteSpeed = 0.0f;
@@ -27,6 +31,19 @@ void SplitFlapEspNow::distributeMessage(
 }
 
 int SplitFlapEspNow::getTotalModuleCount() { return 0; }
+
+void SplitFlapWired::distributeMessage(
+    const String &message, bool centering, unsigned long scrollDelayMs,
+    int scrollRepeatCount
+) {
+    (void) centering;
+    (void) scrollDelayMs;
+    (void) scrollRepeatCount;
+    g_wiredDistributeCalls++;
+    g_lastWiredDistributed = message.c_str();
+}
+
+int SplitFlapWired::getTotalModuleCount() { return 0; }
 
 void SplitFlapDisplay::writeString(
     String inputString, float speed, bool centering, unsigned long scrollDelayMs,
@@ -61,5 +78,15 @@ SplitFlapEspNow::SplitFlapEspNow(JsonSettings &settings, SplitFlapDisplay &displ
       offsetDataDirty(false), lastOffsetRxMs(0) {
     memset(discoveredPeers, 0, sizeof(discoveredPeers));
     memset(masterMac, 0, sizeof(masterMac));
+}
+
+// Ctor stub for SplitFlapWired (real ctor needs UART + live settings; test
+// paths only construct it and pass it to SplitFlapMqtt).
+SplitFlapWired::SplitFlapWired(JsonSettings &settings, SplitFlapDisplay &display)
+    : settings(settings), display(display), initialized(false),
+      transport(LINK_TRANSPORT_ESP_NOW), myAddress(0), txPin(4), rxPin(5),
+      baud(115200), lastRemoteText(""), lastPollMs(0), lastExpiryCheckMs(0),
+      offsetDataDirty(false), lastOffsetRxMs(0) {
+    memset(peers, 0, sizeof(peers));
 }
 
