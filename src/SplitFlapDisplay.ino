@@ -8,6 +8,7 @@
 #include "JsonSettings.h"
 #include "SplitFlapDisplay.h"
 #include "SplitFlapEspNow.h"
+#include "WiredLink.h"
 #include "SplitFlapMqtt.h"
 #include "SplitFlapWebServer.h"
 
@@ -85,6 +86,7 @@ JsonSettings settings = JsonSettings("config", {
 WiFiClient wifiClient;
 SplitFlapDisplay display(settings);
 SplitFlapEspNow *splitflapEspNow = nullptr;
+SplitFlapWired *splitflapWired = nullptr;
 SplitFlapWebServer webServer(settings, display);
 SplitFlapMqtt splitflapMqtt(settings, wifiClient);
 
@@ -92,11 +94,22 @@ bool isMultiDisplayMasterEnabled() {
     return settings.getInt("masterGroupCount") > 1;
 }
 
+bool useWiredLink() {
+    return settings.getInt("linkTransport") != 0;
+}
+
 SplitFlapEspNow *getSplitFlapEspNow() {
     if (! splitflapEspNow) {
         splitflapEspNow = new SplitFlapEspNow(settings, display);
     }
     return splitflapEspNow;
+}
+
+SplitFlapWired *getSplitFlapWired() {
+    if (! splitflapWired) {
+        splitflapWired = new SplitFlapWired(settings, display);
+    }
+    return splitflapWired;
 }
 
 void setup() {
@@ -130,6 +143,7 @@ void setup() {
     Serial.flush();
     webServer.init();
     webServer.setEspNow(getSplitFlapEspNow());
+    webServer.setWired(getSplitFlapWired());
     Serial.println("[boot] web server init complete");
     Serial.flush();
 
@@ -143,7 +157,13 @@ void setup() {
         Serial.println("[boot] services started in access point mode");
         Serial.flush();
 
-        if (getSplitFlapEspNow()->init()) {
+        if (useWiredLink()) {
+            if (getSplitFlapWired()->init()) {
+                Serial.println("[boot] wired link initialized successfully");
+            } else {
+                Serial.println("[boot] wired link initialization failed");
+            }
+        } else if (getSplitFlapEspNow()->init()) {
             Serial.println("[boot] esp-now initialized successfully");
         } else {
             Serial.println("[boot] esp-now initialization failed");
@@ -169,7 +189,13 @@ void setup() {
         Serial.println("[boot] network services started");
         Serial.flush();
 
-        if (getSplitFlapEspNow()->init()) {
+        if (useWiredLink()) {
+            if (getSplitFlapWired()->init()) {
+                Serial.println("[boot] wired link initialized successfully");
+            } else {
+                Serial.println("[boot] wired link initialization failed");
+            }
+        } else if (getSplitFlapEspNow()->init()) {
             Serial.println("[boot] esp-now initialized successfully");
         } else {
             Serial.println("[boot] esp-now initialization failed");
@@ -177,6 +203,7 @@ void setup() {
         Serial.flush();
         splitflapMqtt.setDisplay(&display);
         splitflapMqtt.setEspNow(getSplitFlapEspNow());
+        splitflapMqtt.setWired(getSplitFlapWired());
         splitflapMqtt.setup();
         display.setMqtt(&splitflapMqtt);
         Serial.println("[boot] mqtt setup complete");
@@ -198,12 +225,23 @@ void loop() {
         display.reloadOffsets();
     }
     if (webServer.getPendingActions().takeReportOffsets()) {
-        if (splitflapEspNow) {
+        if (useWiredLink()) {
+            if (splitflapWired) {
+                splitflapWired->reportOffsetsToMaster();
+            }
+        } else if (splitflapEspNow) {
             splitflapEspNow->reportOffsetsToMaster();
         }
     }
     if (webServer.getPendingActions().takePushOffsets()) {
-        if (splitflapEspNow) {
+        if (useWiredLink()) {
+            if (splitflapWired) {
+                int groupCount = settings.getInt("masterGroupCount");
+                for (int i = 1; i < groupCount; i++) {
+                    splitflapWired->pushOffsetsToGroup(i);
+                }
+            }
+        } else if (splitflapEspNow) {
             int groupCount = settings.getInt("masterGroupCount");
             for (int i = 1; i < groupCount; i++) {
                 splitflapEspNow->pushOffsetsToGroup(i);
@@ -211,7 +249,11 @@ void loop() {
         }
     }
 
-    if (splitflapEspNow) {
+    if (useWiredLink()) {
+        if (splitflapWired) {
+            splitflapWired->loop();
+        }
+    } else if (splitflapEspNow) {
         splitflapEspNow->loop();
     }
     splitflapMqtt.loop();
@@ -241,12 +283,21 @@ void singleInputMode() {
     String userInput = webServer.getInputString();
     if (userInput != webServer.getWrittenString()) {
         if (isMultiDisplayMasterEnabled()) {
-            getSplitFlapEspNow()->distributeMessage(
-                userInput,
-                webServer.getCentering(),
-                settings.getInt("scrollDelayMs"),
-                settings.getInt("scrollRepeatCount")
-            );
+            if (useWiredLink()) {
+                getSplitFlapWired()->distributeMessage(
+                    userInput,
+                    webServer.getCentering(),
+                    settings.getInt("scrollDelayMs"),
+                    settings.getInt("scrollRepeatCount")
+                );
+            } else {
+                getSplitFlapEspNow()->distributeMessage(
+                    userInput,
+                    webServer.getCentering(),
+                    settings.getInt("scrollDelayMs"),
+                    settings.getInt("scrollRepeatCount")
+                );
+            }
             if (splitflapMqtt.isConnected()) {
                 splitflapMqtt.publishState(userInput);
             }
@@ -274,12 +325,21 @@ void multiInputMode() {
         String currWord = getCsvToken(userInput, webServer.getMultiWordCurrentIndex());
         if (currWord != webServer.getWrittenString()) {
             if (isMultiDisplayMasterEnabled()) {
-                getSplitFlapEspNow()->distributeMessage(
-                    currWord,
-                    webServer.getCentering(),
-                    settings.getInt("scrollDelayMs"),
-                    settings.getInt("scrollRepeatCount")
-                );
+                if (useWiredLink()) {
+                    getSplitFlapWired()->distributeMessage(
+                        currWord,
+                        webServer.getCentering(),
+                        settings.getInt("scrollDelayMs"),
+                        settings.getInt("scrollRepeatCount")
+                    );
+                } else {
+                    getSplitFlapEspNow()->distributeMessage(
+                        currWord,
+                        webServer.getCentering(),
+                        settings.getInt("scrollDelayMs"),
+                        settings.getInt("scrollRepeatCount")
+                    );
+                }
                 if (splitflapMqtt.isConnected()) {
                     splitflapMqtt.publishState(currWord);
                 }
@@ -369,7 +429,9 @@ void reconnectIfNeeded() {
         }
 
         splitflapMqtt.setup();
-        if (splitflapEspNow) {
+        // ESP-NOW shares the Wi-Fi channel, so a reconnect may need a fresh
+        // peer set. The wired link is channel-independent: no reinit.
+        if (! useWiredLink() && splitflapEspNow) {
             splitflapEspNow->reinit();
         }
     }

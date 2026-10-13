@@ -64,12 +64,22 @@ void SplitFlapMqtt::processPendingMessage() {
     pendingText = ""; // release the buffer before the long scroll
 
     float maxVel = settings.getFloat("maxVel");
-    if (settings.getInt("masterGroupCount") > 1 && espNow) {
+    bool useWired = settings.getInt("linkTransport") != 0 && wired != nullptr;
+    if (settings.getInt("masterGroupCount") > 1 && (useWired || espNow)) {
         int groupCount = settings.getInt("masterGroupCount");
-        Serial.printf("[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount);
-        espNow->distributeMessage(
-            message, false, settings.getInt("scrollDelayMs"), settings.getInt("scrollRepeatCount")
-        );
+        if (useWired) {
+            Serial.printf("[MQTT] masterGroupCount=%d, routing message through wired distribution\n", groupCount);
+            wired->distributeMessage(
+                message, false, settings.getInt("scrollDelayMs"), settings.getInt("scrollRepeatCount")
+            );
+        } else {
+            Serial.printf(
+                "[MQTT] masterGroupCount=%d, routing message through ESP-NOW distribution\n", groupCount
+            );
+            espNow->distributeMessage(
+                message, false, settings.getInt("scrollDelayMs"), settings.getInt("scrollRepeatCount")
+            );
+        }
         // Single-group mode publishes the full message via
         // display->writeString() (publishState defaults to true). In
         // multi-group mode, writeString is not called, so publish the
@@ -158,6 +168,10 @@ void SplitFlapMqtt::setEspNow(SplitFlapEspNow *e) {
     espNow = e;
 }
 
+void SplitFlapMqtt::setWired(SplitFlapWired *w) {
+    wired = w;
+}
+
 void SplitFlapMqtt::publishState(const String &message) {
     Serial.println("[MQTT] Publishing state: " + message);
     lastPublishedState = message; // remember for reconnects
@@ -177,7 +191,9 @@ void SplitFlapMqtt::publishStatus() {
     // masterGroupModuleCounts + local display), which is the physical display
     // width a message spans. getTotalModuleCount() degenerates to the local
     // count in single-group mode, so one call is correct in both modes.
-    int moduleCount = (espNow != nullptr) ? espNow->getTotalModuleCount() : display->getNumModules();
+    bool useWired = settings.getInt("linkTransport") != 0 && wired != nullptr;
+    int moduleCount = useWired ? wired->getTotalModuleCount()
+                               : (espNow != nullptr) ? espNow->getTotalModuleCount() : display->getNumModules();
     std::string payload = buildStatusPayload(lastPublishedState.c_str(), moduleCount);
     mqttClient.publish(topic_status.c_str(), payload.c_str(), true);
 }

@@ -3,6 +3,7 @@
 #include "CalibrationTriggers.h"
 #include "CsvUtils.h"
 #include "SplitFlapEspNow.h"
+#include "WiredLink.h"
 
 #include <ArduinoJson.h>
 #include <AsyncJson.h>
@@ -268,10 +269,16 @@ void SplitFlapWebServer::startWebServer() {
         response["settings"] = currentSettings.as<JsonObject>();
         response["localMac"] = WiFi.macAddress();
         response["schemaVersion"] = SETTINGS_SCHEMA_VERSION;
-        if (espNow) {
+        String peersJson = "";
+        if (settings.getInt("linkTransport") != 0 && wired) {
+            peersJson = wired->getDiscoveredPeersJson();
+        } else if (espNow) {
+            peersJson = espNow->getDiscoveredPeersJson();
+        }
+        if (peersJson.length() > 0) {
             JsonArray peers = response["discoveredPeers"].to<JsonArray>();
             JsonDocument peersDoc;
-            deserializeJson(peersDoc, espNow->getDiscoveredPeersJson());
+            deserializeJson(peersDoc, peersJson);
             for (JsonObject peer : peersDoc.as<JsonArray>()) {
                 peers.add(peer);
             }
@@ -429,7 +436,7 @@ void SplitFlapWebServer::startWebServer() {
             pendingActions_.requestReloadOffsets();
             response["message"] = "Settings saved, offsets will be applied";
 
-            if (! isMultiDisplayMasterEnabled() && espNow) {
+            if (! isMultiDisplayMasterEnabled() && (espNow || wired)) {
                 pendingActions_.requestReportOffsets();
             }
         }

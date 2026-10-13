@@ -14,6 +14,7 @@
 #include <time.h>
 
 class SplitFlapEspNow;
+class SplitFlapWired;
 
 class SplitFlapWebServer {
   public:
@@ -63,6 +64,7 @@ class SplitFlapWebServer {
     int getCentering() { return centering; }
 
     void setEspNow(SplitFlapEspNow *espNow) { this->espNow = espNow; }
+    void setWired(SplitFlapWired *wired) { this->wired = wired; }
 
     // Cross-task mailbox: web handlers only REQUEST deferred work here; the
     // Arduino loop task drains it and performs the actual display/ESP-NOW
@@ -73,6 +75,7 @@ class SplitFlapWebServer {
     JsonSettings &settings;
     SplitFlapDisplay &display;
     SplitFlapEspNow *espNow = nullptr;
+    SplitFlapWired *wired = nullptr;
 
     String decodeURIComponent(String encodedString);
     bool validateMasterSettings(JsonVariant &json, JsonDocument &response);
