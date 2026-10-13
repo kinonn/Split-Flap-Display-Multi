@@ -14,6 +14,17 @@
 #include <Arduino.h>
 #include <WiFiClient.h>
 
+// Factory defaults for the inter-display link transport, overridable at
+// flash time via -D flags (e.g. PLATFORMIO_BUILD_FLAGS="-D
+// LINK_TRANSPORT_DEFAULT=2"). These seed the NVS default only: once a value
+// is stored, the stored value wins and the flag has no further effect.
+#ifndef LINK_TRANSPORT_DEFAULT
+#define LINK_TRANSPORT_DEFAULT 0  // 0 = ESP-NOW, 1 = RS-485, 2 = Direct UART
+#endif
+#ifndef LINK_ADDRESS_DEFAULT
+#define LINK_ADDRESS_DEFAULT 0  // 0 = master, 1..5 = remote group index
+#endif
+
 // clang-format off
 JsonSettings settings = JsonSettings("config", {
     // General Settings
@@ -53,6 +64,12 @@ JsonSettings settings = JsonSettings("config", {
     {"masterGroupCount", JsonSetting(1)},
     {"masterGroupModuleCounts", JsonSetting({8, 8, 8, 8, 8, 8})},
     {"masterGroupMacs", JsonSetting(",,,,,")},
+    // Inter-display link transport (see LINK_TRANSPORT_DEFAULT above)
+    {"linkTransport", JsonSetting(LINK_TRANSPORT_DEFAULT)},
+    {"linkAddress", JsonSetting(LINK_ADDRESS_DEFAULT)},
+    {"linkTxPin", JsonSetting(4)},
+    {"linkRxPin", JsonSetting(5)},
+    {"linkBaud", JsonSetting(115200)},
     {"rModOffs", JsonSetting(std::vector<std::vector<int>>(5, std::vector<int>(8, 0)))},
     {"rChrOff0", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
     {"rChrOff1", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},
