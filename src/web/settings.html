@@ -816,7 +816,7 @@
                                     :key="groupIdx"
                                 >
                                     <button
-                                        x-show="!isPeerAssigned(peer.mac) && !groupMacArray[groupIdx]"
+                                        x-show="!isPeerAssigned(peer.mac) && !groupMacArray[groupIdx] && settings.linkTransport == 0"
                                         type="button"
                                         class="px-3 py-1 text-sm bg-green-600 hover:bg-green-500 rounded transition-colors"
                                         @click="assignPeer(groupIdx, peer.mac)"
@@ -827,6 +827,79 @@
                         </div>
                     </template>
                 </div>
+            </div>
+
+            <label for="linkTransport" class="block text-left text-lg mt-4">
+                Link Transport
+            </label>
+            <select
+                class="w-full p-3 mt-2 text-lg border border-gray-600 rounded-md text-center bg-neutral-700 text-gray-100"
+                id="linkTransport"
+                x-model.number="settings.linkTransport"
+                @change="normalizeMasterGroups()"
+            >
+                <option :value="0">ESP-NOW (wireless)</option>
+                <option :value="1">RS-485 (wired, up to 6 groups)</option>
+                <option :value="2">Direct UART (wired, 2 groups max)</option>
+            </select>
+            <div x-show="settings.linkTransport != 0" class="w-full mt-4 space-y-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                        <label class="block text-left text-sm text-gray-300 mb-1">
+                            Wired Address (0 = master, 1-5 = this unit's group slot)
+                        </label>
+                        <input
+                            type="number"
+                            min="0"
+                            max="5"
+                            class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100"
+                            x-model.number="settings.linkAddress"
+                            placeholder="0-5"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-left text-sm text-gray-300 mb-1">
+                            Baud Rate
+                        </label>
+                        <input
+                            type="number"
+                            min="1200"
+                            step="1"
+                            class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100"
+                            x-model.number="settings.linkBaud"
+                            placeholder="115200"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-left text-sm text-gray-300 mb-1">
+                            TX Pin
+                        </label>
+                        <input
+                            type="number"
+                            min="0"
+                            max="21"
+                            class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100"
+                            x-model.number="settings.linkTxPin"
+                            placeholder="4"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-left text-sm text-gray-300 mb-1">
+                            RX Pin
+                        </label>
+                        <input
+                            type="number"
+                            min="0"
+                            max="21"
+                            class="w-full p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100"
+                            x-model.number="settings.linkRxPin"
+                            placeholder="5"
+                        />
+                    </div>
+                </div>
+                <p class="text-sm text-gray-400 text-left">
+                    Transport, address, pins and baud apply at boot — reboot after changing them. Group counts apply immediately. In wired modes the master sends to each group slot by address; set each remote's Wired Address to its group slot.
+                </p>
             </div>
 
             <label for="masterGroupCount" class="block text-left text-lg mt-4">
@@ -930,20 +1003,20 @@
                                     class="block text-left text-sm text-gray-300 mb-1"
                                 >
                                     <span
-                                        x-text="i === 0 ? 'MAC Address' : 'Peer MAC Address'"
+                                        x-text="i === 0 ? 'MAC Address' : (settings.linkTransport != 0 ? 'Wired Address' : 'Peer MAC Address')"
                                     ></span>
                                 </label>
                                 <div class="flex gap-2">
                                     <input
                                         type="text"
                                         class="flex-1 p-3 text-lg border border-gray-600 rounded-md text-center bg-neutral-800 text-gray-100 disabled:opacity-60"
-                                        :value="i === 0 ? 'local display' : groupMacArray[i]"
+                                        :value="i === 0 ? 'local display' : (settings.linkTransport != 0 ? ('wired:' + i) : groupMacArray[i])"
                                         @input="setGroupMac(i, $event.target.value)"
-                                        :disabled="i === 0"
+                                        :disabled="i === 0 || settings.linkTransport != 0"
                                         placeholder="AA:BB:CC:DD:EE:FF"
                                     />
                                     <button
-                                        x-show="i > 0 && groupMacArray[i]"
+                                        x-show="i > 0 && groupMacArray[i] && settings.linkTransport == 0"
                                         type="button"
                                         class="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-md transition-colors"
                                         @click="removePeer(i)"

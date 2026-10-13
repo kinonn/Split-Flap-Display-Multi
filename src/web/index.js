@@ -38,6 +38,11 @@ const SETTINGS_SCHEMA = {
     masterGroupCount: { type: "int", min: 1, max: 6 },
     masterGroupModuleCounts: { type: "vector" },
     masterGroupMacs: { type: "vector" },
+    linkTransport: { type: "int", min: 0, max: 2 },
+    linkAddress: { type: "int", min: 0, max: 5 },
+    linkTxPin: { type: "int" },
+    linkRxPin: { type: "int" },
+    linkBaud: { type: "int", min: 1200 },
     rModOffs: { type: "matrix" },
     rChrOff0: { type: "matrix" },
     rChrOff1: { type: "matrix" },
@@ -71,6 +76,11 @@ document.addEventListener("alpine:init", () => {
             masterGroupCount: 1,
             masterGroupModuleCounts: "8,8,8,8,8,8",
             masterGroupMacs: ",,,,,",
+            linkTransport: 0,
+            linkAddress: 0,
+            linkTxPin: 4,
+            linkRxPin: 5,
+            linkBaud: 115200,
         },
         localMac: "",
         discoveredPeers: [],
@@ -383,10 +393,11 @@ document.addEventListener("alpine:init", () => {
         },
 
         normalizeMasterGroups() {
+            const maxGroups = Number(this.settings.linkTransport) === 2 ? 2 : 6;
             const groupCount = Number(this.settings.masterGroupCount || 1);
             this.settings.masterGroupCount = Math.min(
                 Math.max(groupCount, 1),
-                6,
+                maxGroups,
             );
 
             const counts = this.groupModuleArray;
@@ -397,7 +408,18 @@ document.addEventListener("alpine:init", () => {
             this.settings.masterGroupMacs = macs.join(",");
         },
 
+        wiredAddrOf(mac) {
+            const m = /^wired:(\d+)$/.exec(mac || "");
+            return m ? Number(m[1]) : -1;
+        },
+
         isPeerAssigned(mac) {
+            const addr = this.wiredAddrOf(mac);
+            if (addr >= 0) {
+                // Wired peers carry their group slot in the address: slot N
+                // serves Group N+1, so assignment is positional, not stored.
+                return addr >= 1 && addr < Number(this.settings.masterGroupCount || 1);
+            }
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
                 const groupMac = (this.groupMacArray[i] || "").toUpperCase();
@@ -407,6 +429,12 @@ document.addEventListener("alpine:init", () => {
         },
 
         assignedGroupLabel(mac) {
+            const addr = this.wiredAddrOf(mac);
+            if (addr >= 0) {
+                return addr >= 1 && addr < Number(this.settings.masterGroupCount || 1)
+                    ? `Group ${addr + 1} (wired addr ${addr})`
+                    : "";
+            }
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
                 const groupMac = (this.groupMacArray[i] || "").toUpperCase();
@@ -775,9 +803,10 @@ document.addEventListener("alpine:init", () => {
         addImportConflicts(imported, warnings) {
             const moduleCount = Number(imported.moduleCount) || 0;
             const charset = Number(imported.charset) || 48;
+            const maxGroups = Number(imported.linkTransport) === 2 ? 2 : 6;
             const groupCount = Math.min(
                 Math.max(Number(imported.masterGroupCount) || 1, 1),
-                6,
+                maxGroups,
             );
 
             const csv = (value, len) => {

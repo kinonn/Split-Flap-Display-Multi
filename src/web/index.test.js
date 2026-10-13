@@ -34,6 +34,11 @@ const SETTINGS_SCHEMA = {
     masterGroupCount: { type: "int", min: 1, max: 6 },
     masterGroupModuleCounts: { type: "vector" },
     masterGroupMacs: { type: "vector" },
+    linkTransport: { type: "int", min: 0, max: 2 },
+    linkAddress: { type: "int", min: 0, max: 5 },
+    linkTxPin: { type: "int" },
+    linkRxPin: { type: "int" },
+    linkBaud: { type: "int", min: 1200 },
     rModOffs: { type: "matrix" },
     rChrOff0: { type: "matrix" },
     rChrOff1: { type: "matrix" },
@@ -67,6 +72,11 @@ const createPageData = (type = "Settings") => {
             masterGroupCount: 1,
             masterGroupModuleCounts: "8,8,8,8,8,8",
             masterGroupMacs: ",,,,,",
+            linkTransport: 0,
+            linkAddress: 0,
+            linkTxPin: 4,
+            linkRxPin: 5,
+            linkBaud: 115200,
         },
         localMac: "",
         discoveredPeers: [],
@@ -394,10 +404,11 @@ const createPageData = (type = "Settings") => {
         },
 
         normalizeMasterGroups() {
+            const maxGroups = Number(this.settings.linkTransport) === 2 ? 2 : 6;
             const groupCount = Number(this.settings.masterGroupCount || 1);
             this.settings.masterGroupCount = Math.min(
                 Math.max(groupCount, 1),
-                6,
+                maxGroups,
             );
 
             const counts = this.groupModuleArray;
@@ -408,7 +419,18 @@ const createPageData = (type = "Settings") => {
             this.settings.masterGroupMacs = macs.join(",");
         },
 
+        wiredAddrOf(mac) {
+            const m = /^wired:(\d+)$/.exec(mac || "");
+            return m ? Number(m[1]) : -1;
+        },
+
         isPeerAssigned(mac) {
+            const addr = this.wiredAddrOf(mac);
+            if (addr >= 0) {
+                // Wired peers carry their group slot in the address: slot N
+                // serves Group N+1, so assignment is positional, not stored.
+                return addr >= 1 && addr < Number(this.settings.masterGroupCount || 1);
+            }
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
                 const groupMac = (this.groupMacArray[i] || "").toUpperCase();
@@ -418,6 +440,12 @@ const createPageData = (type = "Settings") => {
         },
 
         assignedGroupLabel(mac) {
+            const addr = this.wiredAddrOf(mac);
+            if (addr >= 0) {
+                return addr >= 1 && addr < Number(this.settings.masterGroupCount || 1)
+                    ? `Group ${addr + 1} (wired addr ${addr})`
+                    : "";
+            }
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
                 const groupMac = (this.groupMacArray[i] || "").toUpperCase();
@@ -784,9 +812,10 @@ const createPageData = (type = "Settings") => {
         addImportConflicts(imported, warnings) {
             const moduleCount = Number(imported.moduleCount) || 0;
             const charset = Number(imported.charset) || 48;
+            const maxGroups = Number(imported.linkTransport) === 2 ? 2 : 6;
             const groupCount = Math.min(
                 Math.max(Number(imported.masterGroupCount) || 1, 1),
-                6,
+                maxGroups,
             );
 
             const csv = (value, len) => {
@@ -1283,6 +1312,28 @@ describe("Page Component - Master Groups", () => {
     it("should set group MAC at specific index", () => {
         page.setGroupMac(1, "AA:BB:CC:DD:EE:FF");
         expect(page.groupMacArray[1]).toBe("AA:BB:CC:DD:EE:FF");
+    });
+
+    it("should clamp master group count to 2 in Direct UART mode", () => {
+        page.settings.linkTransport = 2;
+        page.settings.masterGroupCount = 3;
+        page.normalizeMasterGroups();
+        expect(page.settings.masterGroupCount).toBe(2);
+    });
+
+    it("should keep 6-group cap in RS-485 mode", () => {
+        page.settings.linkTransport = 1;
+        page.settings.masterGroupCount = 6;
+        page.normalizeMasterGroups();
+        expect(page.settings.masterGroupCount).toBe(6);
+    });
+
+    it("should treat wired peers as assigned to their address slot", () => {
+        page.settings.masterGroupCount = 2;
+        expect(page.isPeerAssigned("wired:1")).toBe(true);
+        expect(page.isPeerAssigned("wired:2")).toBe(false);
+        expect(page.assignedGroupLabel("wired:1")).toBe("Group 2 (wired addr 1)");
+        expect(page.assignedGroupLabel("wired:2")).toBe("");
     });
 });
 
