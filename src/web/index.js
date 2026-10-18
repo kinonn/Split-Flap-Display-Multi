@@ -418,7 +418,10 @@ document.addEventListener("alpine:init", () => {
             if (addr >= 0) {
                 // Wired peers carry their group slot in the address: slot N
                 // serves Group N+1, so assignment is positional, not stored.
-                return addr >= 1 && addr < Number(this.settings.masterGroupCount || 1);
+                return (
+                    addr >= 1 &&
+                    addr < Number(this.settings.masterGroupCount || 1)
+                );
             }
             const normalized = (mac || "").toUpperCase();
             for (let i = 1; i < this.settings.masterGroupCount; i++) {
@@ -431,7 +434,8 @@ document.addEventListener("alpine:init", () => {
         assignedGroupLabel(mac) {
             const addr = this.wiredAddrOf(mac);
             if (addr >= 0) {
-                return addr >= 1 && addr < Number(this.settings.masterGroupCount || 1)
+                return addr >= 1 &&
+                    addr < Number(this.settings.masterGroupCount || 1)
                     ? `Group ${addr + 1} (wired addr ${addr})`
                     : "";
             }

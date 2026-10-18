@@ -842,11 +842,17 @@
                 <option :value="1">RS-485 (wired, up to 6 groups)</option>
                 <option :value="2">Direct UART (wired, 2 groups max)</option>
             </select>
-            <div x-show="settings.linkTransport != 0" class="w-full mt-4 space-y-3">
+            <div
+                x-show="settings.linkTransport != 0"
+                class="w-full mt-4 space-y-3"
+            >
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
-                        <label class="block text-left text-sm text-gray-300 mb-1">
-                            Wired Address (0 = master, 1-5 = this unit's group slot)
+                        <label
+                            class="block text-left text-sm text-gray-300 mb-1"
+                        >
+                            Wired Address (0 = master, 1-5 = this unit's group
+                            slot)
                         </label>
                         <input
                             type="number"
@@ -858,7 +864,9 @@
                         />
                     </div>
                     <div>
-                        <label class="block text-left text-sm text-gray-300 mb-1">
+                        <label
+                            class="block text-left text-sm text-gray-300 mb-1"
+                        >
                             Baud Rate
                         </label>
                         <input
@@ -871,7 +879,9 @@
                         />
                     </div>
                     <div>
-                        <label class="block text-left text-sm text-gray-300 mb-1">
+                        <label
+                            class="block text-left text-sm text-gray-300 mb-1"
+                        >
                             TX Pin
                         </label>
                         <input
@@ -884,7 +894,9 @@
                         />
                     </div>
                     <div>
-                        <label class="block text-left text-sm text-gray-300 mb-1">
+                        <label
+                            class="block text-left text-sm text-gray-300 mb-1"
+                        >
                             RX Pin
                         </label>
                         <input
@@ -898,7 +910,10 @@
                     </div>
                 </div>
                 <p class="text-sm text-gray-400 text-left">
-                    Transport, address, pins and baud apply at boot — reboot after changing them. Group counts apply immediately. In wired modes the master sends to each group slot by address; set each remote's Wired Address to its group slot.
+                    Transport, address, pins and baud apply at boot — reboot
+                    after changing them. Group counts apply immediately. In
+                    wired modes the master sends to each group slot by address;
+                    set each remote's Wired Address to its group slot.
                 </p>
             </div>
 
