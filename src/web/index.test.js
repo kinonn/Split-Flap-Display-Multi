@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const SETTINGS_SCHEMA_VERSION = 1;
+const SETTINGS_SCHEMA_VERSION = 2;
 const EXPORT_FORMAT = "splitflap-settings";
 
 const SETTINGS_SCHEMA = {

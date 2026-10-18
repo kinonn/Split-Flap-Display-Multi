@@ -368,6 +368,19 @@ void SplitFlapWebServer::startWebServer() {
                 }
             }
         }
+        // Inter-display link transport, address, pins and baud are
+        // snapshotted in WiredLink::init() at boot, while dispatch reads the
+        // live setting — changing them without a reboot would route messages
+        // to an uninitialized transport. Flag a reboot like other hardware.
+        const char *linkIntKeys[] = {"linkTransport", "linkAddress", "linkTxPin", "linkRxPin", "linkBaud"};
+        for (const char *k : linkIntKeys) {
+            if (json[k].is<int>() || json[k].is<float>() || json[k].is<String>()) {
+                if (json[k].as<int>() != settings.getInt(k)) {
+                    hardwareChanged = true;
+                    break;
+                }
+            }
+        }
         if (hardwareChanged) {
             rebootRequired = true;
             response["message"] = "Settings updated successfully, hardware settings have changed. Rebooting...";
@@ -599,6 +612,66 @@ bool SplitFlapWebServer::validateMasterSettings(JsonVariant &json, JsonDocument 
         response["errors"]["key"] = "masterGroupCount";
         response["errors"]["message"] = "Enter a value from 1 to 6";
         return false;
+    }
+
+    // Inter-display link transport bounds: the web UI clamps these, but
+    // POST /api/settings must also reject them — otherwise an invalid combo
+    // (e.g. Direct UART with 6 groups) persists and WiredLink::init()
+    // refuses it at the next boot.
+    int linkTransport = settings.getInt("linkTransport");
+    if (! json["linkTransport"].isNull()) {
+        if (! json["linkTransport"].is<int>()) {
+            response["message"] = "Link transport must be a number";
+            response["type"] = "error";
+            response["errors"]["key"] = "linkTransport";
+            response["errors"]["message"] = "Enter 0 for ESP-NOW, 1 for RS-485, 2 for Direct UART";
+            return false;
+        }
+        linkTransport = json["linkTransport"].as<int>();
+    }
+
+    const char *linkError = validateWiredSettings(linkTransport, groupCount);
+    if (linkError != nullptr) {
+        response["message"] = linkError;
+        response["type"] = "error";
+        response["errors"]["key"] = json["masterGroupCount"].isNull() ? "linkTransport" : "masterGroupCount";
+        response["errors"]["message"] = linkError;
+        return false;
+    }
+
+    if (! json["linkAddress"].isNull()) {
+        if (! json["linkAddress"].is<int>()) {
+            response["message"] = "Wired address must be a number";
+            response["type"] = "error";
+            response["errors"]["key"] = "linkAddress";
+            response["errors"]["message"] = "Enter a value from 0 to 5";
+            return false;
+        }
+        int linkAddress = json["linkAddress"].as<int>();
+        if (linkAddress < 0 || linkAddress >= LINK_MAX_GROUPS) {
+            response["message"] = "Wired address must be between 0 and 5";
+            response["type"] = "error";
+            response["errors"]["key"] = "linkAddress";
+            response["errors"]["message"] = "Use 0 for the master, 1-5 for a remote group slot";
+            return false;
+        }
+    }
+
+    if (! json["linkBaud"].isNull()) {
+        if (! json["linkBaud"].is<int>()) {
+            response["message"] = "Baud rate must be a number";
+            response["type"] = "error";
+            response["errors"]["key"] = "linkBaud";
+            response["errors"]["message"] = "Enter a baud rate of at least 1200";
+            return false;
+        }
+        if (json["linkBaud"].as<int>() < 1200) {
+            response["message"] = "Baud rate is too low";
+            response["type"] = "error";
+            response["errors"]["key"] = "linkBaud";
+            response["errors"]["message"] = "Enter a baud rate of at least 1200";
+            return false;
+        }
     }
 
     String moduleCounts = settings.getString("masterGroupModuleCounts");

@@ -2,7 +2,7 @@ import Alpine from "alpinejs";
 window.Alpine = Alpine;
 
 // Must stay in sync with SETTINGS_SCHEMA_VERSION in src/JsonSettings.h.
-const SETTINGS_SCHEMA_VERSION = 1;
+const SETTINGS_SCHEMA_VERSION = 2;
 const EXPORT_FORMAT = "splitflap-settings";
 
 // Describes every setting the firmware understands, used to validate imported

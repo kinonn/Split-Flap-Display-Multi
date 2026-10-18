@@ -13,7 +13,7 @@ class Preferences;
 // Bump this whenever the settings schema changes (keys added/removed/renamed,
 // or the meaning of an existing value changes). The web UI uses it to warn
 // about forward/backward compatibility when importing an exported config.
-#define SETTINGS_SCHEMA_VERSION 1
+#define SETTINGS_SCHEMA_VERSION 2
 
 class JsonSettings {
   public:

@@ -32,26 +32,28 @@ bool SplitFlapWired::init() {
         return false;
     }
 
-    int groupCount = constrain(settings.getInt("masterGroupCount"), 1, LINK_MAX_GROUPS);
-    const char *configError = validateWiredSettings(transport, groupCount);
-    if (configError != nullptr) {
-        Serial.print("[wired] invalid config: ");
-        Serial.println(configError);
-        return false;
-    }
-
     myAddress = settings.getInt("linkAddress");
     if (myAddress < 0 || myAddress >= LINK_MAX_GROUPS) {
         Serial.println("[wired] linkAddress must be 0..5");
         return false;
     }
-    if (myAddress != 0 && myAddress >= groupCount) {
-        Serial.println("[wired] remote linkAddress is beyond masterGroupCount");
-        return false;
-    }
     if (transport == LINK_TRANSPORT_UART && myAddress > 1) {
         Serial.println("[wired] Direct UART supports only addresses 0 (master) and 1 (remote)");
         return false;
+    }
+
+    // Only the master validates its group count here: a remote keeps
+    // masterGroupCount at 1 (its slot is positional, not derived from the
+    // local group count), so gating a remote on the local count would reject
+    // every valid remote (linkAddress 1 >= groupCount 1).
+    if (myAddress == 0) {
+        int groupCount = constrain(settings.getInt("masterGroupCount"), 1, LINK_MAX_GROUPS);
+        const char *configError = validateWiredSettings(transport, groupCount);
+        if (configError != nullptr) {
+            Serial.print("[wired] invalid config: ");
+            Serial.println(configError);
+            return false;
+        }
     }
 
     txPin = settings.getInt("linkTxPin");
@@ -417,12 +419,19 @@ void SplitFlapWired::handleFrame() {
     // accepts traffic addressed to it (DST=0) from remote addresses; a
     // remote only accepts traffic addressed to its own address. Anything
     // else is RS-485 local echo or another pair's multidrop traffic.
+    // Master-originated content (TEXT, offset pushes) must also come FROM
+    // the master: a remote never sends to another remote, so a non-zero SRC
+    // on such a frame is a misbehaving node or corruption.
     if (myAddress == 0) {
         if (dst != LINK_ADDR_MASTER || src == 0 || src >= LINK_MAX_GROUPS) {
             return;
         }
     } else {
         if (dst != (uint8_t) myAddress) {
+            return;
+        }
+        if ((type == LINK_TYPE_TEXT || type == LINK_TYPE_OFFSETS_PUSH || type == LINK_TYPE_CHAR_OFFSETS_PUSH) &&
+            src != LINK_ADDR_MASTER) {
             return;
         }
     }

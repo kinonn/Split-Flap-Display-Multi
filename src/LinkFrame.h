@@ -106,6 +106,7 @@ class LinkDecoder {
     void reset() {
         state = WAIT_SYNC;
         pos = 0;
+        escaped = false;
         frameReady = false;
     }
 
