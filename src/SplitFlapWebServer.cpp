@@ -692,8 +692,9 @@ void SplitFlapWebServer::registerCalibRoutes() {
 
     // Enter/leave calibration hold (mode 4): suspends date/time/random/scroll
     // writes so the agent owns the display. Fleet: call on each controller.
-    server.addHandler(
-        new AsyncCallbackJsonWebHandler("/api/calib/hold", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/hold",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -724,14 +725,15 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["holdActive"] = active;
         response["previousMode"] = previousMode;
         request->send(200, "application/json", response.as<String>());
-    })
-    );
+    }
+    ));
 
     // Deterministic exact-width show: no centering, no scroll. On the master,
     // a fleet-width frame (length == total modules) is distributed across all
     // ESP-NOW groups left-to-right; a local-width frame shows locally only.
-    server.addHandler(
-        new AsyncCallbackJsonWebHandler("/api/calib/show", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/show",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -781,8 +783,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["fleetFrame"] = fleetFrame;
         response["dwellMs"] = dwellMs;
         request->send(202, "application/json", response.as<String>());
-    })
-    );
+    }
+    ));
 
     // Ground truth for a shown frame so the camera has expected glyphs.
     server.on("/api/calib/frame", HTTP_GET, [this](AsyncWebServerRequest *request) {
@@ -812,7 +814,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
     // module, no NVS write. For fleets, call each controller directly.
     // charIndex -1 = coarse module offset, else drum index 0..charset-1.
     server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/preview", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        "/api/calib/preview",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -870,7 +873,8 @@ void SplitFlapWebServer::registerCalibRoutes() {
     // All nudges are applied and the touched modules re-homed in ONE pass so
     // N independent modules cost one homing cycle (parallel trim phase).
     server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/preview-batch", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        "/api/calib/preview-batch",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -955,8 +959,9 @@ void SplitFlapWebServer::registerCalibRoutes() {
     // changes (CalibrationTriggers.h), so rolling back by re-POSTing identical
     // settings is a no-op and RAM-only preview residue would otherwise survive
     // across runs and corrupt the next run's baseline.
-    server.addHandler(
-        new AsyncCallbackJsonWebHandler("/api/calib/reload", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(new AsyncCallbackJsonWebHandler(
+        "/api/calib/reload",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
         (void) json;
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
@@ -976,14 +981,15 @@ void SplitFlapWebServer::registerCalibRoutes() {
         response["message"] = "Reload queued (volatile previews reverted)";
         response["type"] = "success";
         request->send(202, "application/json", response.as<String>());
-    })
-    );
+    }
+    ));
 
     // Scoped persist (Phase 3): writes ONE offset cell to NVS, then queues
     // the existing reload/push paths. scope 1 (or "local") = local group,
     // 2..6 = remote group on the master.
     server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/api/calib/offsets", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        "/api/calib/offsets",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
