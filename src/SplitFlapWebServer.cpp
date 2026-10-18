@@ -210,7 +210,24 @@ bool SplitFlapWebServer::connectToWifi() {
 void SplitFlapWebServer::startAccessPoint() {
     connectionMode = 0;
     const char *apSSID = AP_SSID;
-    WiFi.softAP(apSSID);
+    // A failed station attempt leaves the radio in WIFI_STA mid-scan
+    // (WiFi.begin keeps retrying in the background). Stop it and switch to
+    // AP mode explicitly — otherwise softAP() can fail silently while we
+    // print "AP Mode Started!" unconditionally (observed: success log +
+    // default 192.168.4.1, but no beacons on air).
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
+    delay(100);
+    bool apUp = WiFi.softAP(apSSID);
+    if (! apUp) {
+        Serial.println("AP start failed, retrying...");
+        delay(500);
+        apUp = WiFi.softAP(apSSID);
+    }
+    if (! apUp) {
+        Serial.println("AP Mode FAILED to start!");
+        return;
+    }
 #ifdef WIFI_TX_POWER
     delay(100);
     WiFi.setTxPower((wifi_power_t) WIFI_TX_POWER);
