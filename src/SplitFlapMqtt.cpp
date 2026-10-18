@@ -2,6 +2,8 @@
 
 #include "StatusPayload.h"
 
+#include <WiFi.h>
+
 SplitFlapMqtt::SplitFlapMqtt(JsonSettings &settings, WiFiClient &wifiClient)
     : settings(settings), wifiClient(wifiClient), mqttClient(wifiClient), display(nullptr) {}
 
@@ -198,6 +200,14 @@ void SplitFlapMqtt::publishStatus() {
 }
 
 void SplitFlapMqtt::loop() {
+    // In AP fallback mode there is no uplink by definition — skip the
+    // 5 s connect attempts so the log isn't spammed and the radio isn't
+    // needlessly busy while the user configures Wi-Fi.
+    if (WiFi.getMode() == WIFI_AP) {
+        mqttClient.loop();
+        processPendingMessage();
+        return;
+    }
     if (! mqttClient.connected()) {
         unsigned long now = millis();
         if (now - lastAttempt > 5000) {

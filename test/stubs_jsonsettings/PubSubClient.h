@@ -77,6 +77,7 @@ class PubSubClient {
 
     // Test hooks
     void forceConnected(bool on) { connected_ = on; }
+    int connectCalls() const { return connectCalls_; }
     void deliver(char *topic, byte *payload, unsigned int len) {
         if (callback_) callback_(topic, payload, len);
     }
@@ -88,6 +89,7 @@ class PubSubClient {
 
   private:
     bool connectImpl(const char *id, const char *user, const char *pass) {
+        connectCalls_++;
         clientId_ = id;
         user_ = user ? user : "";
         pass_ = pass ? pass : "";
@@ -113,4 +115,5 @@ class PubSubClient {
     std::string willTopic_, willMessage_;
     bool willRetain_ = false;
     bool connected_ = false;
+    int connectCalls_ = 0;
 };

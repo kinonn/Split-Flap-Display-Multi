@@ -16,6 +16,7 @@
 #include "JsonSettings.h"
 #include "PubSubClient.h"
 #include "SplitFlapMqtt.h"
+#include "WiFi.h"
 #include "WiredLink.h"
 
 // Stub globals (same pattern as jsonsettings_test.cpp)
@@ -185,6 +186,34 @@ int main() {
         CHECK(g_lastClient->willTopic() == "splitflap/splitflap/availability");
         CHECK(g_lastClient->willMessage() == "offline");
         CHECK(g_lastClient->willRetain() == true);
+    }
+
+    // AP fallback mode has no uplink: loop() must not attempt broker
+    // connects (log spam + needless radio traffic while the user
+    // configures Wi-Fi), but must still drain staged /set commands.
+    {
+        extern wifi_mode_t g_wifiMode;
+        g_wifiMode = WIFI_AP;
+
+        JsonSettings settings("mqttaptest", testSchema());
+        WiFiClient wifiClient;
+        SplitFlapDisplay display(settings);
+        SplitFlapMqtt mqtt(settings, wifiClient);
+        mqtt.setDisplay(&display);
+        mqtt.setup();
+        g_lastClient->forceConnected(false);
+
+        int connectsBefore = g_lastClient->connectCalls();
+        char topic[] = "splitflap/splitflap/set";
+        byte payload[] = "ap staged";
+        g_lastClient->deliver(topic, payload, 9);
+        g_writeStringCalls = 0;
+        mqtt.loop();
+        CHECK(g_lastClient->connectCalls() == connectsBefore); // no connect attempt
+        CHECK(g_writeStringCalls == 1);                        // staged command still drains
+        CHECK(g_lastWritten == "ap staged");
+
+        g_wifiMode = WIFI_STA; // restore for any later tests
     }
 
     std::printf("%d checks, %d failures\n", checks, failures);

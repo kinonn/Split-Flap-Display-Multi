@@ -10,6 +10,13 @@
 #include <cstring>
 #include <string>
 
+#include "WiFi.h"
+
+// WiFi mode stub: defaults to station mode; tests flip g_wifiMode to
+// WIFI_AP to exercise the AP-mode early-return paths.
+wifi_mode_t g_wifiMode = WIFI_STA;
+WiFiStub WiFi;
+
 // Test counters: which dispatch branch ran, with what message.
 int g_distributeCalls = 0;
 std::string g_lastDistributed;
