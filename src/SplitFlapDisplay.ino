@@ -68,8 +68,8 @@ JsonSettings settings = JsonSettings("config", {
     // Inter-display link transport (see LINK_TRANSPORT_DEFAULT above)
     {"linkTransport", JsonSetting(LINK_TRANSPORT_DEFAULT)},
     {"linkAddress", JsonSetting(LINK_ADDRESS_DEFAULT)},
-    {"linkTxPin", JsonSetting(4)},
-    {"linkRxPin", JsonSetting(5)},
+    {"linkTxPin", JsonSetting(21)},
+    {"linkRxPin", JsonSetting(20)},
     {"linkBaud", JsonSetting(115200)},
     {"rModOffs", JsonSetting(std::vector<std::vector<int>>(5, std::vector<int>(8, 0)))},
     {"rChrOff0", JsonSetting(std::vector<std::vector<int>>(8, std::vector<int>(48, 0)))},

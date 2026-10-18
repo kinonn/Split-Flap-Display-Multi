@@ -166,7 +166,7 @@ Remote groups automatically switch into ESP-NOW remote display mode when they re
 
 Wired addressing replaces MAC assignment: a remote's `Wired Address` is its group slot (`0 = master`, `1-5 = remote`). The master's group list still defines module counts and order; the per-group address shown in the UI (`wired:N`) is positional and needs no manual assignment. Discovered wired peers appear in `Discovered Devices` by address.
 
-`Wired Address`, `TX Pin` (default 4), `RX Pin` (default 5), and `Baud Rate` (default 115200) apply at boot — reboot after changing them. Group counts apply immediately. On the ESP32-C3, avoid strapping pins (GPIO 2/8/9 — 8/9 are already the module I2C bus), USB-JTAG pins (GPIO 18/19, needed for flashing and the serial monitor), and flash pins (GPIO 12-17).
+`Wired Address`, `TX Pin` (default 21), `RX Pin` (default 20), and `Baud Rate` (default 115200) apply at boot — reboot after changing them. Group counts apply immediately. The TX/RX defaults match the ESP32-C3 Super Mini's default UART0 pins (GPIO21 = U0TXD, GPIO20 = U0RXD). On the ESP32-C3, avoid strapping pins (GPIO 2/8/9 — 8/9 are already the module I2C bus), USB-JTAG pins (GPIO 18/19, needed for flashing and the serial monitor), and flash pins (GPIO 12-17).
 
 Provisioning shortcut: the firmware default can be seeded at flash time without `platformio.ini` variants, so remotes come up in the right mode with no setup dance (a stored setting always wins over the flag afterwards):
 

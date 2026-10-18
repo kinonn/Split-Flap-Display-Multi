@@ -16,8 +16,8 @@
 
 SplitFlapWired::SplitFlapWired(JsonSettings &settings, SplitFlapDisplay &display)
     : settings(settings), display(display), initialized(false), transport(LINK_TRANSPORT_ESP_NOW), myAddress(0),
-      txPin(4), rxPin(5), baud(115200), lastRemoteText(""), lastPollMs(0), lastExpiryCheckMs(0), offsetDataDirty(false),
-      lastOffsetRxMs(0) {
+      txPin(21), rxPin(20), baud(115200), lastRemoteText(""), lastPollMs(0), lastExpiryCheckMs(0),
+      offsetDataDirty(false), lastOffsetRxMs(0) {
     memset(peers, 0, sizeof(peers));
 }
 
