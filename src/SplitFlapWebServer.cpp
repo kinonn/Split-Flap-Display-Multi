@@ -216,13 +216,17 @@ void SplitFlapWebServer::startAccessPoint() {
     // print "AP Mode Started!" unconditionally (observed: success log +
     // default 192.168.4.1, but no beacons on air).
     WiFi.disconnect(true);
+    WiFi.setAutoReconnect(false);
     WiFi.mode(WIFI_AP);
-    delay(100);
-    bool apUp = WiFi.softAP(apSSID);
+    delay(200);
+    // Explicit channel/visibility/max-clients: the defaults are ch1 /
+    // visible / 4, but pin them so a core-version default change can't
+    // silently hide the AP.
+    bool apUp = WiFi.softAP(apSSID, nullptr, 1, 0, 4);
     if (! apUp) {
         Serial.println("AP start failed, retrying...");
         delay(500);
-        apUp = WiFi.softAP(apSSID);
+        apUp = WiFi.softAP(apSSID, nullptr, 1, 0, 4);
     }
     if (! apUp) {
         Serial.println("AP Mode FAILED to start!");
@@ -234,7 +238,9 @@ void SplitFlapWebServer::startAccessPoint() {
 #endif
     Serial.println("AP Mode Started!");
     Serial.println("Connect to: " + String(apSSID));
-    Serial.println("AP IP Address: http://" + WiFi.softAPIP().toString());
+    Serial.printf(
+        "[wifi] mode=%d apChannel=%d ip=%s\n", (int) WiFi.getMode(), WiFi.channel(), WiFi.softAPIP().toString().c_str()
+    );
 }
 
 void fourOhFour(AsyncWebServerRequest *request) {
