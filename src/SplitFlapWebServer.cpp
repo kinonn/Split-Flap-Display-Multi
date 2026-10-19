@@ -11,7 +11,7 @@
 
 bool isMultiDisplayMasterEnabled();
 
-#define AP_SSID "Split Flap Display"
+#define AP_SSID "SFD"
 
 #ifndef WIFI_SSID
 #define WIFI_SSID ""
