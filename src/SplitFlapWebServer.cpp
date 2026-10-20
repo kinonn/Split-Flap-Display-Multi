@@ -637,9 +637,8 @@ void SplitFlapWebServer::startWebServer() {
         this->attemptReconnect = true;
     });
 
-    server.addHandler(new AsyncCallbackJsonWebHandler(
-        "/settings",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(
+        new AsyncCallbackJsonWebHandler("/settings", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -672,8 +671,8 @@ void SplitFlapWebServer::startWebServer() {
             response["redirect"] = "http://" + json["mdns"].as<String>() + ".local/settings.html";
         }
 
-        if ((json["mqtt_server"].is<String>() && json["mqtt_server"].as<String>() != settings.getString("mqtt_server")
-            ) ||
+        if ((json["mqtt_server"].is<String>() &&
+             json["mqtt_server"].as<String>() != settings.getString("mqtt_server")) ||
             (json["mqtt_port"].is<int>() && json["mqtt_port"].as<int>() != settings.getInt("mqtt_port")) ||
             (json["mqtt_user"].is<String>() && json["mqtt_user"].as<String>() != settings.getString("mqtt_user")) ||
             (json["mqtt_pass"].is<String>() && json["mqtt_pass"].as<String>() != settings.getString("mqtt_pass"))) {
@@ -814,11 +813,11 @@ void SplitFlapWebServer::startWebServer() {
 
         this->rebootRequired = rebootRequired;
         this->attemptReconnect = reconnect;
-    }
-    ));
+    })
+    );
 
-    server
-        .addHandler(new AsyncCallbackJsonWebHandler("/text", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+    server.addHandler(
+        new AsyncCallbackJsonWebHandler("/text", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         if (request->method() != HTTP_POST) {
             return request->send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
         }
@@ -894,7 +893,8 @@ void SplitFlapWebServer::startWebServer() {
         response["type"] = "success";
 
         request->send(200, "application/json", response.as<String>());
-    }));
+    })
+    );
 
     server.onNotFound(fourOhFour);
 

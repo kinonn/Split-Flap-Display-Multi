@@ -549,8 +549,8 @@ void SplitFlapDisplay::moveTo(int targetPositions[], float speed, bool releaseMo
             // check every modules sensor
             for (int i = 0; i < numModules; i++) {
                 if (stepsRemaining[i] > 0 && motorsOn[i] &&
-                    (modules[i].readHallEffectSensor() == true
-                    )) { // only check sensors where the module is still moving
+                    (modules[i].readHallEffectSensor() ==
+                     true)) { // only check sensors where the module is still moving
                     if (! resetLatches[i]) {
                         // UNCOMMENTING THIS WILL PROBBALY MAKE THE MOTORS INACCURATE, DUE
                         // TO TIME TAKEN TO PRINT
