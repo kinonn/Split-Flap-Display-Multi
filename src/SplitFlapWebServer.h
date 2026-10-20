@@ -103,7 +103,8 @@ class SplitFlapWebServer {
 
     bool rebootRequired;
     bool attemptReconnect;
-    unsigned long lastCheckWifiTime;
+    unsigned long lastCheckWifiTime = 0;
+    unsigned long lastWifiReconnectAttempt = 0;
     int wifiCheckInterval;
     PendingActions pendingActions_;
     AsyncWebServer server; // Declare server as a class member

@@ -157,19 +157,17 @@ void setup() {
         Serial.println("[boot] services started in access point mode");
         Serial.flush();
 
-        // DIAGNOSTIC: ESP-NOW init commented out to isolate AP visibility issue.
-        // if (useWiredLink()) {
-        //     if (getSplitFlapWired()->init()) {
-        //         Serial.println("[boot] wired link initialized successfully");
-        //     } else {
-        //         Serial.println("[boot] wired link initialization failed");
-        //     }
-        // } else if (getSplitFlapEspNow()->init()) {
-        //     Serial.println("[boot] esp-now initialized successfully");
-        // } else {
-        //     Serial.println("[boot] esp-now initialization failed");
-        // }
-        Serial.println("[boot] link init SKIPPED (diagnostic)");
+        if (useWiredLink()) {
+            if (getSplitFlapWired()->init()) {
+                Serial.println("[boot] wired link initialized successfully");
+            } else {
+                Serial.println("[boot] wired link initialization failed");
+            }
+        } else if (getSplitFlapEspNow()->init()) {
+            Serial.println("[boot] esp-now initialized successfully");
+        } else {
+            Serial.println("[boot] esp-now initialization failed");
+        }
         Serial.flush();
         display.homeToString("");
         Serial.println("[boot] display homed");
@@ -191,19 +189,17 @@ void setup() {
         Serial.println("[boot] network services started");
         Serial.flush();
 
-        // DIAGNOSTIC: ESP-NOW init commented out to isolate AP visibility issue.
-        // if (useWiredLink()) {
-        //     if (getSplitFlapWired()->init()) {
-        //         Serial.println("[boot] wired link initialized successfully");
-        //     } else {
-        //         Serial.println("[boot] wired link initialization failed");
-        //     }
-        // } else if (getSplitFlapEspNow()->init()) {
-        //     Serial.println("[boot] esp-now initialized successfully");
-        // } else {
-        //     Serial.println("[boot] esp-now initialization failed");
-        // }
-        Serial.println("[boot] link init SKIPPED (diagnostic)");
+        if (useWiredLink()) {
+            if (getSplitFlapWired()->init()) {
+                Serial.println("[boot] wired link initialized successfully");
+            } else {
+                Serial.println("[boot] wired link initialization failed");
+            }
+        } else if (getSplitFlapEspNow()->init()) {
+            Serial.println("[boot] esp-now initialized successfully");
+        } else {
+            Serial.println("[boot] esp-now initialization failed");
+        }
         Serial.flush();
         splitflapMqtt.setDisplay(&display);
         splitflapMqtt.setEspNow(getSplitFlapEspNow());
