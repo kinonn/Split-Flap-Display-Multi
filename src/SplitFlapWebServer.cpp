@@ -156,14 +156,15 @@ void ensureWifiEventHandler() {
             // Our own inter-attempt disconnect() fires an event with an empty
             // SSID — log it but don't let it overwrite the real failure reason.
             if (len == 0) {
-                Serial.printf("[wifi] event: disconnected (local reset) reason=%u (%s)\n", reason, wifiDiscReasonName(reason));
+                Serial.printf(
+                    "[wifi] event: disconnected (local reset) reason=%u (%s)\n", reason, wifiDiscReasonName(reason)
+                );
                 return;
             }
             s_lastWifiDiscReason = reason;
             s_haveWifiDiscReason = true;
             Serial.printf(
-                "[wifi] event: disconnected ssid='%s' reason=%u (%s)\n", ssidBuf, reason,
-                wifiDiscReasonName(reason)
+                "[wifi] event: disconnected ssid='%s' reason=%u (%s)\n", ssidBuf, reason, wifiDiscReasonName(reason)
             );
         }
     });
@@ -206,12 +207,23 @@ int findTargetAp(const char *ssid, uint8_t *bssidOut, int *rssiOut, int *authOut
             *authOut = bestAuth;
         }
         Serial.printf(
-            "[wifi] target '%s': ch=%d rssi=%d auth=%d/%s bssid=%02x:%02x:%02x:%02x:%02x:%02x\n", ssid,
-            bestChannel, bestRssi, bestAuth, wifiAuthModeName(bestAuth), bssidOut[0], bssidOut[1],
-            bssidOut[2], bssidOut[3], bssidOut[4], bssidOut[5]
+            "[wifi] target '%s': ch=%d rssi=%d auth=%d/%s bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
+            ssid,
+            bestChannel,
+            bestRssi,
+            bestAuth,
+            wifiAuthModeName(bestAuth),
+            bssidOut[0],
+            bssidOut[1],
+            bssidOut[2],
+            bssidOut[3],
+            bssidOut[4],
+            bssidOut[5]
         );
         if (bestAuth == 7 || bestAuth == 6) {
-            Serial.println("[wifi] NOTE: AP is WPA3/mixed mode - if auth keeps failing, set the router to WPA2-PSK (AES) only.");
+            Serial.println(
+                "[wifi] NOTE: AP is WPA3/mixed mode - if auth keeps failing, set the router to WPA2-PSK (AES) only."
+            );
         }
     } else {
         Serial.printf("[wifi] target '%s' NOT in scan (hidden? 5GHz-only? typo? far?)\n", ssid);
@@ -342,8 +354,11 @@ bool SplitFlapWebServer::connectToWifi() {
     }
     // Never log the password itself — length only.
     Serial.printf(
-        "[wifi] credentials: ssid='%s' len=%d passLen=%d%s\n", ssidStr.c_str(), (int) ssidStr.length(),
-        (int) passStr.length(), String(WIFI_SSID).isEmpty() ? "" : " (compile-time override)"
+        "[wifi] credentials: ssid='%s' len=%d passLen=%d%s\n",
+        ssidStr.c_str(),
+        (int) ssidStr.length(),
+        (int) passStr.length(),
+        String(WIFI_SSID).isEmpty() ? "" : " (compile-time override)"
     );
     String trimmed = ssidStr;
     trimmed.trim();
@@ -414,8 +429,11 @@ bool SplitFlapWebServer::connectToWifi() {
         }
         if (pinned) {
             Serial.printf(
-                "[wifi] attempt %d/%d: begin ch=%d rssi=%d (pinned)...\n", attempt, kMaxAttempts,
-                targetChannel, targetRssi
+                "[wifi] attempt %d/%d: begin ch=%d rssi=%d (pinned)...\n",
+                attempt,
+                kMaxAttempts,
+                targetChannel,
+                targetRssi
             );
             WiFi.begin(ssidStr.c_str(), passStr.c_str(), targetChannel, targetBssid);
         } else {
@@ -432,8 +450,7 @@ bool SplitFlapWebServer::connectToWifi() {
         // live disconnect-event reason is trustworthy, and only AUTH_FAIL /
         // NO_AP_FOUND are definitive enough to cut an attempt short.
         while (WiFi.status() != WL_CONNECTED) {
-            if (s_haveWifiDiscReason &&
-                (s_lastWifiDiscReason == 202 || s_lastWifiDiscReason == 201)) {
+            if (s_haveWifiDiscReason && (s_lastWifiDiscReason == 202 || s_lastWifiDiscReason == 201)) {
                 Serial.println();
                 break;
             }
@@ -456,8 +473,10 @@ bool SplitFlapWebServer::connectToWifi() {
             WiFi.setAutoReconnect(true);
             WiFi.setSleep(false);
             Serial.printf(
-                "\n[wifi] connected! ip=%s rssi=%d ch=%d\n", WiFi.localIP().toString().c_str(),
-                WiFi.RSSI(), WiFi.channel()
+                "\n[wifi] connected! ip=%s rssi=%d ch=%d\n",
+                WiFi.localIP().toString().c_str(),
+                WiFi.RSSI(),
+                WiFi.channel()
             );
             return true;
         }
@@ -469,23 +488,24 @@ bool SplitFlapWebServer::connectToWifi() {
         Serial.printf(")%s\n", attempt < kMaxAttempts ? " Retrying..." : "");
         // Definitive failures: retrying the same credentials cannot succeed.
         if (s_haveWifiDiscReason && s_lastWifiDiscReason == 202) {
-            Serial.println("[wifi] AUTH_FAIL: password rejected. Fix via the SFD AP portal settings page, "
-                           "then reboot. Aborting remaining attempts.");
+            Serial.println(
+                "[wifi] AUTH_FAIL: password rejected. Fix via the SFD AP portal settings page, " "then reboot. Aborting remaining attempts."
+            );
             WiFi.disconnect(false, true);
             return false;
         }
         if (s_haveWifiDiscReason && s_lastWifiDiscReason == 201) {
-            Serial.println("[wifi] NO_AP_FOUND: SSID vanished after scan - check 2.4GHz band / hidden SSID. "
-                           "Aborting remaining attempts.");
+            Serial.println(
+                "[wifi] NO_AP_FOUND: SSID vanished after scan - check 2.4GHz band / hidden SSID. " "Aborting remaining attempts."
+            );
             WiFi.disconnect(false, true);
             return false;
         }
         if (s_haveWifiDiscReason && s_lastWifiDiscReason == 2) {
-            Serial.println("[wifi] hint: AUTH_EXPIRE - AP dropped auth. Re-enter the password via the SFD AP "
-                           "portal to rule out a typo; if the AP is WPA2/WPA3 mixed (see auth= above), set it "
-                           "to WPA2-PSK/AES only.");
-        } else if (
-            s_haveWifiDiscReason && (s_lastWifiDiscReason == 15 || s_lastWifiDiscReason == 204)) {
+            Serial.println(
+                "[wifi] hint: AUTH_EXPIRE - AP dropped auth. Re-enter the password via the SFD AP " "portal to rule out a typo; if the AP is WPA2/WPA3 mixed (see auth= above), set it " "to WPA2-PSK/AES only."
+            );
+        } else if (s_haveWifiDiscReason && (s_lastWifiDiscReason == 15 || s_lastWifiDiscReason == 204)) {
             Serial.println("[wifi] hint: handshake timeout - wrong password or WPA2/WPA3/PMF mismatch.");
         } else if (s_haveWifiDiscReason && s_lastWifiDiscReason == 200) {
             Serial.println("[wifi] hint: BEACON_TIMEOUT - weak signal or interference, move closer.");
@@ -497,8 +517,9 @@ bool SplitFlapWebServer::connectToWifi() {
     }
 
     Serial.println("[wifi] all attempts exhausted");
-    Serial.println("[wifi] isolate: phone 2.4GHz hotspot with simple SSID/pass. Hotspot OK => router config "
-                   "(WPA mode/password); hotspot fails too => board power/RF issue.");
+    Serial.println(
+        "[wifi] isolate: phone 2.4GHz hotspot with simple SSID/pass. Hotspot OK => router config " "(WPA mode/password); hotspot fails too => board power/RF issue."
+    );
     return false;
 }
 
