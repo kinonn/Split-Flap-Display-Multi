@@ -11,7 +11,7 @@
 
 bool isMultiDisplayMasterEnabled();
 
-#define AP_SSID "SFD"
+#define AP_SSID "Split Flap Display"
 
 #ifndef AP_CHANNEL
 #define AP_CHANNEL 6
@@ -489,7 +489,8 @@ bool SplitFlapWebServer::connectToWifi() {
         // Definitive failures: retrying the same credentials cannot succeed.
         if (s_haveWifiDiscReason && s_lastWifiDiscReason == 202) {
             Serial.println(
-                "[wifi] AUTH_FAIL: password rejected. Fix via the SFD AP portal settings page, " "then reboot. Aborting remaining attempts."
+                "[wifi] AUTH_FAIL: password rejected. Fix via the " AP_SSID
+                " AP portal settings page, " "then reboot. Aborting remaining attempts."
             );
             WiFi.disconnect(false, true);
             return false;
@@ -503,7 +504,8 @@ bool SplitFlapWebServer::connectToWifi() {
         }
         if (s_haveWifiDiscReason && s_lastWifiDiscReason == 2) {
             Serial.println(
-                "[wifi] hint: AUTH_EXPIRE - AP dropped auth. Re-enter the password via the SFD AP " "portal to rule out a typo; if the AP is WPA2/WPA3 mixed (see auth= above), set it " "to WPA2-PSK/AES only."
+                "[wifi] hint: AUTH_EXPIRE - AP dropped auth. Re-enter the password via the " AP_SSID
+                " AP portal to rule out a typo; if the AP is WPA2/WPA3 mixed (see auth= above), set it " "to WPA2-PSK/AES only."
             );
         } else if (s_haveWifiDiscReason && (s_lastWifiDiscReason == 15 || s_lastWifiDiscReason == 204)) {
             Serial.println("[wifi] hint: handshake timeout - wrong password or WPA2/WPA3/PMF mismatch.");
