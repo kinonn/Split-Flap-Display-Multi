@@ -1,0 +1,14 @@
+# calib-auto: run data is machine-local, never committed.
+runs/
+
+# Derived training state (glyph caches, rebuildable models) regenerates
+# from golden/ via the /train page or `python -m calib_auto.glyphs` /
+# `python -m calib_auto.train_cnn`. The shipped artifact lives in
+# models/ and IS committed.
+training/
+
+# venv / caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

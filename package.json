@@ -12,7 +12,9 @@
         "pio:filesystem": "pio run -t uploadfs",
         "pio:monitor": "pio device monitor",
         "test": "vitest run",
-        "test:watch": "vitest"
+        "test:watch": "vitest",
+        "lint:py": "cd tools/calib-auto && uv run ruff check",
+        "lint:py:fix": "cd tools/calib-auto && uv run ruff check --fix"
     },
     "devDependencies": {
         "@tailwindcss/vite": "^4.0.17",

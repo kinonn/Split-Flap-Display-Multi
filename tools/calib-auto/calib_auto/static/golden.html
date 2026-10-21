@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calib Auto — Golden set</title>
+<style>
+  :root { --bg:#14161a; --card:#1d2026; --card2:#23272e; --line:#2e333b;
+          --fg:#d8dce2; --dim:#8a919c; --accent:#4ea1ff; --good:#4ec98a;
+          --warn:#e0b04c; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1280px; margin:0 auto; padding:20px 18px 60px; }
+  h1 { font-size:19px; margin:0 0 2px; } h1 a { color:var(--dim); text-decoration:none; font-size:13px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
+  .cols { display:grid; grid-template-columns: 1fr 380px; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  input, select { width:100%; background:var(--card2); color:var(--fg); border:1px solid var(--line);
+                  border-radius:6px; padding:6px 8px; font:inherit; }
+  input.big { font:1.75rem/1.3 ui-monospace,Consolas,monospace; letter-spacing:3px;
+              width:80%; display:block; margin:0 auto; text-align:center;
+              padding:8px 10px; }
+  button { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f4e7a; border-color:#2f6ea8; }
+  button.danger { background:#5a2626; border-color:#7a3333; }
+  button.small { padding:3px 8px; font-size:12px; }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .msg { font-size:13px; color:var(--warn); margin-top:8px; min-height:18px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:4px 8px 4px 0; }
+  td { padding:4px 8px 4px 0; border-top:1px solid var(--line); }
+  tr.sel td { background:#1f2a36; }
+  #photo { width:100%; border-radius:8px; border:1px solid var(--line); background:#000; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center;
+           width:90%; margin:8px auto 0; }
+  .chip { width:50px; height:84px; display:flex; align-items:center; justify-content:center;
+          background:var(--card2); border:1px solid var(--line); border-radius:6px;
+          font:48px ui-monospace,Consolas,monospace; }
+  .chip.space { color:var(--dim); background:#191c21; }
+  .chip.missing { border-style:dashed; color:var(--dim); }
+  .chip.changed { border-color:#2f6e4a; }
+  .chipmeta { font-size:12px; color:var(--dim); margin-top:6px; display:flex; justify-content:space-between;
+              width:90%; margin-left:auto; margin-right:auto; }
+  .list { max-height:420px; overflow:auto; }
+  .entry { display:flex; justify-content:space-between; gap:8px; padding:4px 6px; border-radius:4px;
+           cursor:pointer; font:12px ui-monospace,Consolas,monospace; }
+  .entry:hover { background:var(--card2); }
+  .entry.sel { background:#1f2a36; }
+  .st { font-size:11px; }
+  .st.verified { color:var(--good); } .st.pending { color:var(--warn); }
+  .ref { font:12px ui-monospace,Consolas,monospace; color:var(--dim); margin-top:4px; }
+  .ref b { color:var(--fg); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Golden set <a href="/">← back</a></h1>
+  <div class="meta" style="color:var(--dim);font-size:13px">
+    Labeled photos with human-verified content — the ground truth for CNN
+    training and VLM benchmarking. Only <b>verified</b> entries are used;
+    saving an entry marks it verified. Tracked by git.</div>
+
+  <div class="cols">
+    <div>
+      <div class="card" id="editorCard" style="display:none">
+        <h2 style="margin-top:0" id="entryinfo"></h2>
+        <img id="photo" alt="entry photo">
+        <div class="chips" id="chips"></div>
+        <div class="chipmeta"><span id="hint">edit the content below — spaces are real blank flaps</span>
+          <span id="lenbadge"></span></div>
+        <label>Content</label>
+        <input id="content" class="big" spellcheck="false" autocomplete="off">
+        <div class="ref" id="refwant"></div>
+        <div class="ref" id="refread"></div>
+        <div class="btns">
+          <button class="primary" onclick="saveNext()">Save &amp; next (Enter)</button>
+          <button onclick="saveStay()">Save</button>
+          <button onclick="nav(-1)">← Prev</button>
+          <button onclick="nav(1)">Next →</button>
+          <button onclick="nextPending()">Next pending</button>
+          <button onclick="markPending()">Mark pending</button>
+          <button class="danger" onclick="removeImage()">Remove image</button>
+        </div>
+        <div class="msg" id="editmsg"></div>
+      </div>
+      <div class="card" id="noEditor">
+        <div class="meta">Pick a set on the right (or import one) to start curating.</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Sets</h2>
+        <table><thead><tr><th>name</th><th>verified</th><th></th></tr></thead>
+          <tbody id="sets"></tbody></table>
+        <div class="msg" id="setsmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Import a run</h2>
+        <div class="meta">Import from an old tool's run/set folder
+          (labels.jsonl, baseline.jsonl, reads.jsonl or report.json).
+          Images are recompressed for a sane git size.</div>
+        <label>Source folder</label><input id="src" placeholder="C:\...\baselines\run-011">
+        <label>Set name (blank = folder name)</label><input id="newname" placeholder="shoot-01">
+        <label>Image format</label>
+        <select id="fmt">
+          <option value="auto">auto — PNG, JPEG fallback over budget</option>
+          <option value="png">png</option><option value="jpeg">jpeg q92</option>
+          <option value="keep">keep — byte-identical copies</option>
+        </select>
+        <div class="btns"><button onclick="importSet()">Import</button></div>
+        <div class="msg" id="importmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Entries <span class="meta" id="filter"></span></h2>
+        <select id="filterSel" onchange="renderList()">
+          <option value="all">all</option><option value="pending">pending</option>
+          <option value="verified">verified</option>
+        </select>
+        <div class="list" id="list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+
+let setName = "", entries = [], index = -1, prefill = "";
+
+async function loadSets() {
+  try {
+    const g = await api("/api/golden");
+    const sets = g.sets || [];
+    $("sets").innerHTML = sets.map(s =>
+      `<tr class="${s.name === setName ? "sel" : ""}">
+         <td><a style="color:var(--accent);cursor:pointer" onclick="openSet('${esc(s.name)}')">${esc(s.name)}</a>
+             <div style="font-size:11px;color:var(--dim)">${esc(s.meta.created || "")} · ${esc(s.meta.image_format || "?")}</div></td>
+         <td>${s.stats.verified}/${s.stats.total}</td>
+         <td><button class="small" onclick="discardSet('${esc(s.name)}')">Discard</button></td>
+       </tr>`).join("") || `<tr><td colspan="3" style="color:var(--dim)">no sets yet</td></tr>`;
+    $("setsmsg").textContent = "";
+  } catch (e) { $("setsmsg").textContent = "load failed: " + e.message; }
+}
+async function importSet() {
+  $("importmsg").textContent = "importing… (recompressing images)";
+  try {
+    const r = await api("/api/golden/import", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({source_dir: $("src").value.trim(), name: $("newname").value.trim() || null,
+                            image_format: $("fmt").value})});
+    $("importmsg").textContent = `imported ${r.count} entries (${r.image_format}) — ` +
+      `${r.stats.verified} verified, ${r.stats.pending} pending` +
+      (r.skipped.length ? `, ${r.skipped.length} skipped` : "");
+    await loadSets(); await openSet(r.name);
+  } catch (e) { $("importmsg").textContent = "import failed: " + e.message; }
+}
+async function discardSet(name) {
+  if (!confirm(`Discard set "${name}" (folder, images, entries)?`)) return;
+  try { await api("/api/golden/" + encodeURIComponent(name), {method:"DELETE"});
+        if (name === setName) { setName = ""; index = -1; showEditor(); }
+        await loadSets(); }
+  catch (e) { $("setsmsg").textContent = "discard failed: " + e.message; }
+}
+async function openSet(name) {
+  try {
+    const info = await api("/api/golden/" + encodeURIComponent(name));
+    setName = name; entries = info.entries; index = entries.length ? 0 : -1;
+    await loadSets(); renderList(); showEditor(); renderEntry();
+  } catch (e) { $("setsmsg").textContent = "open failed: " + e.message; }
+}
+function renderList() {
+  const filter = $("filterSel").value;
+  const shown = entries.map((e, i) => ({e, i}))
+    .filter(({e}) => filter === "all" || e.status === filter);
+  $("filter").textContent = `(${shown.length}/${entries.length})`;
+  $("list").innerHTML = shown.map(({e, i}) =>
+    `<div class="entry ${i === index ? "sel" : ""}" onclick="jump(${i})">
+       <span>${esc(e.photo)}</span><span class="st ${e.status}">${e.status === "verified" ? "✓" : "…"}</span>
+     </div>`).join("") || `<div style="color:var(--dim);font-size:12px">no entries</div>`;
+}
+function jump(i) { index = i; renderEntry(); renderList(); }
+
+function showEditor() {
+  const has = index >= 0 && index < entries.length;
+  $("editorCard").style.display = has ? "block" : "none";
+  $("noEditor").style.display = has ? "none" : "block";
+}
+function renderEntry() {
+  showEditor();
+  if (!(index >= 0 && index < entries.length)) return;
+  const e = entries[index];
+  prefill = e.content || "";
+  $("entryinfo").innerHTML = `${esc(e.photo)} <span class="st ${e.status}">${e.status}</span>`;
+  $("photo").src = `/api/golden/${encodeURIComponent(setName)}/photo/${encodeURIComponent(e.photo)}?t=${Date.now()}`;
+  $("content").value = prefill;
+  $("refwant").innerHTML = e.want ? `commanded: <b>${esc(e.want)}</b>` : "";
+  $("refread").innerHTML = e.prior_read ? `prior read: <b>${esc(e.prior_read)}</b>` : "";
+  $("editmsg").textContent = "";
+  renderChips();
+}
+function renderChips() {
+  const val = $("content").value;
+  const n = Math.max(val.length, 12);
+  let html = "";
+  for (let i = 0; i < n; i++) {
+    const ch = val[i];
+    const cls = ch === undefined ? "missing" : ch === " " ? "space" : (ch !== prefill[i] ? "changed" : "");
+    html += `<span class="chip ${cls}">${ch === undefined ? "·" : ch === " " ? "␣" : esc(ch)}</span>`;
+  }
+  $("chips").innerHTML = html;
+  $("lenbadge").textContent = `${val.length} / 12`;
+  $("lenbadge").style.color = val.length === 12 ? "var(--good)" : "var(--warn)";
+}
+$("content").addEventListener("input", () => {
+  // The drum charset is uppercase-only: fold typed characters up as they
+  // are entered (preserving caret position) so a lowercase slip can never
+  // be saved as a phantom class.
+  const el = $("content");
+  const upper = el.value.toUpperCase();
+  if (upper !== el.value) {
+    const pos = el.selectionStart || 0;
+    el.value = upper;
+    try { el.setSelectionRange(pos, pos); } catch (e) {}
+  }
+  renderChips();
+});
+$("content").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); saveNext(); }
+  if (ev.key === "Escape") { $("content").value = prefill; renderChips(); }
+});
+
+async function save(content) {
+  const e = entries[index];
+  const r = await api(`/api/golden/${encodeURIComponent(setName)}/entry`,
+    {method:"POST", headers:{"Content-Type":"application/json"},
+     body: JSON.stringify({photo: e.photo, content})});
+  entries[index] = r.entry;
+  renderList();
+}
+async function saveNext() {
+  try { await save($("content").value);
+        if (index + 1 < entries.length) { index += 1; renderEntry(); renderList(); }
+        else { $("editmsg").textContent = "saved — last entry"; renderList(); } }
+  catch (e) { $("editmsg").textContent = "save failed: " + e.message; }
+}
+async function saveStay() {
+  try { await save($("content").value); $("editmsg").textContent = "saved"; }
+  catch (e) { $("editmsg").textContent = "save failed: " + e.message; }
+}
+function nav(d) {
+  const ni = index + d;
+  if (ni >= 0 && ni < entries.length) { index = ni; renderEntry(); renderList(); }
+}
+function nextPending() {
+  for (let i = index + 1; i < entries.length; i++)
+    if (entries[i].status !== "verified") { index = i; renderEntry(); renderList(); return; }
+  for (let i = 0; i <= index; i++)
+    if (entries[i].status !== "verified") { index = i; renderEntry(); renderList(); return; }
+  $("editmsg").textContent = "no pending entries left";
+}
+async function markPending() {
+  try {
+    const e = entries[index];
+    const r = await api(`/api/golden/${encodeURIComponent(setName)}/entry`,
+      {method:"POST", headers:{"Content-Type":"application/json"},
+       body: JSON.stringify({photo: e.photo, status: "pending"})});
+    entries[index] = r.entry; renderEntry(); renderList();
+  } catch (e) { $("editmsg").textContent = "failed: " + e.message; }
+}
+async function removeImage() {
+  if (!confirm("Remove this image from the set?")) return;
+  try {
+    await api(`/api/golden/${encodeURIComponent(setName)}/remove-image`,
+      {method:"POST", headers:{"Content-Type":"application/json"},
+       body: JSON.stringify({photo: entries[index].photo})});
+    entries.splice(index, 1);
+    if (index >= entries.length) index = entries.length - 1;
+    renderEntry(); renderList();
+  } catch (e) { $("editmsg").textContent = "failed: " + e.message; }
+}
+loadSets();
+</script>
+</body>
+</html>

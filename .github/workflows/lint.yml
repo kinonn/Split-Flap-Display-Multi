@@ -1,0 +1,28 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  ruff:
+    name: Ruff (tools/calib-auto)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        # Same pinned commit as format-check.yml (v3 tag SHA verified
+        # 2026-09-04); keep the two workflows on the same checkout pin.
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26
+
+      - name: Install ruff
+        # Kept in step with the dev dependency in
+        # tools/calib-auto/pyproject.toml so CI and a local `uv run ruff`
+        # agree on the rule set. The rule selection itself lives in that
+        # pyproject.toml ([tool.ruff]), not on the command line.
+        run: python3 -m pip install --quiet 'ruff>=0.16.8,<0.17'
+
+      - name: Ruff check
+        run: ruff check tools/calib-auto

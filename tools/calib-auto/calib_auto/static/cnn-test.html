@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calib Auto — Test CNN</title>
+<style>
+  :root { --bg:#14161a; --card:#1d2026; --card2:#23272e; --line:#2e333b;
+          --fg:#d8dce2; --dim:#8a919c; --accent:#4ea1ff; --good:#4ec98a;
+          --warn:#e0b04c; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1280px; margin:0 auto; padding:20px 18px 60px; }
+  h1 { font-size:19px; margin:0 0 2px; } h1 a { color:var(--dim); text-decoration:none; font-size:13px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
+  .cols { display:grid; grid-template-columns: 400px 1fr; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  input, select { width:100%; background:var(--card2); color:var(--fg); border:1px solid var(--line);
+                  border-radius:6px; padding:6px 8px; font:inherit; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  button { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f4e7a; border-color:#2f6ea8; }
+  button.danger { background:#5a2626; border-color:#7a3333; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .msg { font-size:13px; color:var(--warn); margin-top:8px; min-height:18px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:4px 8px 4px 0; position:sticky; top:0; background:var(--card); }
+  td { padding:3px 8px 3px 0; border-top:1px solid var(--line); font-family:ui-monospace,Consolas,monospace; }
+  td.soft { font-family:inherit; }
+  .bad { color:var(--bad); } .good { color:var(--good); } .warnc { color:var(--warn); }
+  #log { height:150px; overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace;
+         background:var(--card2); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .ev { white-space:pre-wrap; } .ev .t { color:var(--dim); margin-right:6px; }
+  .k-error { color:var(--bad); } .k-done { color:var(--good); }
+  #rows { max-height:520px; overflow:auto; }
+  .flag { display:inline-block; font-size:10px; padding:0 5px; border-radius:99px; margin-right:3px;
+          background:var(--card2); border:1px solid var(--line); color:var(--warn); }
+  .meta { font-size:12px; color:var(--dim); } .meta b { color:var(--fg); }
+  .summary { display:flex; gap:22px; flex-wrap:wrap; }
+  .summary div b { font-size:18px; display:block; }
+  .rchips { display:flex; flex-wrap:wrap; gap:3px; margin-top:8px; }
+  .rchip { min-width:30px; height:36px; padding:0 4px; display:flex; align-items:center; justify-content:center;
+           background:var(--card2); border:1px solid var(--line); border-radius:4px;
+           font:20px ui-monospace,Consolas,monospace; }
+  .rchip.ok { border-color:#2f6e4a; }
+  .rchip.bad { border-color:#7a3333; color:var(--bad); }
+  .rchip.space { color:var(--dim); }
+  .ref { font:13px ui-monospace,Consolas,monospace; color:var(--dim); margin-top:6px; }
+  .ref b { color:var(--fg); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Test CNN <a href="/">← back</a></h1>
+  <div class="meta">Read golden photos with the local model and score it against the
+    curated content — one photo at a time, or a full benchmark run.
+    The honest generalization number stays the photo-split validation on the
+    <a style="color:var(--accent)" href="/train">Train page</a>; testing on a set
+    the model trained on is in-sample and flagged as such.</div>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Model</h2>
+        <div id="modelinfo" class="meta">loading…</div>
+        <div class="row" style="margin-top:8px">
+          <div><label>Backend</label>
+            <select id="backend">
+              <option value="auto">auto — CNN if trained</option>
+              <option value="cnn">cnn</option>
+              <option value="bank">bank — template fallback</option>
+            </select></div>
+        </div>
+        <div class="row">
+          <div><label>Low-conf floor</label><input id="min_conf" type="number" step="0.05" min="0" max="1"></div>
+          <div><label>Margin floor</label><input id="min_margin" type="number" step="0.05" min="0" max="1"></div>
+        </div>
+        <label style="display:flex;gap:8px;align-items:center;margin-top:6px">
+          <input type="checkbox" id="blank_gate" style="width:auto">
+          <span>OpenCV blank gate (skip model on empty cells)</span></label>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Dataset</h2>
+        <label>Golden set</label><select id="set" onchange="loadPhotos()"></select>
+        <div class="meta" id="setinfo" style="margin-top:6px"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Test a read</h2>
+        <label>Photo</label><select id="photo"></select>
+        <div class="btns"><button class="primary" id="readBtn" onclick="testRead()">Test read</button></div>
+        <div id="testread"></div>
+        <div class="msg" id="readmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Benchmark</h2>
+        <div class="meta">Read every verified entry of the selected set and score
+          the model against the curated content.</div>
+        <label>Limit rows (blank = all)</label><input id="limit" placeholder="e.g. 20">
+        <div class="btns">
+          <button class="primary" id="startBtn" onclick="startRun()">Start benchmark</button>
+          <button class="danger" id="abortBtn" onclick="abortRun()" disabled>Abort</button>
+        </div>
+        <div class="msg" id="runmsg"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Summary <span class="meta" id="runstate"></span></h2>
+        <div class="summary" id="summary"><div class="meta">no run yet</div></div>
+        <div class="meta" id="insample" style="margin-top:6px"></div>
+        <div class="meta" id="pipeline" style="margin-top:6px"></div>
+        <div id="log" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Rows <span class="meta" id="rowcount"></span></h2>
+        <div id="rows"><table><thead><tr>
+          <th>#</th><th>photo</th><th>golden</th><th>read</th><th>mm</th><th>base</th><th>flags</th>
+        </tr></thead><tbody id="rowbody"></tbody></table></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Past runs</h2>
+        <table><thead><tr><th>run</th><th>set</th><th>model</th><th>rows</th><th>model avg</th><th>baseline avg</th><th>errors</th><th></th></tr></thead>
+          <tbody id="past"></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function showStr(s) { return s == null ? "" : String(s).replace(/ /g, "␣"); }
+let lastEvent = 0, lastRunSeq = -1, rowsData = [];
+
+async function loadModels() {
+  try {
+    const m = await api("/api/models");
+    const allSets = (m.caches || []).map(c => c.set);
+    const parts = [];
+    if (m.cnn) {
+      const meta = m.cnn.meta || {};
+      const trainedSets = meta.sets || [];
+      const subset = trainedSets.length && allSets.length && trainedSets.length < allSets.length;
+      parts.push(`<span class="badge" style="display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;background:var(--card2);border:1px solid var(--line);margin-right:6px">CNN</span>` +
+        `${meta.cells || "?"} cells, ${(meta.classes||[]).length} classes` +
+        (meta.metrics ? `, photo-split val ${(meta.metrics.cnn_acc*100).toFixed(1)}%` : "") +
+        `<div class="meta">trained on: <b>${esc(trainedSets.join(", ") || "?")}</b>` +
+        (subset ? ` <span class="warnc">(subset of ${allSets.length} sets)</span>` : "") +
+        ` · sha ${m.cnn.sha256}</div>`);
+    } else parts.push(`<span class="badge">CNN</span> not trained — <a style="color:var(--accent)" href="/train">train it</a>`);
+    if (m.bank) parts.push(`<div class="meta">bank fallback: ${(m.bank.meta||{}).cells || "?"} cells` +
+      ((m.bank.meta||{}).sets ? `, trained on ${esc(m.bank.meta.sets.join(", "))}` : "") + `</div>`);
+    $("modelinfo").innerHTML = parts.join("<br>");
+  } catch (e) { $("modelinfo").textContent = "models: " + e.message; }
+}
+
+async function loadSets() {
+  try {
+    const g = await api("/api/golden");
+    const sets = g.sets || [];
+    $("set").innerHTML = sets.map(s =>
+      `<option value="${esc(s.name)}">${esc(s.name)} — verified ${s.stats.verified}/${s.stats.total}</option>`).join("")
+      || `<option value="">no golden sets yet</option>`;
+    await loadPhotos();
+  } catch (e) {}
+}
+async function loadPhotos() {
+  const name = $("set").value;
+  if (!name) { $("photo").innerHTML = ""; $("setinfo").textContent = ""; return; }
+  try {
+    const info = await api("/api/golden/" + encodeURIComponent(name));
+    $("photo").innerHTML = info.entries.map(e =>
+      `<option value="${esc(e.photo)}">${esc(e.photo)}${e.status !== "verified" ? " (pending)" : ""}</option>`).join("");
+    $("setinfo").innerHTML = `${info.stats.verified} verified, ${info.stats.pending} pending · ${esc(info.meta.image_format || "")}`;
+  } catch (e) { $("photo").innerHTML = ""; }
+}
+
+async function testRead() {
+  $("readmsg").textContent = "reading…";
+  $("testread").innerHTML = "";
+  try {
+    const r = await api("/api/cnn-test/read", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({set: $("set").value, photo: $("photo").value,
+                            backend: $("backend").value,
+                            min_conf: $("min_conf").value, min_margin: $("min_margin").value,
+                            blank_gate: $("blank_gate").checked})});
+    const chips = (r.modules || []).map((m, i) => {
+      const want = r.content[i];
+      const cls = m.char === want ? "ok" : "bad";
+      const ch = m.char === " " ? "␣" : esc(m.char);
+      return `<span class="rchip ${cls} ${m.char === " " ? "space" : ""}" ` +
+             `title="golden ${want === undefined ? "?" : JSON.stringify(want)} · conf ${m.confidence} · margin ${m.margin} · ${m.source}">${ch}</span>`;
+    }).join("");
+    const det = r.detected === false ? `<span class="bad">display not detected</span>` : "display detected";
+    $("testread").innerHTML =
+      `<div class="ref">golden: <b>${showStr(r.content)}</b></div>` +
+      `<div class="ref">read:   <b>${showStr(r.read)}</b>` +
+      (r.mismatches == null ? "" : r.mismatches === 0 ? ` <span class="good">✓ exact</span>` : ` <span class="bad">${r.mismatches} mismatch(es)</span>`) + `</div>` +
+      `<div class="rchips">${chips}</div>` +
+      `<div class="meta" style="margin-top:6px">${r.elapsed_s}s · ${det}` +
+      (r.low_conf ? ` · <span class="warnc">${r.low_conf} low-confidence</span>` : "") +
+      ` · model ${esc(r.model.backend)}:${esc((r.model.sha256 || "").slice(0, 8))}</div>` +
+      (r.warnings && r.warnings.length ? `<div class="msg">${esc(r.warnings.join("; "))}</div>` : "");
+    $("readmsg").textContent = "";
+  } catch (e) { $("readmsg").textContent = "failed: " + e.message; }
+}
+
+async function startRun() {
+  try {
+    const limit = $("limit").value.trim();
+    await api("/api/cnn-test/start", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({set: $("set").value, backend: $("backend").value,
+                            min_conf: $("min_conf").value, min_margin: $("min_margin").value,
+                            blank_gate: $("blank_gate").checked,
+                            limit: limit ? Number(limit) : null})});
+    lastEvent = 0; rowsData = []; $("log").innerHTML = ""; $("rowbody").innerHTML = "";
+    $("runmsg").textContent = "running…";
+  } catch (e) { $("runmsg").textContent = "start failed: " + e.message; }
+}
+async function abortRun() { await api("/api/cnn-test/abort", {method:"POST"}); }
+
+function renderSummary(rep) {
+  if (!rep || !rep.summary) return;
+  const s = rep.summary, model = s.vlm || {}, base = s.saw || {};
+  $("summary").innerHTML =
+    `<div><span class="meta">model avg mismatches</span><b class="${model.mean < base.mean ? "good" : ""}">${model.mean == null ? "—" : model.mean}</b></div>` +
+    `<div><span class="meta">baseline avg</span><b>${base.mean == null ? "—" : base.mean}</b></div>` +
+    `<div><span class="meta">rows exact</span><b>${model.exact == null ? "—" : model.exact + "/" + model.n}</b></div>` +
+    `<div><span class="meta">errors</span><b>${s.errors}</b></div>` +
+    `<div><span class="meta">elapsed</span><b>${rep.elapsed_s}s</b></div>`;
+  const ds = rep.dataset || {};
+  $("insample").innerHTML = ds.insample
+    ? `<span class="warnc">⚠ in-sample: this set was part of the model's training data — treat the numbers as a smoke test, not generalization.</span>`
+    : `out-of-sample: the model was not trained on this set.`;
+  const p = rep.pipeline; const text = p && p.text ? p.text : p;
+  $("pipeline").innerHTML = text ? "pipeline: <code>" + esc(text) + "</code>" : "";
+}
+function renderRows() {
+  $("rowcount").textContent = `(${rowsData.length})`;
+  $("rowbody").innerHTML = rowsData.map(r => {
+    const flags = (r.flags || []).map(f => `<span class="flag">${esc(f)}</span>`).join("");
+    const read = r.error ? `<span class="bad">${esc(r.error)}</span>` : showStr(r.read);
+    const mm = r.mm_vlm == null ? "" : (r.mm_vlm === 0 ? `<span class="good">0</span>` : `<span class="bad">${r.mm_vlm}</span>`);
+    return `<tr><td>${r.index + 1}</td><td class="soft">${esc(r.photo)}</td>` +
+      `<td>${showStr(r.want)}</td><td>${read}</td><td>${mm}</td><td>${r.mm_saw == null ? "" : r.mm_saw}</td>` +
+      `<td>${flags}</td></tr>`;
+  }).join("");
+}
+async function loadPast() {
+  try {
+    const r = await api("/api/cnn-test/runs");
+    $("past").innerHTML = (r.runs || []).map(x =>
+      `<tr><td>${esc(x.run)}</td><td class="soft">${esc(x.set || "?")}</td>` +
+      `<td class="soft">${esc(x.backend || "?")}:${esc((x.sha256 || "").slice(0, 8))}</td>` +
+      `<td>${x.scored_vlm == null ? "—" : x.scored_vlm}</td>` +
+      `<td>${x.vlm_avg == null ? "—" : x.vlm_avg}</td><td>${x.saw_avg == null ? "—" : x.saw_avg}</td>` +
+      `<td>${x.errors == null ? "" : x.errors}</td>` +
+      `<td class="soft">${x.insample ? '<span class="warnc">in-sample</span>' : ""}</td></tr>`).join("")
+      || `<tr><td colspan="8" style="color:var(--dim)">no runs yet</td></tr>`;
+  } catch (e) {}
+}
+
+async function poll() {
+  try {
+    const st = await api("/api/cnn-test/state");
+    $("runstate").textContent = `${st.status} ${st.done || 0}/${st.total || 0}`;
+    $("startBtn").disabled = ["running","aborting"].includes(st.status);
+    $("abortBtn").disabled = !["running","aborting"].includes(st.status);
+    if (st.run_seq !== lastRunSeq) { lastRunSeq = st.run_seq; lastEvent = 0; $("log").innerHTML = ""; }
+    const ev = await api(`/api/cnn-test/events?offset=${lastEvent}`);
+    for (const e of ev.events) {
+      const div = document.createElement("div");
+      div.className = "ev k-" + (e.kind || "log");
+      div.innerHTML = `<span class="t">${e.t || ""}</span>` + esc(e.text || "");
+      $("log").appendChild(div);
+    }
+    lastEvent = ev.offset + ev.events.length;
+    $("log").scrollTop = $("log").scrollHeight;
+    const rows = await api("/api/cnn-test/rows");
+    if (rows.rows.length !== rowsData.length) { rowsData = rows.rows; renderRows(); }
+    if (st.report && ["done","aborted","failed"].includes(st.status)) {
+      renderSummary(st.report); loadPast();
+    }
+  } catch (e) {}
+  setTimeout(poll, 1200);
+}
+async function init() {
+  const c = await api("/api/config").catch(() => ({}));
+  $("backend").value = c.classifier_backend || "auto";
+  $("min_conf").value = c.classifier_min_conf ?? 0.5;
+  $("min_margin").value = c.classifier_min_margin ?? 0.1;
+  $("blank_gate").checked = !!c.blank_gate;
+  await loadSets();
+  await loadModels();
+}
+init(); loadPast(); poll();
+</script>
+</body>
+</html>

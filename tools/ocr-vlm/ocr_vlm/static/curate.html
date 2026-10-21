@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Split-Flap Baseline Curation</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #141414; color: #eee;
+         margin: 0 auto; max-width: 1100px; padding: 16px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; }
+  .card { background: #1f1f1f; border-radius: 10px; padding: 14px; margin: 12px 0; }
+  label { display: block; margin: 8px 0 2px; font-size: .9rem; color: #bbb; }
+  input, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444;
+                  background: #111; color: #eee; box-sizing: border-box; }
+  input.mono { font-family: monospace; font-size: 1.7rem; letter-spacing: 4px;
+               padding: 12px 14px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button { padding: 9px 14px; border: 0; border-radius: 6px; margin: 6px 6px 0 0;
+           cursor: pointer; font-weight: 600; }
+  .go { background: #2e7d32; color: #fff; } .stop { background: #b3261e; color: #fff; }
+  .mid { background: #455a64; color: #fff; } .warnb { background: #8d6e63; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.small { padding: 3px 8px; font-size: .72rem; font-weight: 500; }
+  button.detached { margin-left: 24px; opacity: .85; }
+  .hint { color: #999; font-size: .85rem; }
+  a { color: #82b1ff; }
+  code { font-family: monospace; font-size: .95rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #2c2c2c; }
+  th { background: #263238; }
+  td.mono { font-family: monospace; }
+  .chipbar { display: flex; gap: 4px; width: 80%; margin: 8px auto 0; }
+  .chip { flex: 1 1 0; min-width: 0; padding: 4px 0; min-height: 79px;
+          border-radius: 5px; text-align: center; font-family: monospace;
+          font-size: 2rem; display: flex; align-items: center;
+          justify-content: center; background: #263238; }
+  .chip.changed { background: #1b5e20; }
+  .chip.space { color: #777; }
+  .chip.missing { background: #1a1a1a; outline: 1px dashed #444; }
+  .chipmeta { display: flex; justify-content: space-between; align-items: center;
+              gap: 10px; margin: 8px 0 4px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+           font-size: .8rem; margin-left: 8px; }
+  .badge.ok { background: #1b5e20; } .badge.bad { background: #8d6e63; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         margin-right: 6px; background: #8d6e63; }
+  .dot.verified { background: #2e7d32; }
+  #editor img { max-width: 100%; border-radius: 6px; border: 1px solid #444;
+                margin-top: 8px; }
+  .ref { font-family: monospace; background: #0d0d0d; border-radius: 6px;
+         padding: 6px 8px; margin: 4px 0; font-size: .9rem; }
+  .entryrow { cursor: pointer; } .entryrow:hover { background: #2a2a2a; }
+  .entryrow.current { background: #333c44; }
+  #entrylist { max-height: 300px; overflow-y: auto; border-radius: 6px; }
+  #msg { color: #ffcc80; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Split-Flap Baseline Curation
+  <span class="hint">(human-verified ground truth for the OCR benchmark)</span></h1>
+<p class="hint">The benchmark's <code>reads.jsonl</code> records what the display was
+   <i>commanded</i> to show. When the display is what needs calibrating, the photo can
+   differ from that command — so this tool curates <b>baseline sets</b>: copies of the
+   photos with the content <b>actually visible</b>, entered (and corrected) by you.
+   Entries start as <b>pending</b> (pre-filled with the previous run's read as a typing
+   aid) and become <b>verified</b> when you save them; the benchmark only runs on
+   verified entries by default. &nbsp; <a href="/">← back to the benchmark</a></p>
+
+<div class="card">
+  <h2>1. Create a set from a run</h2>
+  <div class="row">
+    <div><label>Source directory (calib-vlm run dir with report.json, or a reads.jsonl dir)</label>
+      <input id="source_dir" spellcheck="false" /></div>
+    <div><label>Set name (default: source folder name)</label>
+      <input id="set_name" spellcheck="false" placeholder="run-001" /></div>
+  </div>
+  <div>
+    <button class="mid" onclick="discoverRuns()">Discover runs</button>
+    <button class="go" onclick="createSet()">Create set</button>
+  </div>
+  <select id="run_list" onchange="pickRun()">
+    <option value="">— discovered runs —</option>
+  </select>
+  <p class="hint">Photos are copied into the set (originals untouched), so the set keeps
+     working even if the source run is cleaned up.</p>
+</div>
+
+<div class="card">
+  <h2>2. Baseline sets</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>set</th><th>verified</th><th>pending</th><th>created</th>
+        <th>source</th><th></th></tr></thead>
+      <tbody id="sets"></tbody>
+    </table>
+  </div>
+  <p class="hint" id="setsmsg"></p>
+</div>
+
+<div class="card" id="editor" style="display:none">
+  <h2>3. Curate <span id="setlabel"></span> <span class="hint" id="progress"></span></h2>
+  <p class="hint" id="entryinfo"></p>
+  <img id="photo" alt="baseline photo" />
+  <div class="chipbar" id="chips"></div>
+  <div class="chipmeta">
+    <span class="hint">character display — one cell per module, left → right;
+      ␣ = blank flap; dashed = not typed yet</span>
+    <span class="badge" id="lenbadge"></span>
+  </div>
+  <label>Actual content (type the characters exactly as shown; spaces are real positions)
+    <span class="hint">— Enter saves &amp; advances, Esc reverts</span></label>
+  <input id="content" class="mono" spellcheck="false" autocomplete="off" />
+  <label>Reference only — commanded frame (<code>want</code>) and the previous run's read
+         (<code>prior_read</code>); neither is ground truth</label>
+  <div class="ref" id="refwant"></div>
+  <div class="ref" id="refread"></div>
+  <div>
+    <button class="go" id="saveBtn" onclick="saveCurrent(true)">Save &amp; next</button>
+    <button class="mid" onclick="saveCurrent(false)">Save</button>
+    <button class="mid" onclick="nav(-1)">← Prev</button>
+    <button class="mid" onclick="nav(1)">Next →</button>
+    <button class="mid" onclick="nextPending()">Next pending</button>
+    <button class="warnb" id="pendingBtn" onclick="markPending()">Mark pending</button>
+    <button class="stop" onclick="removeImage()">Remove image</button>
+  </div>
+  <p class="hint" id="msg"></p>
+</div>
+
+<div class="card" id="listcard" style="display:none">
+  <h2>4. Entries</h2>
+  <label style="display:inline; font-size:.85rem">Show:</label>
+  <select id="filter" style="width:auto; display:inline-block" onchange="renderList()">
+    <option value="all">all</option>
+    <option value="pending" selected>pending only</option>
+    <option value="verified">verified only</option>
+  </select>
+  <div id="entrylist"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+const post = (path, payload) => api(path, {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify(payload)});
+
+let state = { sets: [], set: null, entries: [], index: 0, meta: {} };
+const showCh = (ch) => ch === " " ? "\u2423" : ch;
+
+async function loadSets() {
+  try {
+    const s = await api("/api/baselines");
+    state.sets = s.sets || [];
+    const tbody = $("sets");
+    tbody.innerHTML = "";
+    for (const set of state.sets) {
+      const tr = document.createElement("tr");
+      const created = (set.meta.created || "").replace("T", " ").replace("+00:00", "");
+      const src = (set.meta.source || "").split(/[\\/]/).slice(-2).join("/");
+      tr.innerHTML = `<td>${set.name}</td>
+        <td>${set.stats.verified} / ${set.stats.total}</td>
+        <td>${set.stats.pending}</td>
+        <td class="mono">${created}</td><td class="hint">${src}</td><td></td>`;
+      const openBtn = document.createElement("button");
+      openBtn.className = "mid"; openBtn.textContent = "Open";
+      openBtn.onclick = () => openSet(set.name);
+      const delBtn = document.createElement("button");
+      delBtn.className = "stop small detached"; delBtn.textContent = "Discard";
+      delBtn.onclick = () => discardSet(set.name);
+      tr.lastElementChild.append(openBtn, delBtn);
+      tbody.appendChild(tr);
+    }
+    $("setsmsg").textContent = state.sets.length
+      ? `${state.sets.length} set(s) under ${s.root}`
+      : `no baseline sets yet under ${s.root}`;
+  } catch (e) { $("setsmsg").textContent = "load failed: " + e.message; }
+}
+
+async function discoverRuns() {
+  try {
+    const s = await api("/api/dataset/discover?file=report.json");
+    const sel = $("run_list");
+    sel.innerHTML = '<option value="">— discovered runs —</option>';
+    for (const dir of s.dirs) {
+      const o = document.createElement("option");
+      o.value = dir; o.textContent = dir; sel.appendChild(o);
+    }
+    if (!s.dirs.length) $("setsmsg").textContent =
+      "no runs with report.json found under the sibling tools";
+  } catch (e) { $("setsmsg").textContent = "discover failed: " + e.message; }
+}
+function pickRun() {
+  const dir = $("run_list").value;
+  if (!dir) return;
+  $("source_dir").value = dir;
+  const base = dir.split(/[\\/]/).filter(Boolean).pop();
+  if (base && !$("set_name").value) $("set_name").value = base;
+}
+
+async function createSet() {
+  const source_dir = $("source_dir").value.trim();
+  if (!source_dir) { $("setsmsg").textContent = "set a source directory first"; return; }
+  try {
+    const res = await post("/api/baselines/create",
+      {source_dir, name: $("set_name").value.trim() || null});
+    const skipped = res.skipped?.length ? ` (skipped ${res.skipped.length} missing photos)` : "";
+    $("setsmsg").textContent =
+      `created ${res.name}: ${res.count} photos, all pending${skipped}`;
+    $("set_name").value = "";
+    await loadSets();
+    await openSet(res.name);
+  } catch (e) { $("setsmsg").textContent = "create failed: " + e.message; }
+}
+
+async function discardSet(name) {
+  if (!confirm(`Discard baseline set "${name}"?\n\nThis deletes its copied images and ALL curation (verified content).`)) return;
+  try {
+    await api("/api/baselines/" + encodeURIComponent(name), {method: "DELETE"});
+    if (state.set === name) { state.set = null; hideEditor(); }
+    await loadSets();
+  } catch (e) { $("setsmsg").textContent = "discard failed: " + e.message; }
+}
+
+function hideEditor() {
+  $("editor").style.display = "none";
+  $("listcard").style.display = "none";
+}
+
+async function openSet(name) {
+  try {
+    const info = await api("/api/baselines/" + encodeURIComponent(name));
+    state.set = name;
+    state.meta = info.meta || {};
+    state.entries = info.entries || [];
+    state.index = state.entries.findIndex((e) => e.status !== "verified");
+    if (state.index < 0) state.index = 0;
+    $("editor").style.display = "block";
+    $("listcard").style.display = "block";
+    $("setlabel").textContent = name;
+    renderEntry();
+    renderList();
+  } catch (e) { $("setsmsg").textContent = "open failed: " + e.message; }
+}
+
+function currentEntry() { return state.entries[state.index] || null; }
+
+function renderEntry() {
+  const e = currentEntry();
+  const n = state.entries.length;
+  const verified = state.entries.filter((x) => x.status === "verified").length;
+  $("progress").textContent = `— verified ${verified} / ${n} (${n - verified} pending)`;
+  if (!e) { $("msg").textContent = "no entries"; return; }
+  const url = `/api/baselines/${encodeURIComponent(state.set)}/photo/` +
+              encodeURIComponent(e.photo) + "?t=" + Date.now();
+  $("photo").src = url;
+  $("entryinfo").textContent =
+    `${state.index + 1} / ${n} · ${e.photo}` +
+    (e.tag ? ` · tag ${e.tag}` : "") +
+    ` · status ${e.status || "pending"}`;
+  $("refwant").textContent = "want:        " + JSON.stringify(e.want ?? "");
+  $("refread").textContent = "prior_read:  " + JSON.stringify(e.prior_read ?? "");
+  $("content").value = e.content ?? "";
+  renderChips();
+  $("pendingBtn").disabled = (e.status === "pending");
+  $("msg").textContent = "";
+}
+
+function renderChips() {
+  const e = currentEntry();
+  const content = $("content").value;
+  const prior = (e?.prior_read ?? "");
+  const width = Number(state.meta.module_count) || 12;
+  const bar = $("chips");
+  bar.innerHTML = "";
+  // Always one cell per module, so the display lines up with the flap
+  // positions in the photo above it — even while the field is empty.
+  for (let i = 0; i < width; i++) {
+    const el = document.createElement("span");
+    el.className = "chip";
+    const ch = content[i];
+    if (ch === undefined) {
+      el.classList.add("missing");
+      el.textContent = "\u00b7";
+    } else {
+      if (ch === " ") el.classList.add("space");
+      el.textContent = showCh(ch);
+      // mark positions that differ from the pre-fill once text is typed
+      if (prior[i] !== undefined && ch !== prior[i]) el.classList.add("changed");
+    }
+    bar.appendChild(el);
+  }
+  const badge = $("lenbadge");
+  badge.textContent = `${[...content].length} / ${width}`;
+  badge.className = "badge " + ([...content].length === width ? "ok" : "bad");
+}
+
+async function saveCurrent(advance) {
+  const e = currentEntry();
+  if (!e) return;
+  try {
+    const res = await post(`/api/baselines/${encodeURIComponent(state.set)}/entry`,
+      {photo: e.photo, content: $("content").value});
+    Object.assign(e, res.entry);
+    if (advance) advanceNext();
+    renderEntry();
+    renderList();
+    await loadSets();
+  } catch (err) { $("msg").textContent = "save failed: " + err.message; }
+}
+
+function advanceNext() {
+  const n = state.entries.length;
+  for (let step = 1; step <= n; step++) {
+    const i = (state.index + step) % n;
+    if (state.entries[i].status !== "verified") { state.index = i; return; }
+  }
+  if (state.index + 1 < n) state.index += 1;
+}
+
+function nav(delta) {
+  const n = state.entries.length;
+  if (!n) return;
+  state.index = Math.max(0, Math.min(n - 1, state.index + delta));
+  renderEntry();
+  renderList();
+}
+
+function nextPending() {
+  const n = state.entries.length;
+  for (let step = 1; step <= n; step++) {
+    const i = (state.index + step) % n;
+    if (state.entries[i].status !== "verified") { state.index = i; renderEntry(); renderList(); return; }
+  }
+  $("msg").textContent = "every entry is verified";
+}
+
+async function markPending() {
+  const e = currentEntry();
+  if (!e) return;
+  try {
+    const res = await post(`/api/baselines/${encodeURIComponent(state.set)}/entry`,
+      {photo: e.photo, status: "pending"});
+    Object.assign(e, res.entry);
+    renderEntry(); renderList(); await loadSets();
+  } catch (err) { $("msg").textContent = "mark pending failed: " + err.message; }
+}
+
+async function removeImage() {
+  const e = currentEntry();
+  if (!e) return;
+  if (!confirm(`Remove ${e.photo} from set "${state.set}"?\n\nThe copied image and its entry are deleted.`)) return;
+  try {
+    await post(`/api/baselines/${encodeURIComponent(state.set)}/remove-image`,
+      {photo: e.photo});
+    await openSet(state.set);
+    await loadSets();
+  } catch (err) { $("msg").textContent = "remove failed: " + err.message; }
+}
+
+function renderList() {
+  const filter = $("filter").value;
+  const box = $("entrylist");
+  box.innerHTML = "";
+  const table = document.createElement("table");
+  const rows = state.entries
+    .map((e, i) => ({e, i}))
+    .filter(({e}) => filter === "all" || (filter === "pending" ? e.status !== "verified" : e.status === "verified"));
+  for (const {e, i} of rows) {
+    const tr = document.createElement("tr");
+    tr.className = "entryrow" + (i === state.index ? " current" : "");
+    tr.innerHTML = `<td><span class="dot ${e.status === "verified" ? "verified" : ""}"></span>${i + 1}</td>
+      <td class="mono">${e.photo}</td>
+      <td class="mono">${JSON.stringify(e.content ?? "").slice(0, 22)}</td>
+      <td>${e.status || "pending"}</td>`;
+    tr.onclick = () => { state.index = i; renderEntry(); renderList(); };
+    table.appendChild(tr);
+  }
+  box.appendChild(table);
+  if (!rows.length) box.innerHTML = '<p class="hint">no entries match this filter</p>';
+}
+
+$("content").addEventListener("input", renderChips);
+$("content").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); saveCurrent(true); }
+  else if (ev.key === "Escape") { renderEntry(); }
+});
+
+loadSets();
+</script>
+</body>
+</html>

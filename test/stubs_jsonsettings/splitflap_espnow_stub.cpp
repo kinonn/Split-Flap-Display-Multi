@@ -20,6 +20,7 @@ WiFiStub WiFi;
 // Test counters: which dispatch branch ran, with what message.
 int g_distributeCalls = 0;
 std::string g_lastDistributed;
+bool g_lastDistributeCalib = true;
 int g_wiredDistributeCalls = 0;
 std::string g_lastWiredDistributed;
 int g_writeStringCalls = 0;
@@ -28,13 +29,16 @@ float g_lastWriteSpeed = 0.0f;
 
 void SplitFlapEspNow::distributeMessage(
     const String &message, bool centering, unsigned long scrollDelayMs,
-    int scrollRepeatCount
+    int scrollRepeatCount, bool calib
 ) {
     (void) centering;
     (void) scrollDelayMs;
     (void) scrollRepeatCount;
     g_distributeCalls++;
     g_lastDistributed = message.c_str();
+    // MQTT/scroll dispatches must never arm the calibration ack fence
+    // (kinonn-bot#42): only /api/calib/show sets this flag.
+    g_lastDistributeCalib = calib;
 }
 
 int SplitFlapEspNow::getTotalModuleCount() { return 0; }

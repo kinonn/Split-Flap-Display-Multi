@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calib Auto — Train CNN</title>
+<style>
+  :root { --bg:#14161a; --card:#1d2026; --card2:#23272e; --line:#2e333b;
+          --fg:#d8dce2; --dim:#8a919c; --accent:#4ea1ff; --good:#4ec98a;
+          --warn:#e0b04c; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1200px; margin:0 auto; padding:20px 18px 60px; }
+  h1 { font-size:19px; margin:0 0 2px; } h1 a { color:var(--dim); text-decoration:none; font-size:13px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
+  .cols { display:grid; grid-template-columns: 400px 1fr; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
+  input, select { width:100%; background:var(--card2); color:var(--fg); border:1px solid var(--line);
+                  border-radius:6px; padding:6px 8px; font:inherit; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  button { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f4e7a; border-color:#2f6ea8; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .msg { font-size:13px; color:var(--warn); margin-top:8px; min-height:18px; }
+  .setsel { display:flex; flex-direction:column; gap:4px; margin-top:4px; }
+  .setsel label { display:flex; gap:8px; align-items:center; margin:0; color:var(--fg); font-size:13px; }
+  .setsel input { width:auto; }
+  .setsel .none { color:var(--dim); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:4px 8px 4px 0; }
+  td { padding:4px 8px 4px 0; border-top:1px solid var(--line); }
+  #log { height:420px; overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace;
+         background:var(--card2); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .ev { white-space:pre-wrap; } .ev .t { color:var(--dim); margin-right:6px; }
+  .k-error { color:var(--bad); }
+  .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px;
+           background:var(--card2); border:1px solid var(--line); margin-right:6px; }
+  .meta { font-size:12px; color:var(--dim); } .meta b { color:var(--fg); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Train CNN <a href="/">← back</a></h1>
+  <div class="meta">Builds glyph caches from the golden set (verified entries only),
+    validates on a photo-disjoint split, then trains the deployment artifact.</div>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Golden data</h2>
+        <table><thead><tr><th>set</th><th>cells</th><th>photos</th><th>skipped</th></tr></thead>
+          <tbody id="caches"></tbody></table>
+        <div class="msg" id="cachesmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Models</h2>
+        <div id="models" class="meta">loading…</div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Train</h2>
+        <div class="row">
+          <div><label>Epochs</label><input id="epochs" type="number" min="1" max="200" value="30"></div>
+          <div><label>Seed</label><input id="seed" type="number" value="1"></div>
+          <div><label>Device</label><select id="device">
+            <option value="auto" selected>auto (CUDA &gt; MPS &gt; CPU)</option>
+            <option value="cuda">CUDA</option>
+            <option value="mps">MPS (Apple)</option>
+            <option value="cpu">CPU</option>
+          </select></div>
+        </div>
+        <label>Golden sets to train on</label>
+        <div class="setsel" id="setsel"></div>
+        <div class="meta" id="setsum" style="margin-top:6px"></div>
+        <div class="btns">
+          <button class="primary" id="trainBtn" onclick="startTrain()">Train</button>
+        </div>
+        <div class="msg" id="trainmsg"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2 style="margin-top:0">Progress <span class="meta" id="tstate"></span></h2>
+        <div id="chartCard" style="display:none;margin-bottom:10px">
+          <svg id="chart" viewBox="0 0 560 220" style="width:100%;height:auto;display:block"
+               role="img" aria-label="training loss and validation accuracy per epoch"></svg>
+          <div class="meta" id="chartLegend" style="margin-top:4px"></div>
+        </div>
+        <div id="log"></div>
+      </div>
+      <div class="card" id="resultCard" style="display:none">
+        <h2 style="margin-top:0">Validation result (photo-disjoint)</h2>
+        <div id="result"></div>
+      </div>
+      <div class="card">
+        <h2 style="margin-top:0">Training history</h2>
+        <table><thead><tr><th>when</th><th>sets trained on</th><th>cells</th><th>val acc</th><th>artifact</th></tr></thead>
+          <tbody id="history"></tbody></table>
+        <div class="msg" id="histmsg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function localTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value).replace("T", " ") : date.toLocaleString();
+}
+let lastEvent = 0, lastRunSeq = -1;
+let cacheCells = {};   // set name -> cached cells (from /api/models)
+let distMeta = null;   // current CNN meta for the distribution popup
+let distCharset = "";  // charset order for the distribution popup
+
+async function loadModels() {
+  try {
+    const m = await api("/api/models");
+    cacheCells = {};
+    (m.caches || []).forEach(c => { cacheCells[c.set] = c.cells || 0; });
+    $("caches").innerHTML = (m.caches || []).map(c =>
+      `<tr><td>${esc(c.set)}</td><td>${c.cells || 0}</td><td>${c.photos || 0}</td><td>${c.skipped || 0}</td></tr>`
+    ).join("") || `<tr><td colspan="4" style="color:var(--dim)">no caches yet — train to build them</td></tr>`;
+    const allSets = (m.caches || []).map(c => c.set);
+    const parts = [];
+    if (m.cnn) {
+      const meta = m.cnn.meta || {};
+      const trainedSets = meta.sets || [];
+      const subset = trainedSets.length && allSets.length && trainedSets.length < allSets.length;
+      parts.push(`<span class="badge">CNN</span> ${(meta.classes || []).length} classes, ${meta.cells || "?"} cells` +
+        (meta.metrics ? `, validation ${(meta.metrics.cnn_acc * 100).toFixed(1)}%` : "") +
+        (meta.device ? `, ${esc(meta.device)}` : "") +
+        `<div class="meta" style="margin-top:4px">${esc(localTime(meta.created || ""))} · trained ${esc(meta.trained || "?")} · sha ${m.cnn.sha256}</div>` +
+        `<div class="meta">trained on: <b>${esc(trainedSets.join(", ") || "?")}</b>` +
+        (subset ? ` <span style="color:var(--warn)">(subset of ${allSets.length} sets)</span>` : "") + `</div>` +
+        `<div class="meta" style="margin-top:4px"><a href="#" onclick="openDist(event);return false">character distribution</a> — per-class cells this model trained on</div>`);
+    } else parts.push(`<span class="badge">CNN</span> not trained`);
+    if (m.bank) {
+      const bmeta = m.bank.meta || {};
+      parts.push(`<span class="badge">bank</span> ${bmeta.cells || "?"} cells (fallback)` +
+        (bmeta.sets ? `<div class="meta">trained on: <b>${esc(bmeta.sets.join(", "))}</b></div>` : ""));
+    }
+    $("models").innerHTML = parts.join("<br>");
+    distMeta = (m.cnn && m.cnn.meta) || null;
+    distCharset = m.charset || "";
+    if ($("setsel").dataset.ready) updateSetSum();
+  } catch (e) { $("models").textContent = "models: " + e.message; }
+}
+
+async function loadSets() {
+  try {
+    const g = await api("/api/golden");
+    const sets = g.sets || [];
+    const prev = selectedSets();
+    const first = !$("setsel").dataset.ready;
+    $("setsel").dataset.ready = "1";
+    $("setsel").innerHTML = sets.map(s => {
+      const usable = s.stats.verified > 0;
+      const checked = usable && (first || prev.includes(s.name));
+      return `<label><input type="checkbox" value="${esc(s.name)}"${checked ? " checked" : ""}` +
+             `${usable ? "" : " disabled"}>` +
+             `${esc(s.name)} <span class="meta">— verified ${s.stats.verified}/${s.stats.total}</span>` +
+             (usable ? "" : ` <span class="none">(no verified entries)</span>`) + `</label>`;
+    }).join("") || `<span class="none">no golden sets yet — curate one on the Golden set page</span>`;
+    updateSetSum();
+  } catch (e) { $("setsel").innerHTML = `<span class="none">sets: ${esc(e.message)}</span>`; }
+}
+function selectedSets() {
+  return [...document.querySelectorAll("#setsel input:checked")].map(i => i.value);
+}
+function updateSetSum() {
+  const sel = selectedSets();
+  if (!sel.length) {
+    $("setsum").innerHTML = `<span style="color:var(--warn)">select at least one set to train on</span>`;
+    return;
+  }
+  const cells = sel.reduce((a, n) => a + (cacheCells[n] || 0), 0);
+  const per = sel.map(n => `${esc(n)} (${cacheCells[n] !== undefined ? cacheCells[n] : "?"})`).join(", ");
+  $("setsum").innerHTML = `will train on: <b>${per}</b> — ${sel.length} set(s), ${cells} cached cells`;
+}
+$("setsel").addEventListener("change", updateSetSum);
+
+function openDist(e) {
+  if (e) e.preventDefault();
+  renderDistModal();
+  $("distModal").style.display = "block";
+}
+function closeDist() {
+  $("distModal").style.display = "none";
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDist(); });
+
+function renderDistModal() {
+  // What the current model itself trained on: one row per model class in
+  // charset order. Models saved before per-class counts were recorded
+  // list their classes without numbers.
+  //
+  // Balance recommendation (uniform-target rule): under uniform sampling
+  // each class expects E = N/C cells with sd = sqrt(N·(1/C)·(1−1/C)).
+  // A class below E − 1.96·sd is significantly underrepresented at 95%
+  // confidence — not just sampling noise — and is flagged amber with the
+  // top-up needed to reach parity (+N). Uniform coverage is the right
+  // target here because this table guides data collection; the loss
+  // already compensates mild imbalance at train time.
+  const meta = distMeta;
+  if (!meta || !(meta.classes || []).length) {
+    $("distmodsum").textContent = "no model trained yet";
+    $("distmod").innerHTML = "";
+    return;
+  }
+  const order = [...(distCharset || "")].filter(ch => meta.classes.includes(ch))
+    .concat(meta.classes.filter(ch => !(distCharset || "").includes(ch)));
+  const mcounts = meta.class_counts || null;
+  const max = Math.max(1, ...order.map(ch => mcounts ? (mcounts[ch] || 0) : 1));
+  let total = 0, needTotal = 0;
+  const flagged = new Set();
+  let parity = 0, bound = 0;
+  if (mcounts) {
+    order.forEach(ch => { total += mcounts[ch] || 0; });
+    const c = order.length;
+    parity = total / c;
+    const sd = Math.sqrt(total * (1 / c) * (1 - 1 / c));
+    bound = Math.max(0, parity - 1.96 * sd);
+    order.forEach(ch => { if ((mcounts[ch] || 0) < bound) flagged.add(ch); });
+    flagged.forEach(ch => { needTotal += Math.ceil(parity - (mcounts[ch] || 0)); });
+  }
+  $("distmod").innerHTML = order.map(ch => {
+    const n = mcounts ? (mcounts[ch] || 0) : null;
+    const label = ch === " " ? "␣" : ch;
+    const bar = n == null ? "" :
+      `<div style="height:6px;background:var(--card2);border-radius:3px">` +
+      `<div style="height:100%;width:${(100 * n / max).toFixed(1)}%;background:var(--good);border-radius:3px"></div></div>`;
+    const need = (n != null && flagged.has(ch)) ? `+${Math.ceil(parity - n)}` : "—";
+    const style = flagged.has(ch) ? ` style="color:var(--warn)"` : "";
+    return `<tr${style}><td><code>${esc(label)}</code></td><td>${n == null ? "✓" : n}</td>` +
+      `<td>${need}</td><td>${bar}</td></tr>`;
+  }).join("");
+  const rec = !mcounts ? ""
+    : flagged.size === 0
+      ? ` · <span style="color:var(--good)">balanced — every class within the 95% uniformity bound (parity ≈ ${parity.toFixed(0)})</span>`
+      : ` · <span style="color:var(--warn)"><b>${flagged.size}</b> underrepresented ` +
+        `(below ${bound.toFixed(0)} at parity ≈ ${parity.toFixed(0)}) — collect ≈ <b>+${needTotal}</b> samples</span>`;
+  $("distmodsum").innerHTML =
+    (mcounts ? `<b>${total}</b> cells across <b>${order.length}</b> classes` : `<b>${order.length}</b> classes`) +
+    ` · trained on: <b>${esc((meta.sets || []).join(", ") || "?")}</b>` +
+    (meta.created ? ` · ${esc(localTime(meta.created))}` : "") + rec +
+    (mcounts ? "" : ` · <span style="color:var(--warn)">per-class counts not recorded — retrain to add them</span>`);
+}
+
+async function loadHistory() {
+  try {
+    const r = await api("/api/train/runs");
+    $("history").innerHTML = (r.runs || []).map(x =>
+      `<tr><td>${esc(localTime(x.finished || "?"))}</td>` +
+      `<td>${esc((x.sets || []).join(", ") || "?")}</td>` +
+      `<td>${x.cells == null ? "—" : x.cells}</td>` +
+      `<td>${x.val_acc == null ? "—" : (x.val_acc * 100).toFixed(1) + "%"}` +
+      (x.row_exact != null && x.rows ? ` (${x.row_exact}/${x.rows})` : "") + `</td>` +
+      `<td>${esc(x.model || (x.error ? "failed" : "?"))}</td></tr>`
+    ).join("") || `<tr><td colspan="5" style="color:var(--dim)">no training runs yet</td></tr>`;
+  } catch (e) { $("histmsg").textContent = "history: " + e.message; }
+}
+
+async function startTrain() {
+  const sets = selectedSets();
+  if (!$("setsel").querySelector("input")) {
+    $("trainmsg").textContent = "no golden sets — curate one first";
+    return;
+  }
+  if (!sets.length) {
+    $("trainmsg").textContent = "select at least one golden set";
+    return;
+  }
+  const body = {epochs: Number($("epochs").value) || 30,
+                seed: Number($("seed").value) || 1, sets,
+                device: $("device").value || "auto"};
+  try {
+    await api("/api/train/start", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+    lastEvent = 0; $("log").innerHTML = "";
+    $("trainmsg").textContent = "training on " + sets.join(", ") + "…";
+    $("resultCard").style.display = "none";
+  } catch (e) { $("trainmsg").textContent = "start failed: " + e.message; }
+}
+
+function renderEvent(e) {
+  const div = document.createElement("div");
+  div.className = "ev k-" + (e.kind || "log");
+  div.innerHTML = `<span class="t">${e.t || ""}</span>` + esc(e.text || "");
+  $("log").appendChild(div);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function renderChart(history) {
+  const card = $("chartCard");
+  if (!history || !history.length) { card.style.display = "none"; return; }
+  card.style.display = "block";
+  const W = 560, H = 220, L = 46, R = 46, T = 10, B = 26;
+  const iw = W - L - R, ih = H - T - B;
+  const losses = history.map(h => h.loss).filter(v => v != null);
+  const accs = history.map(h => h.val_acc).filter(v => v != null);
+  const lmax = Math.max(...losses, 0.001), lmin = Math.min(...losses, 0);
+  const amax = Math.max(...accs, 0.5), amin = Math.min(...accs, 0);
+  const n = history.length;
+  const X = (i) => L + (n === 1 ? iw / 2 : iw * i / (n - 1));
+  const Yl = (v) => T + ih * (1 - (v - lmin) / Math.max(lmax - lmin, 1e-9));
+  const Ya = (v) => T + ih * (1 - (v - amin) / Math.max(amax - amin, 1e-9));
+  const line = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const lossPts = history.map((h, i) => [X(i), Yl(h.loss)]);
+  const accPts = history.map((h, i) => [X(i), Ya(h.val_acc)]).filter((_, i) => history[i].val_acc != null);
+  // x ticks: first, middle, last epoch
+  const ticks = [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
+  let svg = `<rect x="0" y="0" width="${W}" height="${H}" fill="var(--card2)" rx="8"/>`;
+  for (const i of ticks) {
+    svg += `<text x="${X(i)}" y="${H - 8}" fill="var(--dim)" font-size="10" text-anchor="middle">ep ${history[i].epoch}</text>`;
+  }
+  svg += `<text x="8" y="${T + 10}" fill="var(--accent)" font-size="10">loss ${losses[losses.length - 1].toFixed(3)}</text>`;
+  svg += `<text x="8" y="${T + 22}" fill="var(--dim)" font-size="10">[${lmin.toFixed(2)}–${lmax.toFixed(2)}]</text>`;
+  if (accs.length) {
+    svg += `<text x="${W - 8}" y="${T + 10}" fill="var(--good)" font-size="10" text-anchor="end">val ${(accs[accs.length - 1] * 100).toFixed(1)}%</text>`;
+    svg += `<text x="${W - 8}" y="${T + 22}" fill="var(--dim)" font-size="10" text-anchor="end">[${(amin * 100).toFixed(0)}–${(amax * 100).toFixed(0)}%]</text>`;
+  }
+  svg += `<path d="${line(lossPts)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  if (accPts.length > 1)
+    svg += `<path d="${line(accPts)}" fill="none" stroke="var(--good)" stroke-width="2" stroke-dasharray="5 3"/>`;
+  else if (accPts.length === 1)
+    svg += `<circle cx="${accPts[0][0]}" cy="${accPts[0][1]}" r="3" fill="var(--good)"/>`;
+  $("chart").innerHTML = svg;
+  $("chartLegend").innerHTML =
+    `<span style="color:var(--accent)">— train loss</span> &nbsp;` +
+    `<span style="color:var(--good)">- - val accuracy</span> &nbsp;· ${n} epoch(s)`;
+}
+function renderResult(res) {
+  if (!res || !res.metrics) return;
+  const m = res.metrics;
+  $("resultCard").style.display = "block";
+  const weak = Object.entries(m.per_class || {}).filter(([c, v]) => v.recall < 1)
+    .map(([c, v]) => `${c === " " ? "␣" : c} ${(v.recall * 100).toFixed(0)}%`).join(", ");
+  const conf = (m.confusions || []).map(c => `${c.label}→${c.pred} ×${c.count}`).join(", ");
+  $("result").innerHTML =
+    `<div class="meta">per-cell <b>${(m.cnn_acc * 100).toFixed(1)}%</b> over ${m.test_cells} cells / ${m.test_photos} photos</div>` +
+    `<div class="meta">rows exact <b>${m.row_exact}/${m.rows}</b> · avg <b>${m.row_mismatch_avg}</b> mismatches/row</div>` +
+    (weak ? `<div class="meta" style="margin-top:4px">below 100%: ${esc(weak)}</div>` : "") +
+    (conf ? `<div class="meta">confusions: ${esc(conf)}</div>` : "") +
+    `<div class="meta" style="margin-top:6px">artifact: ${esc(res.model || "cnn.pt")} · ${res.cells} cells from ${esc((res.sets || []).join(", "))}` +
+    (res.device ? ` · ${esc(res.device)}` : "") + `</div>`;
+}
+
+async function poll() {
+  try {
+    const st = await api("/api/train/state");
+    $("tstate").textContent = st.status;
+    $("trainBtn").disabled = st.status === "running";
+    if (st.run_seq !== lastRunSeq) {
+      lastRunSeq = st.run_seq; lastEvent = 0; $("log").innerHTML = "";
+      renderChart(st.history);
+    }
+    const ev = await api(`/api/train/events?offset=${lastEvent}`);
+    for (const e of ev.events) renderEvent(e);
+    lastEvent = ev.offset + ev.events.length;
+    if (st.history && st.history.length) renderChart(st.history);
+    if (st.result && st.status === "done") { renderResult(st.result); loadModels(); loadHistory(); }
+  } catch (e) {}
+  setTimeout(poll, 1200);
+}
+loadModels(); loadSets(); loadHistory(); poll();
+</script>
+<div id="distModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50"
+     onclick="if(event.target===this)closeDist()">
+  <div style="background:var(--card);border:1px solid var(--line);border-radius:10px;max-width:560px;max-height:80vh;overflow:auto;margin:6vh auto;padding:14px 16px">
+    <h2 style="margin-top:0">Model character distribution
+      <a href="#" onclick="closeDist();return false" style="float:right;color:var(--dim);text-decoration:none">✕</a></h2>
+    <div class="meta" id="distmodsum"></div>
+    <table style="margin-top:8px"><thead><tr><th>char</th><th>cells</th><th>top-up</th><th style="width:45%"></th></tr></thead>
+      <tbody id="distmod"></tbody></table>
+  </div>
+</div>
+</body>
+</html>

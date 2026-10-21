@@ -1,0 +1,97 @@
+[project]
+name = "splitflap-calib-auto"
+version = "0.1.0"
+description = "Unified standalone auto-calibration tool: CNN or VLM recognizer, golden-set curation, CNN training, VLM benchmarking"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.26",
+    "requests>=2.31",
+    "torch>=2.2",
+]
+
+[project.scripts]
+calib-auto-server = "calib_auto.server:main"
+
+# PyTorch CUDA builds live on a dedicated index, not PyPI (PyPI only
+# ships CPU wheels for Windows/macOS). Route torch to the CUDA index on
+# Linux/Windows so `uv sync` installs GPU-enabled builds; macOS falls
+# back to PyPI (no CUDA builds published for it). CPU-only machines
+# still work — CUDA torch runs fine on CPU, it is just a bigger
+# download. See https://docs.astral.sh/uv/guides/integration/pytorch/
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.16.8,<0.17",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+# Floor declared in [project].requires-python.
+target-version = "py310"
+line-length = 88
+# Data roots (golden photos, glyph caches, run artifacts) hold no python.
+extend-exclude = ["golden", "training", "runs"]
+
+[tool.ruff.lint]
+# An EXPLICIT selection rather than ruff's defaults: ruff's default set has
+# changed between releases, and CI must not start failing just because a new
+# ruff shipped new defaults. Add rules here deliberately.
+select = [
+    "E4", "E7", "E9",  # pycodestyle errors (ruff's classic default subset)
+    "F",               # pyflakes
+    "I",               # isort
+    "UP",              # pyupgrade: modern syntax
+    "C4",              # flake8-comprehensions
+    "ISC",             # implicit string concatenation
+    "PIE",             # flake8-pie
+    "PYI",             # flake8-pyi
+    "RUF",             # ruff-specific
+    # Narrow picks from families whose full sets are mostly style churn for
+    # this codebase (selecting `E`/`B`/`SIM`/`S`/`PL` wholesale adds ~300
+    # unrelated findings: PLR2004 magic values, PLR09xx argument/branch
+    # counts, E501 line length, B904 raise-from, B905 zip-strict, SIM105/
+    # SIM108, S10x bandit). Widen deliberately, fixing the code as you go.
+    "B018",            # useless expression (a bare attribute touch)
+    "SIM102",          # collapsible if
+    "SIM113",          # enumerate() over a manual counter
+    "SIM115",          # context manager for open()
+    "PLR0402",         # `import x.y as y` -> `from x import y`
+    "PLR1730",         # if/min-max chains
+]
+ignore = [
+    # PYI034 wants `__enter__` annotated `-> Self`, but `typing.Self` is 3.11+
+    # and this project's floor is 3.10 (adding typing_extensions for one
+    # annotation is not worth it). Camera.__enter__ returns the concrete
+    # class, which is what every caller here uses.
+    "PYI034",
+]
+# NOTE: BLE001 (blind-except) and S110 (try-except-pass) are deliberately NOT
+# selected. Broad excepts are load-bearing here: a USB camera driver or
+# OpenCV can raise arbitrary exceptions, and a run/job guard must turn that
+# into a UI status instead of dying mid-run (see the harness `_run` blocks
+# and Camera._try_set/_measure), while best-effort cleanup must never mask
+# the original failure.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["calib_auto"]
